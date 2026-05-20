@@ -1,0 +1,16 @@
+[package]
+name = "rune"
+version = "0.0.1"
+edition = "2024"
+description = "Rune: a small compiled language"
+license = "MIT"
+
+[lib]
+name = "rune"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rune"
+path = "src/main.rs"
+
+[dependencies]

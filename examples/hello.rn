@@ -1,0 +1,20 @@
+// hello.rn — a small Rune snippet for poking the lexer.
+// Not runnable yet: only the lexer is wired up.
+
+fn factorial(n: i64) -> i64 {
+    if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+fn main() {
+    let greeting = "Hello, Rune!";
+    let answer = 42;
+    let pi = 3.14;
+    let mask = 0xff_00 | 0b1010;
+
+    let primes = [2, 3, 5, 7, 11, 13, 17, 19];
+    for p in primes {
+        if p > 10 {
+            // big prime
+        }
+    }
+}
