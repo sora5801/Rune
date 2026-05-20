@@ -162,6 +162,24 @@ fn unary_minus_and_not() {
 }
 
 #[test]
+fn postfix_binds_tighter_than_unary() {
+    // !f(x) is !(f(x)), not (!f)(x).
+    let e = parse_expr_in_block("!f(x)");
+    let Expr::Unary { op: UnOp::Not, expr, .. } = e else { panic!() };
+    assert!(matches!(*expr, Expr::Call { .. }));
+
+    // -x[0] is -(x[0]), not (-x)[0].
+    let e = parse_expr_in_block("-x[0]");
+    let Expr::Unary { op: UnOp::Neg, expr, .. } = e else { panic!() };
+    assert!(matches!(*expr, Expr::Index { .. }));
+
+    // !a.b is !(a.b).
+    let e = parse_expr_in_block("!a.b");
+    let Expr::Unary { op: UnOp::Not, expr, .. } = e else { panic!() };
+    assert!(matches!(*expr, Expr::Field { .. }));
+}
+
+#[test]
 fn cast_expression() {
     let e = parse_expr_in_block("x as i64");
     assert!(matches!(e, Expr::Cast { .. }));

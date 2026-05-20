@@ -6,10 +6,17 @@
 //! lowerer can keep going.
 
 use crate::ty::{FloatTy, IntTy, SymbolId, Ty};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct HirModule {
     pub items: Vec<HirItem>,
+    /// Per-struct list of (offset, ty) for fields whose type is ARC-
+    /// managed (Vec, Str, or another struct with ARC fields). Only
+    /// structs that contain at least one ARC-managed field appear.
+    /// Codegen uses this to emit per-field retain on construction
+    /// and per-field release on scope drop.
+    pub struct_arc_fields: HashMap<SymbolId, Vec<(u32, Ty)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +80,10 @@ pub enum HirExprKind {
     /// the i64 discriminant at runtime.
     EnumVariant { discriminant: u32 },
     Unary { op: HirUnOp, expr: Box<HirExpr> },
+    /// `expr as Ty` — numeric / char / bool conversion. The `from` type
+    /// is the expression's HirExpr.ty; the destination is the enclosing
+    /// HirExpr.ty.
+    Cast { expr: Box<HirExpr> },
     Binary { op: HirBinOp, lhs: Box<HirExpr>, rhs: Box<HirExpr> },
     /// Short-circuit logical operators — kept separate from `Binary`
     /// because codegen needs branch-based evaluation.
@@ -176,6 +187,8 @@ pub enum HirLit {
     Float(f64, FloatTy),
     Bool(bool),
     Str(String),
+    /// Single Unicode scalar; codegen as iconst.i32 of the codepoint.
+    Char(char),
     Unit,
 }
 

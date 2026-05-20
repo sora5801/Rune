@@ -151,10 +151,15 @@ rune: linked with clang -> primes.exe
     "owned ARC locals" per scope and emits release calls at scope
     exit. Returning a local of ARC type retains first so the caller
     gets +1. String literals use a `rc=-1` sentinel so the runtime
-    helpers no-op on them. Non-atomic (single-threaded only); ARC-on-
-    copy and struct fields are still to come.
+    helpers no-op on them. **ARC-on-copy** (let y = x retains) and
+    **ARC for struct fields** (Vec / str fields participate, retain
+    on construct, release on drop) both work. Non-atomic (single-
+    threaded only); cycle-breaking weak refs are blocked on generics
+    (need `Option<T>`).
+  - **`as` casts** between numeric / char / bool with sign-aware
+    extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 128 JIT codegen tests + 34 AOT tests.
+- 146 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -172,20 +177,18 @@ rune: linked with clang -> primes.exe
   `-o <path>` overrides.
 
 **Not yet codegen'd:** `?` (try), payload-bearing enum variants and
-their destructuring, range patterns (`1..=10 =>`), returning/passing
-arrays across function boundaries, generics. All emit `Unsupported(msg)`
-at lowering with a clear error if reached.
+their destructuring, returning structs by value, returning/passing
+arrays across function boundaries, generics. All emit
+`Unsupported(msg)` at lowering with a clear error if reached.
 
 ## Roadmap
 
-1. ARC-on-copy (`let y = x` retains) + ARC for struct fields
-2. Char literal codegen + `as` cast codegen + parser precedence fix
-   for `!f(x)`
+1. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
+2. `Weak<T>` for cycle breaking (blocked on generics + `Option<T>`)
 3. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
-4. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
-5. `weak` references for cycle breaking
-6. Traits / interfaces
-7. Self-hosted bootstrap (long-term)
+4. Returning structs by value
+5. Traits / interfaces
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

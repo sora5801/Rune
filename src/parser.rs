@@ -571,12 +571,25 @@ impl Parser {
         };
         if let Some(op) = op {
             self.bump();
-            let expr = self.parse_unary()?;
-            let end = expr.span().end;
-            Ok(Expr::Unary { op, expr: Box::new(expr), span: Span::new(span.start, end) })
+            let inner = self.parse_unary()?;
+            // Postfix binds tighter than unary: `!f(x)` is `!(f(x))`, not
+            // `(!f)(x)`; `-x[0]` is `-(x[0])`; `!a.b` is `!(a.b)`. Apply
+            // postfix to the inner expression before wrapping in the
+            // unary operator. The outer postfix loop in parse_expr_bp
+            // sees no postfix tokens left, so this is the only site.
+            let inner = self.parse_postfix_chain(inner)?;
+            let end = inner.span().end;
+            Ok(Expr::Unary { op, expr: Box::new(inner), span: Span::new(span.start, end) })
         } else {
             self.parse_primary()
         }
+    }
+
+    fn parse_postfix_chain(&mut self, mut lhs: Expr) -> ParseResult<Expr> {
+        while self.is_postfix_op() {
+            lhs = self.parse_postfix(lhs)?;
+        }
+        Ok(lhs)
     }
 
     fn is_postfix_op(&self) -> bool {

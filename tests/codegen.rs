@@ -1347,6 +1347,115 @@ fn arc_explicit_return_releases_locals() {
 }
 
 #[test]
+fn arc_let_copy_retains_then_both_dropped() {
+    // `let y = x` between two Vecs retains. After the let, both x and
+    // y hold one ref each. At scope exit, both release; the underlying
+    // vec dealloc's exactly once.
+    let src = r#"
+        fn main() -> i64 {
+            let x = vec_new();
+            x.push(7);
+            let y = x;
+            y.get(0) + x.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 14);
+}
+
+#[test]
+fn arc_assign_releases_old_retains_new() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut s = "hello" + "";
+            s = "world" + "!";
+            s.len()
+        }
+    "#;
+    // After assign, old "hello" is released; new "world!" replaces it.
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn arc_compound_assign_str_concat() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut s = "x" + "";
+            s += "y";
+            s += "z";
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn arc_assign_self_no_crash() {
+    // `s = s` retains once, then releases once → net zero, no UAF.
+    let src = r#"
+        fn main() -> i64 {
+            let mut s = "abc" + "def";
+            s = s;
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn arc_struct_with_vec_field_drops_at_scope_exit() {
+    // Struct with an owned Vec field; the field is dealloc'd when
+    // the struct binding goes out of scope. 100k iterations confirm
+    // steady reclamation.
+    let src = r#"
+        struct Holder { v: Vec, n: i64 }
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let v = vec_new();
+                v.push(i);
+                let h = Holder { v: v, n: 1 };
+                i = i + h.n;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
+}
+
+#[test]
+fn arc_struct_with_str_field_returns_via_local() {
+    let src = r#"
+        struct Pair { a: str, b: str }
+        fn main() -> i64 {
+            let s1 = "hello" + "";
+            let s2 = "world" + "!";
+            let p = Pair { a: s1, b: s2 };
+            p.a.len() + p.b.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 11);
+}
+
+#[test]
+fn arc_struct_field_assign_releases_old() {
+    // Mutating an ARC field releases the old value before storing
+    // the new one. With 100k iterations a leak would balloon RSS.
+    let src = r#"
+        struct Holder { v: Vec }
+        fn main() -> i64 {
+            let mut i = 0;
+            let mut h = Holder { v: vec_new() };
+            while i < 100000 {
+                h.v = vec_new();
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
+}
+
+#[test]
 fn arc_str_literal_no_op_release() {
     // String literals have rc = -1 sentinel; release is a no-op.
     // Iterating 100k times exercises the sentinel path without crash.
@@ -1770,5 +1879,148 @@ fn range_pattern_with_guard() {
     "#;
     // 1 + 100 + 1 + 0 = 102
     assert_eq!(run_main(src), 102);
+}
+
+// ---- char literal codegen ----
+
+#[test]
+fn char_literal_value() {
+    let src = r#"
+        fn main() -> i64 {
+            let c = 'A';
+            c as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 'A' as i64);
+}
+
+#[test]
+fn char_literal_match() {
+    let src = r#"
+        fn main() -> i64 {
+            let c = 'A';
+            match c {
+                'A' => 65,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 65);
+}
+
+// ---- `as` cast codegen ----
+
+#[test]
+fn cast_i32_to_i64_sign_extends() {
+    let src = r#"
+        fn main() -> i64 {
+            let x: i32 = -1 as i32;
+            x as i64
+        }
+    "#;
+    assert_eq!(run_main(src), -1);
+}
+
+#[test]
+fn cast_i64_to_i32_truncates() {
+    let src = r#"
+        fn main() -> i64 {
+            let x: i64 = 0xff_ff_ff_ff_00;
+            let y: i32 = x as i32;
+            y as i64
+        }
+    "#;
+    // Truncation drops the high byte and sign-extends back: 0xffffff00 = -256
+    assert_eq!(run_main(src), -256);
+}
+
+#[test]
+fn cast_u32_to_i64_zero_extends() {
+    let src = r#"
+        fn main() -> i64 {
+            let x: u32 = 4000000000 as u32;
+            x as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 4_000_000_000);
+}
+
+#[test]
+fn cast_i64_to_f64_and_back() {
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = 42;
+            let f: f64 = n as f64;
+            (f + 0.5) as i64
+        }
+    "#;
+    // 42.0 + 0.5 = 42.5 → truncate-to-int gives 42
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn cast_f32_to_f64_promotes() {
+    let src = r#"
+        fn main() -> i64 {
+            let a: f32 = 1.5 as f32;
+            let b: f64 = a as f64;
+            b as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn cast_char_to_i64() {
+    let src = r#"
+        fn main() -> i64 {
+            'Z' as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 'Z' as i64);
+}
+
+#[test]
+fn cast_bool_to_i64() {
+    let src = r#"
+        fn main() -> i64 {
+            (true as i64) + (false as i64)
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+
+#[test]
+fn char_passed_as_function_arg() {
+    let src = r#"
+        fn classify(c: char) -> i64 {
+            match c {
+                'a'..='z' => 1,
+                'A'..='Z' => 2,
+                '0'..='9' => 3,
+                _ => 0,
+            }
+        }
+        fn main() -> i64 {
+            classify('a') + classify('m') + classify('z')
+                + classify('A') + classify('Z')
+                + classify('5')
+                + classify(' ')
+        }
+    "#;
+    // 1+1+1+2+2+3+0 = 10
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn char_equality() {
+    let src = r#"
+        fn main() -> i64 {
+            let c = 'x';
+            if c == 'x' { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
 }
 

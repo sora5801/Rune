@@ -46,6 +46,10 @@ pub struct Codegen<M: Module> {
     builtin_funcs: HashMap<String, FuncId>,
     /// Monotonic counter for naming unique string-literal data symbols.
     next_str_id: u32,
+    /// Per-struct ARC-managed fields (offset, ty). Populated by
+    /// `compile_module` from the HirModule. Used by FnCodegen to emit
+    /// per-field retain on struct construction / release on drop.
+    struct_arc_fields: HashMap<SymbolId, Vec<(u32, Ty)>>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -369,6 +373,9 @@ extern "C" fn rune_runtime_str_concat(a: *const RuneStr, b: *const RuneStr) -> *
 
 impl<M: Module> Codegen<M> {
     pub fn compile_module(&mut self, hir: &HirModule) -> Result<(), CodegenError> {
+        // Capture the struct-ARC-field map up front so each FnCodegen can
+        // reference it by `&'a HashMap<...>`.
+        self.struct_arc_fields = hir.struct_arc_fields.clone();
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
             let HirItem::Fn(f) = item;
@@ -423,6 +430,7 @@ impl<M: Module> Codegen<M> {
             sym_to_func: &self.sym_to_func,
             builtin_funcs: &mut self.builtin_funcs,
             next_str_id: &mut self.next_str_id,
+            struct_arc_fields: &self.struct_arc_fields,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -514,6 +522,7 @@ impl Codegen<JITModule> {
             sym_to_sig: HashMap::new(),
             builtin_funcs: HashMap::new(),
             next_str_id: 0,
+            struct_arc_fields: HashMap::new(),
         })
     }
 
@@ -562,6 +571,7 @@ impl Codegen<ObjectModule> {
             sym_to_sig: HashMap::new(),
             builtin_funcs: HashMap::new(),
             next_str_id: 0,
+            struct_arc_fields: HashMap::new(),
         })
     }
 
@@ -631,6 +641,7 @@ struct FnCodegen<'a, M: Module> {
     sym_to_func: &'a HashMap<SymbolId, FuncId>,
     builtin_funcs: &'a mut HashMap<String, FuncId>,
     next_str_id: &'a mut u32,
+    struct_arc_fields: &'a HashMap<SymbolId, Vec<(u32, Ty)>>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -672,7 +683,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             if i + 1 == b.stmts.len() {
                 if let HirStmt::Expr(e, false) = s {
                     if let HirExprKind::Local(_) = &e.kind {
-                        if is_arc_type(&e.ty) {
+                        if is_arc_type(&e.ty, self.struct_arc_fields) {
                             tail_escapes_local_arc_ty = Some(e.ty.clone());
                         }
                     }
@@ -715,6 +726,27 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
+        // Struct values dispatch to per-field retain/release. `value` is
+        // the base address of the struct's storage; each ARC field gets
+        // loaded at its offset and forwarded.
+        if let Ty::Struct(sym) = ty {
+            let fields: Vec<(u32, Ty)> = self
+                .struct_arc_fields
+                .get(sym)
+                .cloned()
+                .unwrap_or_default();
+            for (offset, field_ty) in fields {
+                let fcty = cranelift_type(&field_ty)?;
+                let field_val = self.builder.ins().load(
+                    fcty,
+                    MemFlags::new(),
+                    value,
+                    offset as i32,
+                );
+                self.emit_arc_call(action, &field_ty, field_val)?;
+            }
+            return Ok(());
+        }
         let helper = arc_helper_name(action, ty)?;
         let func_id = self.ensure_runtime_func(helper)?;
         let local_func = self
@@ -735,16 +767,17 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     let v = self
                         .compile_expr(init)?
                         .ok_or_else(|| CodegenError("let initializer produced no value".into()))?;
-                    self.builder.def_var(var, v);
-                    // Register this local as ARC-owning iff the init is
-                    // a fresh +1 producer (anything but reading another
-                    // local — copies between ARC locals are not tracked
-                    // in v0.x; see session 018 deep dive).
-                    if is_arc_type(&l.ty)
-                        && !matches!(init.kind, HirExprKind::Local(_))
-                    {
+                    // ARC-on-copy: a let from a borrowed Local read retains
+                    // so the new binding owns +1. Fresh +1 producers (Call,
+                    // Lit, Concat, etc.) need no retain — they already
+                    // carry the +1.
+                    if is_arc_type(&l.ty, self.struct_arc_fields) {
+                        if let HirExprKind::Local(_) = &init.kind {
+                            self.emit_arc_call("retain", &l.ty, v)?;
+                        }
                         owns_arc = true;
                     }
+                    self.builder.def_var(var, v);
                 } else {
                     let z = self.builder.ins().iconst(cty, 0);
                     self.builder.def_var(var, z);
@@ -785,6 +818,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 Ok(Some(v))
             }
             HirExprKind::Unary { op, expr } => self.compile_unary(*op, expr, &e.ty),
+            HirExprKind::Cast { expr } => self.compile_cast(expr, &e.ty),
             HirExprKind::Binary { op, lhs, rhs } => self.compile_binary(*op, lhs, rhs, &e.ty),
             HirExprKind::Logical { op, lhs, rhs } => self.compile_logical(*op, lhs, rhs),
             HirExprKind::Assign { lhs, rhs } => {
@@ -795,6 +829,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     .var_map
                     .get(lhs)
                     .ok_or_else(|| CodegenError("assignment to unknown local".into()))?;
+                // ARC swap: retain rhs if it's a borrowed Local read, then
+                // release the old value held in the lhs binding, then store.
+                if is_arc_type(&rhs.ty, self.struct_arc_fields) {
+                    if let HirExprKind::Local(_) = &rhs.kind {
+                        self.emit_arc_call("retain", &rhs.ty, v)?;
+                    }
+                    let old = self.builder.use_var(var);
+                    self.emit_arc_call("release", &rhs.ty, old)?;
+                }
                 self.builder.def_var(var, v);
                 Ok(None)
             }
@@ -811,6 +854,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // is on the variable's type (which equals rhs.ty after the
                 // type checker's compatibility check).
                 let new_val = self.compile_binop_value(*op, cur, r, &rhs.ty)?;
+                // For ARC types (str += str), binop produces a fresh +1
+                // (concat allocates). Release the old value before storing.
+                if is_arc_type(&rhs.ty, self.struct_arc_fields) {
+                    self.emit_arc_call("release", &rhs.ty, cur)?;
+                }
                 self.builder.def_var(var, new_val);
                 Ok(None)
             }
@@ -881,7 +929,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     // ARC type, retain it so the caller receives +1 after
                     // we release all locals below.
                     if let HirExprKind::Local(_) = &v.kind {
-                        if is_arc_type(&v.ty) {
+                        if is_arc_type(&v.ty, self.struct_arc_fields) {
                             self.emit_arc_call("retain", &v.ty, val)?;
                         }
                     }
@@ -911,6 +959,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirLit::Float(v, FloatTy::F32) => self.builder.ins().f32const(*v as f32),
             HirLit::Float(v, FloatTy::F64) => self.builder.ins().f64const(*v),
             HirLit::Bool(b) => self.builder.ins().iconst(types::I8, if *b { 1 } else { 0 }),
+            HirLit::Char(c) => self.builder.ins().iconst(types::I32, *c as i64),
             HirLit::Str(text) => return self.compile_str_literal(text),
             HirLit::Unit => return Ok(None),
         };
@@ -956,6 +1005,96 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         self.builder.ins().stack_store(sentinel, slot, 16);
 
         Ok(Some(self.builder.ins().stack_addr(types::I64, slot, 0)))
+    }
+
+    fn compile_cast(
+        &mut self,
+        expr: &HirExpr,
+        dest_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let src_ty = expr.ty.clone();
+        let v = self
+            .compile_expr(expr)?
+            .ok_or_else(|| CodegenError("cast operand produced no value".into()))?;
+        if src_ty == *dest_ty {
+            return Ok(Some(v));
+        }
+        let dest_cty = cranelift_type(dest_ty)?;
+        let src_cty = cranelift_type(&src_ty)?;
+        let src_is_signed_int = matches!(
+            src_ty,
+            Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::ISize)
+        );
+        let src_is_int = matches!(src_ty, Ty::Int(_));
+        let src_is_bool = matches!(src_ty, Ty::Bool);
+        let src_is_char = matches!(src_ty, Ty::Char);
+        let src_is_float = matches!(src_ty, Ty::Float(_));
+        let dest_is_signed_int = matches!(
+            dest_ty,
+            Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::ISize)
+        );
+        let dest_is_int = matches!(dest_ty, Ty::Int(_));
+        let dest_is_bool = matches!(dest_ty, Ty::Bool);
+        let dest_is_char = matches!(dest_ty, Ty::Char);
+        let dest_is_float = matches!(dest_ty, Ty::Float(_));
+        let src_bits = src_cty.bits();
+        let dest_bits = dest_cty.bits();
+
+        let result = if (src_is_int || src_is_bool || src_is_char)
+            && (dest_is_int || dest_is_char)
+        {
+            // Integer-shaped → integer-shaped: extend or truncate.
+            if dest_bits == src_bits {
+                v
+            } else if dest_bits > src_bits {
+                if src_is_signed_int {
+                    self.builder.ins().sextend(dest_cty, v)
+                } else {
+                    self.builder.ins().uextend(dest_cty, v)
+                }
+            } else {
+                self.builder.ins().ireduce(dest_cty, v)
+            }
+        } else if (src_is_int || src_is_char) && dest_is_bool {
+            // Int/char → bool: zero is false, anything else is true. Emit
+            // `(v != 0) as i8`. icmp result is one bit but Cranelift
+            // returns it as i8 already.
+            let zero = self.builder.ins().iconst(src_cty, 0);
+            self.builder.ins().icmp(IntCC::NotEqual, v, zero)
+        } else if src_is_bool && dest_is_float {
+            // bool → float via int.
+            let as_i32 = self.builder.ins().uextend(types::I32, v);
+            self.builder.ins().fcvt_from_uint(dest_cty, as_i32)
+        } else if src_is_int && dest_is_float {
+            if src_is_signed_int {
+                self.builder.ins().fcvt_from_sint(dest_cty, v)
+            } else {
+                self.builder.ins().fcvt_from_uint(dest_cty, v)
+            }
+        } else if src_is_float && dest_is_int {
+            // Saturating to match wrap-free semantics matching most
+            // languages' "as" / static_cast on out-of-range floats.
+            if dest_is_signed_int {
+                self.builder.ins().fcvt_to_sint_sat(dest_cty, v)
+            } else {
+                self.builder.ins().fcvt_to_uint_sat(dest_cty, v)
+            }
+        } else if src_is_float && dest_is_float {
+            if dest_bits > src_bits {
+                self.builder.ins().fpromote(dest_cty, v)
+            } else if dest_bits < src_bits {
+                self.builder.ins().fdemote(dest_cty, v)
+            } else {
+                v
+            }
+        } else {
+            return Err(CodegenError(format!(
+                "no `as` codegen for `{}` -> `{}`",
+                src_ty.display(),
+                dest_ty.display()
+            )));
+        };
+        Ok(Some(result))
     }
 
     fn compile_unary(
@@ -1220,6 +1359,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             let v = self
                 .compile_expr(value)?
                 .ok_or_else(|| CodegenError("struct field produced no value".into()))?;
+            // ARC: a field initialized from a borrowed Local read needs
+            // a retain so the struct owns its own +1 of that field.
+            // Fresh +1 producers (Call, Lit, etc.) already carry a +1.
+            if is_arc_type(&value.ty, self.struct_arc_fields) {
+                if let HirExprKind::Local(_) = &value.kind {
+                    self.emit_arc_call("retain", &value.ty, v)?;
+                }
+            }
             self.builder.ins().stack_store(v, slot, *offset as i32);
         }
         Ok(Some(self.builder.ins().stack_addr(types::I64, slot, 0)))
@@ -1255,7 +1402,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let val = self
             .compile_expr(rhs)?
             .ok_or_else(|| CodegenError("field-assign rhs produced no value".into()))?;
-        let _ = cranelift_type(field_ty)?; // validates the type is codegen-able
+        let fcty = cranelift_type(field_ty)?;
+        // ARC field assignment: release the old field value, retain the
+        // new one if it's a borrowed Local read. Same retain rule as
+        // let / Assign.
+        if is_arc_type(field_ty, self.struct_arc_fields) {
+            let old =
+                self.builder
+                    .ins()
+                    .load(fcty, MemFlags::new(), recv, offset as i32);
+            self.emit_arc_call("release", field_ty, old)?;
+            if let HirExprKind::Local(_) = &rhs.kind {
+                self.emit_arc_call("retain", field_ty, val)?;
+            }
+        }
         self.builder
             .ins()
             .store(MemFlags::new(), val, recv, offset as i32);
@@ -1899,11 +2059,16 @@ impl<'a, M: Module> FnCodegen<'a, M> {
     }
 }
 
-/// Types whose values are heap-allocated descriptors managed by ARC.
-/// Stack-allocated string literals also have this type but use the
-/// rc=-1 sentinel so retain/release become no-ops.
-fn is_arc_type(ty: &Ty) -> bool {
-    matches!(ty, Ty::Vec | Ty::Str)
+/// Types whose values are reclaimed by ARC. Vec and Str are always
+/// ARC-managed (string literals use the rc=-1 sentinel). A struct is
+/// ARC-managed iff it has at least one ARC-managed field
+/// (transitively); the map is populated by the lowerer.
+fn is_arc_type(ty: &Ty, struct_arc_fields: &HashMap<SymbolId, Vec<(u32, Ty)>>) -> bool {
+    match ty {
+        Ty::Vec | Ty::Str => true,
+        Ty::Struct(sym) => struct_arc_fields.contains_key(sym),
+        _ => false,
+    }
 }
 
 fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> {

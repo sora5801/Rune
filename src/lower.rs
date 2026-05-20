@@ -34,7 +34,42 @@ impl<'a> Lowerer<'a> {
                 _ => {}
             }
         }
-        HirModule { items }
+        // Compute the ARC-field map for every struct that contains one or
+        // more ARC-managed fields. A struct is considered ARC-managed
+        // transitively if it contains a Vec, Str, or another ARC struct.
+        let mut struct_arc_fields: std::collections::HashMap<
+            crate::ty::SymbolId,
+            Vec<(u32, Ty)>,
+        > = std::collections::HashMap::new();
+        // Two-pass to handle cross-references between structs; fixed-point
+        // (small N, the user's struct count). Each iteration adds entries
+        // for newly-discovered ARC structs.
+        loop {
+            let mut changed = false;
+            for (sym, layout) in &self.check.struct_layouts {
+                if struct_arc_fields.contains_key(sym) {
+                    continue;
+                }
+                let arc_fields: Vec<(u32, Ty)> = layout
+                    .fields
+                    .iter()
+                    .filter(|f| match &f.ty {
+                        Ty::Vec | Ty::Str => true,
+                        Ty::Struct(inner) => struct_arc_fields.contains_key(inner),
+                        _ => false,
+                    })
+                    .map(|f| (f.offset, f.ty.clone()))
+                    .collect();
+                if !arc_fields.is_empty() {
+                    struct_arc_fields.insert(*sym, arc_fields);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        HirModule { items, struct_arc_fields }
     }
 
     fn lower_fn(&self, f: &ast::FnDecl) -> HirFn {
@@ -299,7 +334,9 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ast::Expr::Try { .. } => HirExprKind::Unsupported("`?` operator".into()),
-            ast::Expr::Cast { .. } => HirExprKind::Unsupported("`as` cast".into()),
+            ast::Expr::Cast { expr, .. } => HirExprKind::Cast {
+                expr: Box::new(self.lower_expr(expr)),
+            },
             ast::Expr::Array { elems, .. } => {
                 let lowered: Vec<HirExpr> = elems.iter().map(|e| self.lower_expr(e)).collect();
                 let elem_ty = lowered
@@ -337,7 +374,7 @@ impl<'a> Lowerer<'a> {
             ast::Lit::Bool(b) => HirLit::Bool(*b),
             ast::Lit::Str(s) => HirLit::Str(s.clone()),
             // Char has no codegen support yet.
-            ast::Lit::Char(_) => HirLit::Unit,
+            ast::Lit::Char(c) => HirLit::Char(*c),
         }
     }
 
@@ -448,6 +485,10 @@ impl<'a> Lowerer<'a> {
                 ast::Lit::Int(v) => out.push(HirPattern::IntLit(*v)),
                 ast::Lit::Bool(b) => out.push(HirPattern::BoolLit(*b)),
                 ast::Lit::Str(s) => out.push(HirPattern::StrLit(s.clone())),
+                // Char patterns reuse IntLit — the scrutinee's
+                // cranelift_type is I32 for `char`, so iconst+icmp
+                // with the codepoint as i64 narrows correctly.
+                ast::Lit::Char(c) => out.push(HirPattern::IntLit(*c as i64)),
                 _ => return Err("match on this literal kind".into()),
             },
             ast::Pattern::Path { path, .. } => {
