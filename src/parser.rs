@@ -187,6 +187,7 @@ impl Parser {
     fn parse_fn(&mut self, vis: Visibility, start: usize) -> ParseResult<FnDecl> {
         self.expect(&TokenKind::Fn, "`fn`")?;
         let name = self.expect_ident()?;
+        let generics = self.parse_optional_generic_params()?;
         self.expect(&TokenKind::LParen, "`(`")?;
         let mut params = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.is_eof() {
@@ -203,7 +204,27 @@ impl Parser {
         };
         let body = self.parse_block()?;
         let end = body.span.end;
-        Ok(FnDecl { vis, name, params, return_type, body, span: Span::new(start, end) })
+        Ok(FnDecl { vis, name, generics, params, return_type, body, span: Span::new(start, end) })
+    }
+
+    /// Parse `<T>` / `<T, U>` after an item's name. Returns an empty
+    /// Vec if no generic params are present.
+    fn parse_optional_generic_params(&mut self) -> ParseResult<Vec<Ident>> {
+        if !self.check(&TokenKind::Lt) {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::Gt) {
+            loop {
+                params.push(self.expect_ident()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::Gt, "`>`")?;
+        Ok(params)
     }
 
     fn parse_param(&mut self) -> ParseResult<Param> {
@@ -218,6 +239,7 @@ impl Parser {
     fn parse_struct(&mut self, vis: Visibility, start: usize) -> ParseResult<StructDecl> {
         self.expect(&TokenKind::Struct, "`struct`")?;
         let name = self.expect_ident()?;
+        let generics = self.parse_optional_generic_params()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
@@ -227,7 +249,7 @@ impl Parser {
             }
         }
         let rb = self.expect(&TokenKind::RBrace, "`}`")?;
-        Ok(StructDecl { vis, name, fields, span: Span::new(start, rb.span.end) })
+        Ok(StructDecl { vis, name, generics, fields, span: Span::new(start, rb.span.end) })
     }
 
     fn parse_field(&mut self) -> ParseResult<Field> {
@@ -243,6 +265,7 @@ impl Parser {
     fn parse_enum(&mut self, vis: Visibility, start: usize) -> ParseResult<EnumDecl> {
         self.expect(&TokenKind::Enum, "`enum`")?;
         let name = self.expect_ident()?;
+        let generics = self.parse_optional_generic_params()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut variants = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
@@ -252,7 +275,7 @@ impl Parser {
             }
         }
         let rb = self.expect(&TokenKind::RBrace, "`}`")?;
-        Ok(EnumDecl { vis, name, variants, span: Span::new(start, rb.span.end) })
+        Ok(EnumDecl { vis, name, generics, variants, span: Span::new(start, rb.span.end) })
     }
 
     fn parse_variant(&mut self) -> ParseResult<Variant> {
@@ -318,10 +341,32 @@ impl Parser {
     // ---- types & paths ----
 
     fn parse_type(&mut self) -> ParseResult<Type> {
-        Ok(Type::Path(self.parse_path()?))
+        // At type position, `Vec<i64>` is unambiguous — the parser
+        // can greedily consume the `<...>`.
+        let mut path = self.parse_path()?;
+        if self.check(&TokenKind::Lt) {
+            self.bump(); // consume `<`
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::Gt) {
+                loop {
+                    args.push(self.parse_type()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            let gt = self.expect(&TokenKind::Gt, "`>`")?;
+            path.generic_args = args;
+            path.span = Span::new(path.span.start, gt.span.end);
+        }
+        Ok(Type::Path(path))
     }
 
     fn parse_path(&mut self) -> ParseResult<Path> {
+        // Just the `::`-separated segment list. At expression position
+        // `Vec<i64>` would clash with `<` as comparison; turbofish
+        // (`Vec::<i64>::new()`) isn't supported yet. Generic args on
+        // a type-position path are consumed by parse_type.
         let first = self.expect_ident()?;
         let start = first.span.start;
         let mut segments = vec![first];
@@ -329,7 +374,7 @@ impl Parser {
             segments.push(self.expect_ident()?);
         }
         let end = segments.last().unwrap().span.end;
-        Ok(Path { segments, span: Span::new(start, end) })
+        Ok(Path { segments, generic_args: Vec::new(), span: Span::new(start, end) })
     }
 
     // ---- patterns ----
@@ -372,16 +417,36 @@ impl Parser {
             TokenKind::Ident(_) => {
                 let first = self.expect_ident()?;
                 if self.check(&TokenKind::ColonColon) {
-                    // Multi-segment path pattern, e.g. `Color::Red`.
+                    // Multi-segment path pattern, e.g. `Color::Red` or
+                    // `Result::Ok(x)`.
                     let start = first.span.start;
                     let mut segments = vec![first];
                     while self.eat(&TokenKind::ColonColon) {
                         segments.push(self.expect_ident()?);
                     }
-                    let end = segments.last().unwrap().span.end;
-                    let s = Span::new(start, end);
-                    let path = Path { segments, span: s };
-                    Ok(Pattern::Path { path, span: s })
+                    let path_end = segments.last().unwrap().span.end;
+                    let path_span = Span::new(start, path_end);
+                    let path = Path {
+                        segments,
+                        generic_args: Vec::new(),
+                        span: path_span,
+                    };
+                    // Tuple-variant destructure: `Variant(pat, ...)`.
+                    if self.eat(&TokenKind::LParen) {
+                        let mut fields = Vec::new();
+                        if !self.check(&TokenKind::RParen) {
+                            loop {
+                                fields.push(self.parse_pattern()?);
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                        }
+                        let rp = self.expect(&TokenKind::RParen, "`)`")?;
+                        let s = Span::new(start, rp.span.end);
+                        return Ok(Pattern::TupleVariant { path, fields, span: s });
+                    }
+                    Ok(Pattern::Path { path, span: path_span })
                 } else {
                     let s = first.span;
                     Ok(Pattern::Ident { name: first, mutable: false, span: s })

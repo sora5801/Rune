@@ -69,7 +69,8 @@ impl<'a> Lowerer<'a> {
                 break;
             }
         }
-        HirModule { items, struct_arc_fields }
+        let enum_has_payload = self.res.enum_has_payload.clone();
+        HirModule { items, struct_arc_fields, enum_has_payload }
     }
 
     fn lower_fn(&self, f: &ast::FnDecl) -> HirFn {
@@ -133,10 +134,11 @@ impl<'a> Lowerer<'a> {
             ast::Pattern::Literal { .. }
             | ast::Pattern::Path { .. }
             | ast::Pattern::Range { .. }
+            | ast::Pattern::TupleVariant { .. }
             | ast::Pattern::Or { .. } => {
-                // `let` doesn't currently use path/literal/range/or
-                // patterns — the resolver and checker either accept them
-                // as no-ops or reject them. No binding here.
+                // `let` doesn't currently use any of these patterns;
+                // resolver / checker either accept them as no-ops or
+                // reject them. No binding here.
                 (None, l.mutable)
             }
         };
@@ -245,6 +247,24 @@ impl<'a> Lowerer<'a> {
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
                 },
                 Some(sym) if self.is_poly_builtin_fn_symbol(sym) => self.lower_poly_call(sym, args),
+                Some(sym) => match self.res.symbol(sym).kind {
+                    SymbolKind::EnumVariant { enum_sym, discriminant } => {
+                        if args.len() != 1 {
+                            return HirExprKind::Unsupported(
+                                "multi-field tuple-variant construction not supported"
+                                    .into(),
+                            );
+                        }
+                        HirExprKind::EnumPayloadCtor {
+                            enum_sym,
+                            discriminant,
+                            payload: Box::new(self.lower_expr(&args[0])),
+                        }
+                    }
+                    _ => HirExprKind::Unsupported(
+                        "call target other than a named function".into(),
+                    ),
+                },
                 _ => HirExprKind::Unsupported("call target other than a named function".into()),
             },
             ast::Expr::Block(b) => HirExprKind::Block(self.lower_block(b)),
@@ -513,6 +533,48 @@ impl<'a> Lowerer<'a> {
                     inclusive: *inclusive,
                 });
             }
+            ast::Pattern::TupleVariant { path, fields, .. } => {
+                let Some(&sid) = self.res.path_to_sym.get(&path.span) else {
+                    return Err("tuple-variant pattern didn't resolve".into());
+                };
+                let SymbolKind::EnumVariant { discriminant, .. } =
+                    self.res.symbol(sid).kind
+                else {
+                    return Err(
+                        "tuple-variant pattern path is not an enum variant".into(),
+                    );
+                };
+                // v0.x: exactly one field per tuple variant.
+                if fields.len() != 1 {
+                    return Err(
+                        "multi-field tuple-variant destructuring not supported".into(),
+                    );
+                }
+                let binding = match &fields[0] {
+                    ast::Pattern::Wildcard(_) => None,
+                    ast::Pattern::Ident { name, .. } => {
+                        self.res.decl_to_sym.get(&name.span).copied()
+                    }
+                    _ => {
+                        return Err(
+                            "tuple-variant payload must be an identifier or `_`".into(),
+                        );
+                    }
+                };
+                let payload_ty = self
+                    .res
+                    .enum_variant_payloads
+                    .get(&sid)
+                    .and_then(|tys| tys.first())
+                    .map(|t| self.check.type_resolutions.get(&t.span()).cloned())
+                    .flatten()
+                    .unwrap_or(Ty::Error);
+                out.push(HirPattern::EnumPayload {
+                    discriminant,
+                    payload_ty,
+                    binding,
+                });
+            }
             ast::Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.collect_arm_patterns(sub, out)?;
@@ -534,6 +596,7 @@ impl<'a> Lowerer<'a> {
             ast::Pattern::Literal { .. }
             | ast::Pattern::Path { .. }
             | ast::Pattern::Range { .. }
+            | ast::Pattern::TupleVariant { .. }
             | ast::Pattern::Or { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),

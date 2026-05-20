@@ -172,6 +172,10 @@ impl<'r> Checker<'r> {
                     SymbolKind::BuiltinType(t) => t,
                     SymbolKind::Struct => Ty::Struct(sym_id),
                     SymbolKind::Enum => Ty::Enum(sym_id),
+                    // Generic type parameters appear opaquely as `TypeVar`
+                    // in the checker. Codegen will reject any function whose
+                    // body still mentions one (monomorphization is step 2).
+                    SymbolKind::TypeParam => Ty::TypeVar(sym_id),
                     _ => {
                         self.error(p.span, format!("`{}` is not a type", name));
                         Ty::Error
@@ -488,6 +492,23 @@ impl<'r> Checker<'r> {
                 // literals or other ranges. A standalone `0..=10 => ...`
                 // still needs a `_` arm to be exhaustive.
             }
+            Pattern::TupleVariant { path, span: s, .. } => {
+                // A tuple-variant pattern covers exactly the same
+                // discriminant as the bare `EnumName::Variant` path —
+                // bindings inside don't change coverage.
+                if let Some(&sid) = self.res.path_to_sym.get(&path.span) {
+                    if let SymbolKind::EnumVariant { discriminant, .. } =
+                        self.res.symbol(sid).kind
+                    {
+                        if !covered_variants.insert(discriminant) {
+                            self.error(
+                                *s,
+                                "unreachable arm — this variant was already covered",
+                            );
+                        }
+                    }
+                }
+            }
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.cover_pattern(
@@ -555,6 +576,9 @@ impl<'r> Checker<'r> {
             }
             Pattern::Range { lo, hi, inclusive, span } => {
                 self.check_range_pattern(lo, hi, *inclusive, *span, scrutinee_ty);
+            }
+            Pattern::TupleVariant { path, fields, span } => {
+                self.check_tuple_variant_pattern(path, fields, *span, scrutinee_ty);
             }
             Pattern::Or { patterns, span } => {
                 // Reject Bind patterns inside an Or — alternatives would
@@ -653,11 +677,104 @@ impl<'r> Checker<'r> {
                 // responsible for validating the variant against the
                 // scrutinee type.
             }
+            Pattern::TupleVariant { path, fields, .. } => {
+                // Bind each sub-pattern to the corresponding payload
+                // type. Mismatched arity surfaces as an error in
+                // `check_tuple_variant_pattern` — the bind walk falls
+                // through with whatever payloads we have.
+                if let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) {
+                    let payloads: Vec<Ty> = self
+                        .res
+                        .enum_variant_payloads
+                        .get(&variant_sym)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|t| self.resolve_type(t))
+                        .collect();
+                    for (sub, pty) in fields.iter().zip(payloads.iter()) {
+                        self.bind_pattern(sub, pty);
+                    }
+                }
+            }
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.bind_pattern(sub, ty);
                 }
             }
+        }
+    }
+
+    fn check_tuple_variant_pattern(
+        &mut self,
+        path: &Path,
+        fields: &[Pattern],
+        span: Span,
+        scrutinee_ty: &Ty,
+    ) {
+        let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) else {
+            return;
+        };
+        let SymbolKind::EnumVariant { enum_sym, .. } =
+            self.res.symbol(variant_sym).kind.clone()
+        else {
+            self.error(span, "tuple-variant pattern path is not an enum variant");
+            return;
+        };
+        let enum_ty = Ty::Enum(enum_sym);
+        if !scrutinee_ty.is_error() && !enum_ty.compatible(scrutinee_ty) {
+            self.error(
+                span,
+                format!(
+                    "pattern matches `{}` but scrutinee is `{}`",
+                    enum_ty.display(),
+                    scrutinee_ty.display()
+                ),
+            );
+            return;
+        }
+        let payloads: Vec<Ty> = self
+            .res
+            .enum_variant_payloads
+            .get(&variant_sym)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|t| self.resolve_type(t))
+            .collect();
+        if payloads.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` has no payload — drop the parentheses",
+                    self.res.symbol(variant_sym).name
+                ),
+            );
+            return;
+        }
+        if payloads.len() != fields.len() {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` takes {} payload{}, found {}",
+                    self.res.symbol(variant_sym).name,
+                    payloads.len(),
+                    if payloads.len() == 1 { "" } else { "s" },
+                    fields.len()
+                ),
+            );
+            return;
+        }
+        // v0.x supports single-field tuple variants only.
+        if payloads.len() > 1 {
+            self.error(
+                span,
+                "multi-field tuple-variant destructuring not yet supported",
+            );
+            return;
+        }
+        for (sub, pty) in fields.iter().zip(payloads.iter()) {
+            self.check_pattern_matches(sub, pty);
         }
     }
 
@@ -770,7 +887,10 @@ impl<'r> Checker<'r> {
                 // The value of an enum variant has the enum's type.
                 Ty::Enum(enum_sym)
             }
-            SymbolKind::BuiltinType(_) | SymbolKind::Struct | SymbolKind::Enum => {
+            SymbolKind::BuiltinType(_)
+            | SymbolKind::Struct
+            | SymbolKind::Enum
+            | SymbolKind::TypeParam => {
                 self.error(p.span, format!("`{}` is a type, not a value", name));
                 Ty::Error
             }
@@ -995,7 +1115,8 @@ impl<'r> Checker<'r> {
                     }
                     SymbolKind::BuiltinType(_)
                     | SymbolKind::Struct
-                    | SymbolKind::Enum => {
+                    | SymbolKind::Enum
+                    | SymbolKind::TypeParam => {
                         self.error(span, format!("cannot assign to type `{}`", name));
                     }
                     SymbolKind::EnumVariant { .. } => {
@@ -1060,6 +1181,12 @@ impl<'r> Checker<'r> {
                 if let SymbolKind::PolyBuiltinFn(name) = self.res.symbol(sym_id).kind.clone() {
                     return self.check_poly_builtin_call(name, args, span);
                 }
+                // Enum variant constructor: `Result::Ok(5)`.
+                if let SymbolKind::EnumVariant { enum_sym, .. } =
+                    self.res.symbol(sym_id).kind.clone()
+                {
+                    return self.check_enum_variant_call(sym_id, enum_sym, args, span);
+                }
             }
         }
         let callee_ty = self.check_expr(callee);
@@ -1099,6 +1226,65 @@ impl<'r> Checker<'r> {
                 Ty::Error
             }
         }
+    }
+
+    fn check_enum_variant_call(
+        &mut self,
+        variant_sym: SymbolId,
+        enum_sym: SymbolId,
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        let payload_tys: Vec<Ty> = self
+            .res
+            .enum_variant_payloads
+            .get(&variant_sym)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|t| self.resolve_type(t))
+            .collect();
+        if payload_tys.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` takes no payload — drop the parentheses",
+                    self.res.symbol(variant_sym).name
+                ),
+            );
+            // Still walk the args so user errors inside them surface.
+            for a in args {
+                self.check_expr(a);
+            }
+            return Ty::Enum(enum_sym);
+        }
+        if payload_tys.len() != args.len() {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` takes {} payload{}, found {}",
+                    self.res.symbol(variant_sym).name,
+                    payload_tys.len(),
+                    if payload_tys.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            );
+        }
+        for (i, (param_ty, arg)) in payload_tys.iter().zip(args).enumerate() {
+            let arg_ty = self.check_expr(arg);
+            if !arg_ty.compatible(param_ty) {
+                self.error(
+                    arg.span(),
+                    format!(
+                        "variant payload {} has type `{}`, expected `{}`",
+                        i + 1,
+                        arg_ty.display(),
+                        param_ty.display()
+                    ),
+                );
+            }
+        }
+        Ty::Enum(enum_sym)
     }
 
     /// Look up a method declared in an `impl` block on a struct type.

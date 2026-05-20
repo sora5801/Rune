@@ -374,3 +374,48 @@ fn missing_semicolon_is_error() {
     let (_, _le, pe) = parse("fn t() { let x = 1 let y = 2; }");
     assert!(!pe.is_empty());
 }
+
+// ---- generics: step 1 (parser only) ----
+
+#[test]
+fn parses_generic_fn_decl() {
+    let m = parse_ok("fn id<T>(x: T) -> T { x }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(f.generics.len(), 1);
+    assert_eq!(f.generics[0].name, "T");
+}
+
+#[test]
+fn parses_multi_generic_fn() {
+    let m = parse_ok("fn pair<T, U>(a: T, b: U) -> T { a }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(f.generics.len(), 2);
+}
+
+#[test]
+fn parses_generic_struct() {
+    let m = parse_ok("struct Box<T> { value: T }");
+    let Item::Struct(s) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(s.generics.len(), 1);
+}
+
+#[test]
+fn parses_generic_enum() {
+    let m = parse_ok("enum Option<T> { Some(T), None }");
+    let Item::Enum(e) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(e.generics.len(), 1);
+}
+
+#[test]
+fn parses_generic_type_arg_in_type_position() {
+    let m = parse_ok("fn first(v: Vec<i64>) -> i64 { 0 }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    let Type::Path(p) = &f.params[0].ty;
+    assert_eq!(p.generic_args.len(), 1);
+}
+
+#[test]
+fn comparison_lt_still_parses() {
+    // `x < 2` must still parse as comparison, not a generic-args attempt.
+    parse_ok("fn t() -> bool { let x = 1; x < 2 }");
+}

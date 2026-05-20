@@ -42,6 +42,9 @@ pub struct ImplBlock {
 pub struct FnDecl {
     pub vis: Visibility,
     pub name: Ident,
+    /// Generic type parameters, e.g. `<T>` in `fn id<T>(x: T) -> T`.
+    /// Empty for non-generic functions.
+    pub generics: Vec<Ident>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: Block,
@@ -59,6 +62,7 @@ pub struct Param {
 pub struct StructDecl {
     pub vis: Visibility,
     pub name: Ident,
+    pub generics: Vec<Ident>,
     pub fields: Vec<Field>,
     pub span: Span,
 }
@@ -75,6 +79,7 @@ pub struct Field {
 pub struct EnumDecl {
     pub vis: Visibility,
     pub name: Ident,
+    pub generics: Vec<Ident>,
     pub variants: Vec<Variant>,
     pub span: Span,
 }
@@ -120,6 +125,11 @@ impl Type {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path {
     pub segments: Vec<Ident>,
+    /// Generic type arguments on the *last* segment, e.g. `Vec<i64>`.
+    /// Used at type-position paths and call-position paths
+    /// (turbofish-like `Vec::<i64>::new()` not supported yet — args
+    /// go on the final segment only). Empty for non-generic paths.
+    pub generic_args: Vec<Type>,
     pub span: Span,
 }
 
@@ -159,6 +169,11 @@ pub enum Pattern {
     /// Multi-segment path used as a pattern — today's only shape is
     /// `EnumName::Variant`, matched against the scrutinee's discriminant.
     Path { path: Path, span: Span },
+    /// `EnumName::Variant(sub_pat, ...)` — destructures a payload-
+    /// bearing enum variant. v0.x supports single-field destructuring
+    /// only; the parser still records the field list to keep room for
+    /// future multi-field support.
+    TupleVariant { path: Path, fields: Vec<Pattern>, span: Span },
     /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). Bounds are
     /// literals (integer or char) parsed as `Lit`; the checker rejects
     /// non-integer/char bounds and ranges where `lo > hi`.
@@ -175,6 +190,7 @@ impl Pattern {
             Pattern::Ident { span, .. } => *span,
             Pattern::Literal { span, .. } => *span,
             Pattern::Path { span, .. } => *span,
+            Pattern::TupleVariant { span, .. } => *span,
             Pattern::Range { span, .. } => *span,
             Pattern::Or { span, .. } => *span,
         }

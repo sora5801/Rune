@@ -42,11 +42,16 @@ pub enum SymbolKind {
     Param,
     Struct,
     Enum,
-    /// A unit variant of an enum. Carries its parent enum's symbol and its
-    /// numeric discriminant. v0.x supports only unit variants; payload
-    /// variants are deferred until match codegen lands.
+    /// A variant of an enum. Carries its parent enum's symbol and its
+    /// numeric discriminant. Unit variants have no payload; tuple
+    /// variants carry one or more value types.
     EnumVariant { enum_sym: SymbolId, discriminant: u32 },
     Const,
+    /// A generic type parameter declared on an item (`<T>` in
+    /// `fn id<T>(x: T) -> T`). The body refers to it via this symbol.
+    /// Codegen rejects functions whose body still mentions any
+    /// `TypeParam`; that's what makes "generics step 1" parser-only.
+    TypeParam,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +73,15 @@ pub struct Resolutions {
     /// symbol. Variants aren't in the global scope — they're addressed
     /// as `EnumName::VariantName`.
     pub enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    /// Payload types per variant (variant_sym → AST Types). Empty for
+    /// unit variants. For tuple variants the payloads appear in
+    /// declaration order; named-field variants aren't supported yet
+    /// (parser accepts them but the resolver fails the codegen path).
+    pub enum_variant_payloads: HashMap<SymbolId, Vec<crate::ast::Type>>,
+    /// Enums that have at least one payload-bearing variant. These use
+    /// a heap-allocated `{ tag, payload, rc }` descriptor at runtime
+    /// instead of the plain i64 discriminant used by tag-only enums.
+    pub enum_has_payload: std::collections::HashSet<SymbolId>,
 }
 
 impl Resolutions {
@@ -101,6 +115,8 @@ pub struct Resolver {
     decl_to_sym: HashMap<Span, SymbolId>,
     impl_methods: HashMap<(SymbolId, String), SymbolId>,
     enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    enum_variant_payloads: HashMap<SymbolId, Vec<crate::ast::Type>>,
+    enum_has_payload: std::collections::HashSet<SymbolId>,
     errors: Vec<ResolveError>,
 }
 
@@ -117,6 +133,8 @@ impl Resolver {
             decl_to_sym: HashMap::new(),
             impl_methods: HashMap::new(),
             enum_variants: HashMap::new(),
+            enum_variant_payloads: HashMap::new(),
+            enum_has_payload: std::collections::HashSet::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -146,6 +164,8 @@ impl Resolver {
                 decl_to_sym: self.decl_to_sym,
                 impl_methods: self.impl_methods,
                 enum_variants: self.enum_variants,
+                enum_variant_payloads: self.enum_variant_payloads,
+                enum_has_payload: self.enum_has_payload,
             },
             self.errors,
         )
@@ -306,6 +326,7 @@ impl Resolver {
         // only addressable as EnumName::VariantName).
         if let Item::Enum(e) = item {
             let mut variants: HashMap<String, SymbolId> = HashMap::new();
+            let mut any_payload = false;
             for (discriminant, v) in e.variants.iter().enumerate() {
                 // Variant symbols sit outside any lexical scope. They get
                 // a fresh entry in `symbols` for span-keyed queries; lookups
@@ -321,8 +342,25 @@ impl Resolver {
                 });
                 self.decl_to_sym.insert(v.name.span, variant_id);
                 variants.insert(v.name.name.clone(), variant_id);
+                // Capture payload types per variant for the checker /
+                // lowerer / codegen to look up.
+                let payload_tys: Vec<crate::ast::Type> = match &v.fields {
+                    crate::ast::VariantFields::Unit => Vec::new(),
+                    crate::ast::VariantFields::Tuple(tys) => {
+                        any_payload = any_payload || !tys.is_empty();
+                        tys.clone()
+                    }
+                    // Named-field variants aren't supported yet; record
+                    // empty so downstream sees them as Unit. The codegen
+                    // will fail with an Unsupported message if reached.
+                    crate::ast::VariantFields::Named(_) => Vec::new(),
+                };
+                self.enum_variant_payloads.insert(variant_id, payload_tys);
             }
             self.enum_variants.insert(id, variants);
+            if any_payload {
+                self.enum_has_payload.insert(id);
+            }
         }
     }
 
@@ -344,6 +382,10 @@ impl Resolver {
 
     fn resolve_fn(&mut self, f: &FnDecl) {
         self.enter_scope();
+        for g in &f.generics {
+            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.span, id);
+        }
         for p in &f.params {
             self.resolve_type(&p.ty);
             let id = self.intern(p.name.name.clone(), p.name.span, SymbolKind::Param);
@@ -357,12 +399,23 @@ impl Resolver {
     }
 
     fn resolve_struct(&mut self, s: &StructDecl) {
+        self.enter_scope();
+        for g in &s.generics {
+            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.span, id);
+        }
         for f in &s.fields {
             self.resolve_type(&f.ty);
         }
+        self.exit_scope();
     }
 
     fn resolve_enum(&mut self, e: &EnumDecl) {
+        self.enter_scope();
+        for g in &e.generics {
+            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.span, id);
+        }
         for v in &e.variants {
             match &v.fields {
                 VariantFields::Unit => {}
@@ -378,6 +431,7 @@ impl Resolver {
                 }
             }
         }
+        self.exit_scope();
     }
 
     fn resolve_const(&mut self, c: &ConstDecl) {
@@ -433,6 +487,15 @@ impl Resolver {
                 // lowerer can look up what variant it refers to.
                 self.resolve_path(path);
             }
+            Pattern::TupleVariant { path, fields, .. } => {
+                // Resolve the variant path; declare any inner bindings.
+                // The checker validates that each sub-pattern position
+                // matches the variant's payload type.
+                self.resolve_path(path);
+                for sub in fields {
+                    self.declare_pattern(sub, mutable_let);
+                }
+            }
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.declare_pattern(sub, mutable_let);
@@ -448,6 +511,10 @@ impl Resolver {
     }
 
     fn resolve_path(&mut self, p: &Path) {
+        // Recurse into generic args so any nested paths resolve.
+        for arg in &p.generic_args {
+            self.resolve_type(arg);
+        }
         let first = &p.segments[0];
         let Some(first_id) = self.lookup(&first.name) else {
             self.error(format!("unresolved name `{}`", first.name), p.span);

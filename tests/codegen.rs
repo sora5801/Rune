@@ -2024,3 +2024,151 @@ fn char_equality() {
     assert_eq!(run_main(src), 1);
 }
 
+// ---- payload-bearing enum variants ----
+
+#[test]
+fn enum_payload_construct_and_destructure_int() {
+    let src = r#"
+        enum Opt { Some(i64), None }
+        fn unwrap_or(o: Opt, def: i64) -> i64 {
+            match o {
+                Opt::Some(x) => x,
+                Opt::None => def,
+            }
+        }
+        fn main() -> i64 {
+            let a = Opt::Some(42);
+            let b = Opt::None;
+            unwrap_or(a, 0) + unwrap_or(b, -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
+fn enum_payload_wildcard_pattern() {
+    let src = r#"
+        enum Maybe { Just(i64), Nothing }
+        fn is_just(m: Maybe) -> i64 {
+            match m {
+                Maybe::Just(_) => 1,
+                Maybe::Nothing => 0,
+            }
+        }
+        fn main() -> i64 {
+            is_just(Maybe::Just(5)) + is_just(Maybe::Nothing)
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn enum_payload_str() {
+    let src = r#"
+        enum Status { Ok(i64), Failed(str) }
+        fn code(s: Status) -> i64 {
+            match s {
+                Status::Ok(n) => n,
+                Status::Failed(_) => -1,
+            }
+        }
+        fn main() -> i64 {
+            let a = Status::Ok(7);
+            let b = Status::Failed("bad");
+            code(a) + code(b)
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn enum_payload_in_loop_arc_reclaims_descriptor() {
+    // The Some descriptor is heap-alloc'd and released at scope exit.
+    let src = r#"
+        enum Opt { Some(i64), None }
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let o = Opt::Some(i);
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
+}
+
+#[test]
+fn enum_exhaustive_with_payload_destructure() {
+    let src = r#"
+        enum Either { Left(i64), Right(i64) }
+        fn sum(e: Either) -> i64 {
+            match e {
+                Either::Left(x) => x,
+                Either::Right(x) => x + 100,
+            }
+        }
+        fn main() -> i64 {
+            sum(Either::Left(5)) + sum(Either::Right(5))
+        }
+    "#;
+    assert_eq!(run_main(src), 110);
+}
+
+// ---- returning structs by value ----
+
+#[test]
+fn struct_returned_by_value_basic() {
+    // Pre-v0.x this errored because the struct lived on the callee's
+    // stack frame. Heap-allocation lets the pointer escape.
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn make(a: i64, b: i64) -> Point {
+            Point { x: a, y: b }
+        }
+        fn main() -> i64 {
+            let p = make(3, 4);
+            p.x * p.x + p.y * p.y
+        }
+    "#;
+    assert_eq!(run_main(src), 25);
+}
+
+#[test]
+fn struct_returned_by_value_with_arc_field() {
+    // Returning a struct that owns a Vec. The Vec is retained inside
+    // the struct's construction; ARC tracks it through the return.
+    let src = r#"
+        struct Boxed { v: Vec, label: i64 }
+        fn build(n: i64) -> Boxed {
+            let v = vec_new();
+            v.push(n);
+            v.push(n + 1);
+            Boxed { v: v, label: n }
+        }
+        fn main() -> i64 {
+            let b = build(10);
+            b.v.get(0) + b.v.get(1) + b.label
+        }
+    "#;
+    // 10 + 11 + 10 = 31
+    assert_eq!(run_main(src), 31);
+}
+
+#[test]
+fn struct_chain_of_returns() {
+    let src = r#"
+        struct Pair { a: i64, b: i64 }
+        fn swap(p: Pair) -> Pair {
+            Pair { a: p.b, b: p.a }
+        }
+        fn main() -> i64 {
+            let p = Pair { a: 1, b: 2 };
+            let q = swap(p);
+            q.a * 10 + q.b
+        }
+    "#;
+    // swap(1,2) → (2,1) → 21
+    assert_eq!(run_main(src), 21);
+}
+

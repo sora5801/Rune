@@ -59,10 +59,15 @@ rune: linked with clang -> primes.exe
   `break`, `continue`, array literals
 - Patterns: wildcard, identifier (with `mut`), literal (with optional
   unary `-` on numeric literals), path (`EnumName::Variant`),
-  or-patterns (`a | b | c`), and ranges (`lo..hi`, `lo..=hi`)
-- Types: paths only
+  tuple-variant destructure (`Some(x)`), or-patterns (`a | b | c`),
+  and ranges (`lo..hi`, `lo..=hi`)
+- Types: paths with optional generic args (`Vec<i64>`, `Result<i64,
+  str>`)
+- Generic type parameters on `fn`/`struct`/`enum` items (declaration
+  only — calling a generic function requires monomorphization,
+  which is generics step 2)
 - Error recovery at item-starting keywords
-- 40 integration tests
+- 47 integration tests
 
 ### Resolver — done
 
@@ -128,8 +133,10 @@ rune: linked with clang -> primes.exe
   - **String predicates**: `s.starts_with(p)`, `s.ends_with(p)`,
     `s.contains(p)` via runtime calls.
   - **Structs** with field access: `struct Point { x: i64, y: i64 }`,
-    constructed via `Point { x: 1, y: 2 }`, accessed via `p.x`.
-    8-byte-per-field padding (v0.x simplification).
+    constructed via `Point { x: 1, y: 2 }`, accessed via `p.x`,
+    **returned by value** from functions. 8-byte-per-field padding
+    (v0.x simplification); heap-allocated descriptor leaks today
+    (struct-level rc is a future cleanup).
   - **`impl` blocks** for inherent methods on structs:
     `impl Point { fn magnitude_sq(self: Point) -> i64 { ... } }`.
     Methods dispatched at lowering time; `self` becomes the first
@@ -137,9 +144,13 @@ rune: linked with clang -> primes.exe
   - **`Vec`** as a concrete heap-allocated growable list of i64:
     `vec_new()`, `.push(x)`, `.get(i)`, `.len()`. Element type
     generalizes to `Vec<T>` once generics arrive.
-  - **Enums** (unit variants only) with `EnumName::Variant` path
-    syntax, `==`/`!=` dispatch via discriminant compare, and full
-    **`match`** support: literal/path/wildcard/ident patterns,
+  - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
+    represent as i64; **payload variants** (`Some(i64)`, `Err(str)`)
+    flip the whole enum to a heap-allocated 24-byte `{ tag, payload,
+    rc }` descriptor and participate in ARC. v0.x: single-value
+    tuple variants only.
+    Full **`match`** support: literal/path/wildcard/ident patterns,
+    **tuple-variant destructure** (`Some(x) => ...`),
     **or-patterns** (`A | B | C => ...`), **range patterns**
     (`lo..hi` / `lo..=hi` on integer or char scrutinees, including
     negative literal bounds), and **guards** (`pat if cond => body`).
@@ -159,7 +170,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 146 JIT codegen tests + 34 AOT tests.
+- 154 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -176,17 +187,20 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** `?` (try), payload-bearing enum variants and
-their destructuring, returning structs by value, returning/passing
-arrays across function boundaries, generics. All emit
-`Unsupported(msg)` at lowering with a clear error if reached.
+**Not yet codegen'd:** `?` (try), calling generic functions (parser
+accepts the declaration but monomorphization is step 2), multi-field
+tuple variants and named-field enum variants, returning/passing
+arrays across function boundaries. Most emit `Unsupported(msg)` at
+lowering with a clear error if reached.
 
 ## Roadmap
 
-1. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
-2. `Weak<T>` for cycle breaking (blocked on generics + `Option<T>`)
-3. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
-4. Returning structs by value
+1. Generics step 2 (monomorphization) so `Vec<T>`, `Option<T>`,
+   `Result<T, E>` become first-class
+2. Struct descriptor rc + dealloc; payload-enum per-variant
+   destructor walks (close the v0.x leaks)
+3. `Weak<T>` for cycle breaking (blocked on step 1)
+4. Multi-field tuple variants and named-field enum variants
 5. Traits / interfaces
 6. Self-hosted bootstrap (long-term)
 

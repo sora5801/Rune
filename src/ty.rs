@@ -56,6 +56,10 @@ pub enum Ty {
     Fn { params: Vec<Ty>, ret: Box<Ty> },
     Struct(SymbolId),
     Enum(SymbolId),
+    /// A generic type parameter (`T` inside `fn id<T>(x: T) -> T`).
+    /// Opaque to the checker; the codegen path bails when one of these
+    /// reaches it (monomorphization is step 2 of the generics roadmap).
+    TypeVar(SymbolId),
     /// Diverging — `return`, `break`, `continue`.
     Never,
     /// Cascades silently; comparisons against `Error` succeed to avoid
@@ -116,6 +120,7 @@ impl Ty {
             }
             Ty::Struct(id) => format!("struct#{}", id.0),
             Ty::Enum(id) => format!("enum#{}", id.0),
+            Ty::TypeVar(id) => format!("T#{}", id.0),
             Ty::Never => "!".into(),
             Ty::Error => "?".into(),
         }

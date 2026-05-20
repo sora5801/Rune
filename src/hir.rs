@@ -17,6 +17,11 @@ pub struct HirModule {
     /// Codegen uses this to emit per-field retain on construction
     /// and per-field release on scope drop.
     pub struct_arc_fields: HashMap<SymbolId, Vec<(u32, Ty)>>,
+    /// Enums with at least one payload-bearing variant. Their values
+    /// are heap-allocated `{ tag, payload, rc }` descriptors and
+    /// participate in ARC; unit variants of the same enum allocate
+    /// the same shape with payload=0.
+    pub enum_has_payload: std::collections::HashSet<SymbolId>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +84,14 @@ pub enum HirExprKind {
     /// `EnumName::Variant` — a unit-variant enum value, represented as
     /// the i64 discriminant at runtime.
     EnumVariant { discriminant: u32 },
+    /// Payload-bearing enum variant construction: `Some(5)`. Codegen
+    /// heap-allocates a `{ tag, payload, rc }` descriptor. v0.x: single
+    /// payload only.
+    EnumPayloadCtor {
+        enum_sym: SymbolId,
+        discriminant: u32,
+        payload: Box<HirExpr>,
+    },
     Unary { op: HirUnOp, expr: Box<HirExpr> },
     /// `expr as Ty` — numeric / char / bool conversion. The `from` type
     /// is the expression's HirExpr.ty; the destination is the enclosing
@@ -214,6 +227,15 @@ pub enum HirPattern {
     BoolLit(bool),
     StrLit(String),
     EnumVariant { discriminant: u32 },
+    /// Tuple-variant destructure pattern like `Some(x)`. Matches if the
+    /// scrutinee's tag equals `discriminant`; binds the payload to
+    /// `binding` (None for `_`). v0.x supports single-field tuple
+    /// variants only.
+    EnumPayload {
+        discriminant: u32,
+        payload_ty: Ty,
+        binding: Option<SymbolId>,
+    },
     /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). For integer and
     /// char scrutinees; chars are pre-converted to their codepoint by
     /// the lowerer so codegen only sees i64 bounds.
