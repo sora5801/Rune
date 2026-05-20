@@ -30,12 +30,21 @@ pub struct Symbol {
 #[derive(Debug, Clone)]
 pub enum SymbolKind {
     BuiltinType(Ty),
+    /// Host-provided builtin function. Codegen knows how to call it.
+    BuiltinFn(BuiltinFn),
     Fn,
     Local { mutable: bool },
     Param,
     Struct,
     Enum,
     Const,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinFn {
+    pub name: &'static str,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
 }
 
 pub struct Resolutions {
@@ -132,6 +141,13 @@ impl Resolver {
         for (name, ty) in builtins {
             self.intern(name.to_string(), zero, SymbolKind::BuiltinType(ty.clone()));
         }
+        // Builtin functions.
+        let print = BuiltinFn {
+            name: "print",
+            params: vec![Ty::Int(IntTy::I64)],
+            ret: Ty::Unit,
+        };
+        self.intern(print.name.to_string(), zero, SymbolKind::BuiltinFn(print));
     }
 
     /// Insert a symbol into the current scope. Shadowing is allowed —

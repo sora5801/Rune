@@ -149,6 +149,10 @@ impl<'a> Lowerer<'a> {
                     callee: sym,
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
                 },
+                Some(sym) if self.is_builtin_fn_symbol(sym) => HirExprKind::BuiltinCall {
+                    name: self.res.symbol(sym).name.clone(),
+                    args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                },
                 _ => HirExprKind::Unsupported("call target other than a named function".into()),
             },
             ast::Expr::Block(b) => HirExprKind::Block(self.lower_block(b)),
@@ -168,11 +172,30 @@ impl<'a> Lowerer<'a> {
             ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
             ast::Expr::MethodCall { .. } => HirExprKind::Unsupported("method calls".into()),
             ast::Expr::Field { .. } => HirExprKind::Unsupported("field access".into()),
-            ast::Expr::Index { .. } => HirExprKind::Unsupported("array indexing".into()),
+            ast::Expr::Index { receiver, index, .. } => {
+                let arr = self.lower_expr(receiver);
+                let idx = self.lower_expr(index);
+                let elem_ty = match &arr.ty {
+                    Ty::Array(elem, _) => (**elem).clone(),
+                    _ => Ty::Error,
+                };
+                HirExprKind::Index {
+                    array: Box::new(arr),
+                    index: Box::new(idx),
+                    elem_ty,
+                }
+            }
             ast::Expr::Try { .. } => HirExprKind::Unsupported("`?` operator".into()),
             ast::Expr::Cast { .. } => HirExprKind::Unsupported("`as` cast".into()),
-            ast::Expr::Array { .. } => HirExprKind::Unsupported("array literals".into()),
-            ast::Expr::For { .. } => HirExprKind::Unsupported("for loops".into()),
+            ast::Expr::Array { elems, .. } => {
+                let lowered: Vec<HirExpr> = elems.iter().map(|e| self.lower_expr(e)).collect();
+                let elem_ty = lowered
+                    .first()
+                    .map(|e| e.ty.clone())
+                    .unwrap_or(Ty::Error);
+                HirExprKind::Array { elems: lowered, elem_ty }
+            }
+            ast::Expr::For { pat, iter, body, .. } => self.lower_for(pat, iter, body),
             ast::Expr::Match { .. } => HirExprKind::Unsupported("match expressions".into()),
         }
     }
@@ -213,6 +236,39 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn lower_for(
+        &self,
+        pat: &ast::Pattern,
+        iter: &ast::Expr,
+        body: &ast::Block,
+    ) -> HirExprKind {
+        let iter_hir = self.lower_expr(iter);
+        let (elem_ty, length) = match &iter_hir.ty {
+            Ty::Array(elem, n) => ((**elem).clone(), *n),
+            _ => {
+                return HirExprKind::Unsupported(
+                    "for-loop iterator must be a stack-allocated array".into(),
+                );
+            }
+        };
+        let local = match pat {
+            ast::Pattern::Wildcard(_) => None,
+            ast::Pattern::Ident { name, .. } => self.res.decl_to_sym.get(&name.span).copied(),
+            ast::Pattern::Literal { .. } => {
+                return HirExprKind::Unsupported(
+                    "for-loop pattern must be an identifier or `_`".into(),
+                );
+            }
+        };
+        HirExprKind::For {
+            local,
+            iter: Box::new(iter_hir),
+            body: self.lower_block(body),
+            elem_ty,
+            length,
+        }
+    }
+
     /// Extract a `SymbolId` if `e` is a single-segment path to a local/param/const/fn.
     fn path_symbol(&self, e: &ast::Expr) -> Option<crate::ty::SymbolId> {
         let ast::Expr::Path(p) = e else { return None };
@@ -221,6 +277,10 @@ impl<'a> Lowerer<'a> {
 
     fn is_fn_symbol(&self, sym: crate::ty::SymbolId) -> bool {
         matches!(self.res.symbol(sym).kind, SymbolKind::Fn)
+    }
+
+    fn is_builtin_fn_symbol(&self, sym: crate::ty::SymbolId) -> bool {
+        matches!(self.res.symbol(sym).kind, SymbolKind::BuiltinFn(_))
     }
 }
 

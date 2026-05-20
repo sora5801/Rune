@@ -264,3 +264,146 @@ fn return_in_one_branch() {
     "#;
     assert_eq!(run_main(src), 42);
 }
+
+// ---- floats ----
+
+#[test]
+fn float_arithmetic() {
+    // 1.5 + 2.5 == 4.0 → return 1
+    let src = r#"
+        fn main() -> i64 {
+            let x = 1.5;
+            let y = 2.5;
+            let z = x + y;
+            if z == 4.0 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn float_comparison() {
+    let src = r#"
+        fn main() -> i64 {
+            let pi = 3.14;
+            let e = 2.71;
+            if pi > e { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn float_mul_div() {
+    // (10.0 * 3.0) / 4.0 = 7.5 → > 7.0 → return 1
+    let src = r#"
+        fn main() -> i64 {
+            let x = 10.0;
+            let y = 3.0;
+            let z = x * y / 4.0;
+            if z > 7.0 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn float_neg() {
+    let src = r#"
+        fn main() -> i64 {
+            let x = 5.0;
+            let y = -x;
+            if y < 0.0 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+// ---- arrays + for loops ----
+
+#[test]
+fn array_literal_and_indexing() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30, 40];
+            xs[2]
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn for_loop_sum() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [1, 2, 3, 4, 5];
+            let mut sum = 0;
+            for x in xs {
+                sum = sum + x;
+            }
+            sum
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn for_loop_with_condition() {
+    let src = r#"
+        fn main() -> i64 {
+            let primes = [2, 3, 5, 7, 11, 13, 17, 19];
+            let mut big = 0;
+            for p in primes {
+                if p > 10 {
+                    big = big + p;
+                }
+            }
+            big
+        }
+    "#;
+    assert_eq!(run_main(src), 60); // 11 + 13 + 17 + 19
+}
+
+#[test]
+fn for_with_wildcard() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [1, 2, 3];
+            let mut count = 0;
+            for _ in xs {
+                count = count + 1;
+            }
+            count
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn nested_for_loops() {
+    let src = r#"
+        fn main() -> i64 {
+            let outer = [1, 2, 3];
+            let inner = [10, 20];
+            let mut total = 0;
+            for a in outer {
+                for b in inner {
+                    total = total + a * b;
+                }
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 180); // (1+2+3) * (10+20) = 6 * 30
+}
+
+#[test]
+fn array_of_bools_via_indexing() {
+    let src = r#"
+        fn main() -> i64 {
+            let flags = [true, false, true];
+            if flags[0] { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}

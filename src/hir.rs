@@ -78,8 +78,16 @@ pub enum HirExprKind {
     /// arbitrary place expressions (index/field) aren't codegen-supported yet.
     Assign { lhs: SymbolId, rhs: Box<HirExpr> },
     AssignOp { lhs: SymbolId, op: HirBinOp, rhs: Box<HirExpr> },
-    /// Direct call to a named function.
+    /// Direct call to a named Rune function.
     Call { callee: SymbolId, args: Vec<HirExpr> },
+    /// Call to a host-provided builtin (`print`, etc.). Codegen emits a
+    /// call to an imported C function (e.g. `rune_print_i64`).
+    BuiltinCall { name: String, args: Vec<HirExpr> },
+    /// Stack-allocated array literal. Value type is a pointer to the
+    /// first element; element type and length are tracked statically.
+    Array { elems: Vec<HirExpr>, elem_ty: Ty },
+    /// `array[index]`. Loads the element at the computed offset.
+    Index { array: Box<HirExpr>, index: Box<HirExpr>, elem_ty: Ty },
     Block(HirBlock),
     If {
         cond: Box<HirExpr>,
@@ -88,6 +96,15 @@ pub enum HirExprKind {
         else_b: Option<Box<HirExpr>>,
     },
     While { cond: Box<HirExpr>, body: HirBlock },
+    /// `for local in iter { body }`. The iter is an array with statically
+    /// known `length` and `elem_ty`. Codegen lowers to a counter-based loop.
+    For {
+        local: Option<SymbolId>,
+        iter: Box<HirExpr>,
+        body: HirBlock,
+        elem_ty: Ty,
+        length: usize,
+    },
     Return(Option<Box<HirExpr>>),
     /// Stub for features not yet handled in codegen. Lowering succeeds
     /// to allow inspection, codegen fails with the embedded message.

@@ -328,6 +328,10 @@ impl<'r> Checker<'r> {
                 self.local_types.get(&sym_span).cloned().unwrap_or(Ty::Error)
             }
             SymbolKind::Fn => self.fn_signatures.get(&sym_span).cloned().unwrap_or(Ty::Error),
+            SymbolKind::BuiltinFn(b) => Ty::Fn {
+                params: b.params.clone(),
+                ret: Box::new(b.ret.clone()),
+            },
             SymbolKind::BuiltinType(_) | SymbolKind::Struct | SymbolKind::Enum => {
                 self.error(p.span, format!("`{}` is a type, not a value", name));
                 Ty::Error
@@ -528,7 +532,7 @@ impl<'r> Checker<'r> {
                     SymbolKind::Const => {
                         self.error(span, format!("cannot assign to const `{}`", name));
                     }
-                    SymbolKind::Fn => {
+                    SymbolKind::Fn | SymbolKind::BuiltinFn(_) => {
                         self.error(span, format!("cannot assign to function `{}`", name));
                     }
                     SymbolKind::BuiltinType(_)

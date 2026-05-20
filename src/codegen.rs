@@ -42,6 +42,15 @@ pub struct Codegen<M: Module> {
     module: M,
     sym_to_func: HashMap<SymbolId, FuncId>,
     sym_to_sig: HashMap<SymbolId, Signature>,
+    /// Imported builtin host functions, declared lazily on first use.
+    builtin_funcs: HashMap<String, FuncId>,
+}
+
+/// Host implementation of `print(i64)` for JIT mode. Linked-against
+/// `rune_print_i64` in AOT mode is provided by the runtime C source
+/// embedded in [`crate::aot`].
+extern "C" fn rune_runtime_print_i64(x: i64) {
+    println!("{}", x);
 }
 
 // ---- generic methods: compile any module backend ----
@@ -100,6 +109,7 @@ impl<M: Module> Codegen<M> {
         let mut fc = FnCodegen {
             module: &mut self.module,
             sym_to_func: &self.sym_to_func,
+            builtin_funcs: &mut self.builtin_funcs,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -164,9 +174,15 @@ impl Codegen<JITModule> {
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| CodegenError(e.to_string()))?;
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol("rune_print_i64", rune_runtime_print_i64 as *const u8);
         let module = JITModule::new(builder);
-        Ok(Self { module, sym_to_func: HashMap::new(), sym_to_sig: HashMap::new() })
+        Ok(Self {
+            module,
+            sym_to_func: HashMap::new(),
+            sym_to_sig: HashMap::new(),
+            builtin_funcs: HashMap::new(),
+        })
     }
 
     pub fn finalize(&mut self) -> Result<(), CodegenError> {
@@ -208,7 +224,12 @@ impl Codegen<ObjectModule> {
         )
         .map_err(|e| CodegenError(e.to_string()))?;
         let module = ObjectModule::new(builder);
-        Ok(Self { module, sym_to_func: HashMap::new(), sym_to_sig: HashMap::new() })
+        Ok(Self {
+            module,
+            sym_to_func: HashMap::new(),
+            sym_to_sig: HashMap::new(),
+            builtin_funcs: HashMap::new(),
+        })
     }
 
     /// Emit a C-compatible `int main(void)` that calls the Rune main
@@ -275,6 +296,7 @@ impl OptLevel {
 struct FnCodegen<'a, M: Module> {
     module: &'a mut M,
     sym_to_func: &'a HashMap<SymbolId, FuncId>,
+    builtin_funcs: &'a mut HashMap<String, FuncId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -394,6 +416,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 } else {
                     Ok(Some(results[0]))
                 }
+            }
+            HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
+            HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
+            HirExprKind::Index { array, index, elem_ty } => {
+                self.compile_index(array, index, elem_ty)
+            }
+            HirExprKind::For { local, iter, body, elem_ty, length } => {
+                self.compile_for(*local, iter, body, elem_ty, *length)
             }
             HirExprKind::Block(b) => self.compile_block(b),
             HirExprKind::If { cond, then_b, else_b } => {
@@ -661,6 +691,153 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
     }
 
+    fn compile_builtin_call(
+        &mut self,
+        name: &str,
+        args: &[HirExpr],
+    ) -> Result<Option<Value>, CodegenError> {
+        let func_id = match self.builtin_funcs.get(name) {
+            Some(&id) => id,
+            None => {
+                let id = declare_builtin(self.module, name)?;
+                self.builtin_funcs.insert(name.to_string(), id);
+                id
+            }
+        };
+        let local_func = self.module.declare_func_in_func(func_id, self.builder.func);
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self
+                .compile_expr(a)?
+                .ok_or_else(|| CodegenError("builtin arg produced no value".into()))?;
+            arg_vals.push(v);
+        }
+        let inst = self.builder.ins().call(local_func, &arg_vals);
+        let results = self.builder.inst_results(inst);
+        if results.is_empty() { Ok(None) } else { Ok(Some(results[0])) }
+    }
+
+    fn compile_array(
+        &mut self,
+        elems: &[HirExpr],
+        elem_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let elem_cty = cranelift_type(elem_ty)?;
+        let esize = elem_size(elem_ty)?;
+        if elems.is_empty() {
+            return Err(CodegenError("empty arrays not yet supported".into()));
+        }
+        let total_size = (elems.len() as u32) * esize;
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            total_size,
+            3,
+        ));
+        for (i, elem) in elems.iter().enumerate() {
+            let v = self
+                .compile_expr(elem)?
+                .ok_or_else(|| CodegenError("array element produced no value".into()))?;
+            let offset = (i as i32) * (esize as i32);
+            self.builder.ins().stack_store(v, slot, offset);
+        }
+        let _ = elem_cty; // suppress unused
+        let addr = self.builder.ins().stack_addr(types::I64, slot, 0);
+        Ok(Some(addr))
+    }
+
+    fn compile_index(
+        &mut self,
+        array: &HirExpr,
+        index: &HirExpr,
+        elem_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let arr_addr = self
+            .compile_expr(array)?
+            .ok_or_else(|| CodegenError("array operand produced no value".into()))?;
+        let idx = self
+            .compile_expr(index)?
+            .ok_or_else(|| CodegenError("index operand produced no value".into()))?;
+        let elem_cty = cranelift_type(elem_ty)?;
+        let esize = elem_size(elem_ty)? as i64;
+        let esize_const = self.builder.ins().iconst(types::I64, esize);
+        let offset = self.builder.ins().imul(idx, esize_const);
+        let elem_addr = self.builder.ins().iadd(arr_addr, offset);
+        let val = self.builder.ins().load(elem_cty, MemFlags::new(), elem_addr, 0);
+        Ok(Some(val))
+    }
+
+    fn compile_for(
+        &mut self,
+        local: Option<SymbolId>,
+        iter: &HirExpr,
+        body: &HirBlock,
+        elem_ty: &Ty,
+        length: usize,
+    ) -> Result<Option<Value>, CodegenError> {
+        let arr_addr = self
+            .compile_expr(iter)?
+            .ok_or_else(|| CodegenError("for-loop iterator produced no value".into()))?;
+        let elem_cty = cranelift_type(elem_ty)?;
+        let esize = elem_size(elem_ty)? as i64;
+
+        let counter_var = self.alloc_var();
+        self.builder.declare_var(counter_var, types::I64);
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.builder.def_var(counter_var, zero);
+
+        let x_var = local.map(|sym| {
+            let v = self.alloc_var();
+            self.builder.declare_var(v, elem_cty);
+            self.var_map.insert(sym, v);
+            v
+        });
+
+        let header = self.builder.create_block();
+        let body_blk = self.builder.create_block();
+        let exit = self.builder.create_block();
+
+        self.builder.ins().jump(header, &[]);
+
+        self.builder.switch_to_block(header);
+        let counter = self.builder.use_var(counter_var);
+        let n_const = self.builder.ins().iconst(types::I64, length as i64);
+        let cond = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, counter, n_const);
+        self.builder.ins().brif(cond, body_blk, &[], exit, &[]);
+
+        self.builder.switch_to_block(body_blk);
+        self.builder.seal_block(body_blk);
+
+        let counter = self.builder.use_var(counter_var);
+        let esize_const = self.builder.ins().iconst(types::I64, esize);
+        let offset = self.builder.ins().imul(counter, esize_const);
+        let elem_addr = self.builder.ins().iadd(arr_addr, offset);
+        let elem = self
+            .builder
+            .ins()
+            .load(elem_cty, MemFlags::new(), elem_addr, 0);
+        if let Some(v) = x_var {
+            self.builder.def_var(v, elem);
+        }
+
+        self.compile_block(body)?;
+
+        if !self.is_filled() {
+            let counter = self.builder.use_var(counter_var);
+            let one = self.builder.ins().iconst(types::I64, 1);
+            let next = self.builder.ins().iadd(counter, one);
+            self.builder.def_var(counter_var, next);
+            self.builder.ins().jump(header, &[]);
+        }
+
+        self.builder.seal_block(header);
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+        Ok(None)
+    }
+
     fn compile_while(
         &mut self,
         cond: &HirExpr,
@@ -699,6 +876,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Float(FloatTy::F32) => types::F32,
         Ty::Float(FloatTy::F64) => types::F64,
         Ty::Char => types::I32,
+        // Arrays are represented as a pointer to their first element.
+        Ty::Array(_, _) => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -715,4 +894,37 @@ fn int_cranelift_type(it: IntTy) -> Type {
         IntTy::I32 | IntTy::U32 => types::I32,
         IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize => types::I64,
     }
+}
+
+/// Element width in bytes — used for array stride computation.
+fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
+    Ok(match ty {
+        Ty::Bool => 1,
+        Ty::Int(IntTy::I8 | IntTy::U8) => 1,
+        Ty::Int(IntTy::I16 | IntTy::U16) => 2,
+        Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
+        Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
+        | Ty::Float(FloatTy::F64) => 8,
+        Ty::Array(_, _) => 8,
+        _ => {
+            return Err(CodegenError(format!(
+                "cannot determine size of `{}`",
+                ty.display()
+            )));
+        }
+    })
+}
+
+fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, CodegenError> {
+    let (runtime_name, sig) = match name {
+        "print" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_print_i64", sig)
+        }
+        _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
+    };
+    module
+        .declare_function(runtime_name, Linkage::Import, &sig)
+        .map_err(|e| CodegenError(e.to_string()))
 }

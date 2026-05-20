@@ -9,16 +9,30 @@ use crate::codegen::{Codegen, CodegenError, OptLevel};
 use crate::hir::{HirItem, HirModule};
 use crate::ty::SymbolId;
 
+/// Minimal Rune runtime: defines C symbols the codegen imports.
+const RUNTIME_C: &str = r#"
+#include <stdio.h>
+#include <stdint.h>
+
+void rune_print_i64(int64_t x) {
+    printf("%lld\n", (long long)x);
+}
+"#;
+
 /// Compile a Rune module to a native object file (returned as bytes).
 ///
 /// Renames Rune's `main` to `__rune_main` in place and synthesizes a
 /// C-compatible `int main(void)` that calls it and truncates the i64
 /// return to the i32 exit code.
-pub fn build_object(hir: &mut HirModule, module_name: &str) -> Result<Vec<u8>, CodegenError> {
+pub fn build_object(
+    hir: &mut HirModule,
+    module_name: &str,
+    opt: OptLevel,
+) -> Result<Vec<u8>, CodegenError> {
     let rune_main_sym = rename_main(hir).ok_or_else(|| {
         CodegenError("no `main` function in module".into())
     })?;
-    let mut cg = Codegen::new_object(module_name, OptLevel::None)?;
+    let mut cg = Codegen::new_object(module_name, opt)?;
     cg.compile_module(hir)?;
     let rune_main_id = cg
         .func_id(rune_main_sym)
@@ -57,11 +71,23 @@ impl std::fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
-/// Invoke a C-style linker driver to produce `output` from `obj`.
+/// Invoke a C-style linker driver to produce `output` from `obj`, plus
+/// the embedded runtime C source.
 ///
 /// Tries `$RUNE_LINKER` first if set, then `clang`, `gcc`, `cc` in order.
 /// The first one that succeeds wins; returns the linker that worked.
+///
+/// The runtime defines `rune_print_i64` and any other host-provided
+/// builtins the codegen imports. We pass it as a `.c` input so the linker
+/// driver compiles + links it in one shot.
 pub fn link(obj: &Path, output: &Path) -> Result<String, LinkError> {
+    let runtime_path = obj.with_extension("rt.c");
+    if let Err(e) = std::fs::write(&runtime_path, RUNTIME_C) {
+        return Err(LinkError {
+            tried: Vec::new(),
+            errors: vec![format!("writing runtime to {}: {}", runtime_path.display(), e)],
+        });
+    }
     let candidates: Vec<String> = if let Ok(custom) = std::env::var("RUNE_LINKER") {
         vec![custom]
     } else {
@@ -69,7 +95,12 @@ pub fn link(obj: &Path, output: &Path) -> Result<String, LinkError> {
     };
     let mut errors = Vec::new();
     for cand in &candidates {
-        let result = Command::new(cand).arg(obj).arg("-o").arg(output).output();
+        let result = Command::new(cand)
+            .arg(obj)
+            .arg(&runtime_path)
+            .arg("-o")
+            .arg(output)
+            .output();
         match result {
             Ok(out) if out.status.success() => return Ok(cand.clone()),
             Ok(out) => errors.push(format!(

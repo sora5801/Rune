@@ -96,25 +96,33 @@ isn't decorative — the type checker rejects writes to immutable bindings.
 
 ## Memory model
 
-**Status: Open.** The most consequential remaining decision; shapes the type
-system and lifetime story.
+**Status: Tentative.** Stack-frame arena for now; heap and ownership deferred.
+
+Concrete state as of 2026-05-19:
+
+- **Arrays are stack-allocated** at the point of literal. A `let xs = [1, 2, 3];`
+  allocates a Cranelift `StackSlot` sized `3 * sizeof(i64) = 24 bytes` and the
+  binding holds the slot's address. Lifetime is the function frame.
+- **Arrays cannot escape a function** — no array returns, no array params
+  yet. The codegen errors on either.
+- **No heap allocator wired up.** No `Box`, no `Vec`, no `String`.
+- **No bounds checks on indexing.** `arr[i]` trusts `i`. Adding checks is
+  cheap; deferred until errors-as-values are designed.
 
 | Option | Story | Complexity | Note |
 | --- | --- | --- | --- |
 | Manual (C-like) | `alloc`/`free`, raw pointers | Low | Maximum freedom, easy to get wrong |
-| Arena-only | One bump arena per region/frame | Low | Simple, fast, leaks until arena dies |
+| Arena-only | One bump arena per region/frame | Low | Simple, fast, leaks until arena dies — **current direction** |
 | ARC (Swift) | Implicit reference counting + weak refs | Medium | Per-op cost; cycles need user discipline |
 | Borrow checker | Compile-time ownership | High | Defining feature if pursued; months of work |
 | Tracing GC | Stop-the-world or concurrent collector | High | Real runtime; harder to bootstrap |
 
-**Tentative recommendation:** start arena-only for the bootstrap. Every
-function-local allocation goes into an arena freed when the function returns;
-globals get their own arena. Arena lifetimes map directly to Cranelift's
-stack-frame model and we sidestep designing an ownership system before we have
-runnable programs.
+**Tentative recommendation:** continue arena-only. Lift "stack-frame arena"
+to "explicit named arenas" once we want arrays escaping their function. Heap
++ ownership is a v2 conversation.
 
-Once code can actually run, decide whether to graduate to ARC, ownership, or
-stay arena-based. This is reversible — no decision needed before codegen lands.
+Once code can actually run end-to-end with stdlib, decide whether to graduate
+to ARC, ownership, or stay arena-based. Reversible.
 
 ## Error handling
 
@@ -179,7 +187,8 @@ Defer concrete decisions until the parser is more than a toy.
 - **Backend:** Cranelift. Two output modes:
   - `cranelift-jit` (in-memory codegen) for `rune run` — fastest feedback.
   - `cranelift-object` + external C linker driver for `rune build`,
-    producing a native executable.
+    producing a native executable. `--release` flips Cranelift's opt
+    level from `none` to `speed`.
 - **ABI:** the target's default native calling convention — SystemV
   on Linux, WindowsFastcall on Windows, AAPCS on ARM. Effectively
   `extern "C"`. Trivial C interop later; a Rune-specific CC isn't
@@ -217,3 +226,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Resolver + type checker | Three previously-tentative decisions pinned: default integer type → `i64` (was `i32` placeholder); mutability enforcement → strict (immutable bindings can't be reassigned); name resolution → lexical scoping with shadowing allowed. Bottom-up monomorphic type checker landed. |
 | 2026-05-19 | HIR + Cranelift codegen | Compilation model promoted to Decided. Cranelift JIT backend, target-native ABI (`extern "C"`), `fn main() -> i64` as entry. AST-shaped HIR with `Ty` on every node (over MIR/CFG). First runnable Rune: `rune run examples/fib.rn` prints `55`. |
 | 2026-05-19 | AOT executables | `rune build <file>` produces a native `.exe` via `cranelift-object` + external C linker driver. Default linker discovery: `clang` → `gcc` → `cc`, overridable via `$RUNE_LINKER`. Rune's `main` is renamed internally to `__rune_main`; a synthesized `int main(void)` calls it and truncates the i64 return to a 32-bit OS exit code. `rune build examples/fib.rn && ./fib.exe; echo $?` → `55`. |
+| 2026-05-19 | print + floats + --release + arrays/for | First host builtin: `print(i64)`, callable from both JIT (registered via `JITBuilder::symbol`) and AOT (embedded `RUNTIME_C` compiled inline by the linker driver). Float codegen tests landed (paths existed, now exercised). `rune build --release` maps to Cranelift `OptLevel::Speed`. Array literals stack-allocated via `StackSlot`; indexing via `iadd + load`; `for x in arr` desugars to a counter-based while loop. Memory model promoted Open → Tentative: stack-frame arena. |

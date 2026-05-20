@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rune::{
-    aot, Checker, Codegen, Lexer, Lowerer, Parser, Resolver, Resolutions, SymbolId, SymbolKind,
+    aot, Checker, Codegen, Lexer, Lowerer, OptLevel, Parser, Resolver, Resolutions, SymbolId,
+    SymbolKind,
 };
 
 fn main() -> ExitCode {
@@ -39,7 +40,7 @@ fn print_usage() {
     eprintln!("  ast <file>              parse and print the AST");
     eprintln!("  check <file>            parse, resolve names, type-check");
     eprintln!("  run <file>              JIT-compile and execute `main() -> i64`");
-    eprintln!("  build <file> [-o out]   AOT-compile to a native executable");
+    eprintln!("  build <file> [-o out] [--release]   AOT-compile to a native executable");
 }
 
 fn read_source(path: &str) -> Result<String, ExitCode> {
@@ -177,13 +178,15 @@ fn cmd_run(args: &[String]) -> ExitCode {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    let Some(input_path) = args.get(1) else {
-        eprintln!("usage: rune build <file> [-o output]");
+    let (input_path, output_override, release) = parse_build_args(args);
+    let Some(input_path) = input_path else {
+        eprintln!("usage: rune build <file> [-o output] [--release]");
         return ExitCode::from(2);
     };
-    let output_path = derive_output_path(input_path, args);
+    let output_path = output_override
+        .unwrap_or_else(|| derive_default_output_path(&input_path));
 
-    let source = match read_source(input_path) {
+    let source = match read_source(&input_path) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -203,13 +206,14 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
     let mut hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
 
-    let module_name = Path::new(input_path)
+    let module_name = Path::new(&input_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("rune_module")
         .to_string();
 
-    let bytes = match aot::build_object(&mut hir, &module_name) {
+    let opt = if release { OptLevel::Speed } else { OptLevel::None };
+    let bytes = match aot::build_object(&mut hir, &module_name, opt) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("rune: {}", e);
@@ -236,17 +240,37 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 }
 
-fn derive_output_path(input_path: &str, args: &[String]) -> PathBuf {
-    for (i, a) in args.iter().enumerate() {
-        if a == "-o" {
-            if let Some(p) = args.get(i + 1) {
-                return PathBuf::from(p);
+fn parse_build_args(args: &[String]) -> (Option<String>, Option<PathBuf>, bool) {
+    let mut input: Option<String> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut release = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--release" => {
+                release = true;
+                i += 1;
             }
+            "-o" => {
+                if let Some(next) = args.get(i + 1) {
+                    output = Some(PathBuf::from(next));
+                }
+                i += 2;
+            }
+            s if !s.starts_with('-') => {
+                if input.is_none() {
+                    input = Some(args[i].clone());
+                }
+                i += 1;
+            }
+            _ => i += 1,
         }
     }
-    let stem = Path::new(input_path)
-        .file_stem()
-        .unwrap_or_default();
+    (input, output, release)
+}
+
+fn derive_default_output_path(input_path: &str) -> PathBuf {
+    let stem = Path::new(input_path).file_stem().unwrap_or_default();
     let mut out = PathBuf::from(stem);
     if cfg!(windows) {
         out.set_extension("exe");

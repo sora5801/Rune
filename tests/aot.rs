@@ -40,7 +40,8 @@ fn build_exe(src: &str, obj: &PathBuf, exe: &PathBuf) -> Result<(), String> {
         return Err(format!("type errors: {:?}", cr.errors));
     }
     let mut hir = Lowerer::new(&res, &cr).lower_module(&module);
-    let bytes = aot::build_object(&mut hir, "test").map_err(|e| e.to_string())?;
+    let bytes = aot::build_object(&mut hir, "test", OptLevel::None)
+        .map_err(|e| e.to_string())?;
     std::fs::write(obj, &bytes).map_err(|e| format!("write obj: {}", e))?;
     aot::link(obj, exe).map_err(|e| e.to_string())?;
     Ok(())
@@ -127,4 +128,119 @@ fn cross_function_calls() {
         fn main() -> i64 { double(21) }
     "#;
     assert_eq!(build_and_run(src), 42);
+}
+
+// ---- print builtin ----
+
+fn build_and_capture(src: &str) -> (i32, String) {
+    let (obj, exe) = temp_paths();
+    build_exe(src, &obj, &exe).expect("build");
+    let out = Command::new(&exe).output().expect("run exe");
+    let code = out.status.code().expect("exit normally");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    (code, stdout)
+}
+
+#[test]
+fn print_single_value() {
+    let src = r#"
+        fn main() -> i64 {
+            print(42);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn print_multiple_values() {
+    let src = r#"
+        fn main() -> i64 {
+            print(1);
+            print(2);
+            print(3);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["1", "2", "3"]);
+}
+
+#[test]
+fn print_in_loop() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            for x in xs {
+                print(x);
+            }
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["10", "20", "30"]);
+}
+
+#[test]
+fn print_computed_value() {
+    let src = r#"
+        fn fib(n: i64) -> i64 {
+            if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+        }
+        fn main() -> i64 {
+            print(fib(10));
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "55");
+}
+
+// ---- arrays + for in AOT ----
+
+#[test]
+fn aot_array_sum() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [1, 2, 3, 4, 5];
+            let mut sum = 0;
+            for x in xs {
+                sum = sum + x;
+            }
+            sum
+        }
+    "#;
+    assert_eq!(build_and_run(src), 15);
+}
+
+// ---- --release flag ----
+
+#[test]
+fn release_mode_builds_and_runs() {
+    // Same source as recursive_fib, but compiled with OptLevel::Speed.
+    let src = r#"
+        fn fib(n: i64) -> i64 {
+            if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+        }
+        fn main() -> i64 { fib(10) }
+    "#;
+    let (obj, exe) = temp_paths();
+    let (tokens, _) = Lexer::new(src).tokenize();
+    let (module, _) = Parser::new(tokens).parse_module();
+    let (res, _) = Resolver::new().resolve_module(&module);
+    let cr = Checker::new(&res).check_module(&module);
+    assert!(cr.errors.is_empty());
+    let mut hir = Lowerer::new(&res, &cr).lower_module(&module);
+    let bytes = aot::build_object(&mut hir, "test", OptLevel::Speed).expect("build_object");
+    std::fs::write(&obj, &bytes).expect("write");
+    aot::link(&obj, &exe).expect("link");
+    let status = Command::new(&exe).status().expect("run");
+    assert_eq!(status.code(), Some(55));
 }

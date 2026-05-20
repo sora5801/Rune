@@ -1,0 +1,12 @@
+// primes.rn — exercises print, arrays, and for loops.
+// Run with `rune run examples/primes.rn` or compile with `rune build`.
+
+fn main() -> i64 {
+    let primes = [2, 3, 5, 7, 11, 13, 17, 19];
+    let mut sum = 0;
+    for p in primes {
+        print(p);
+        sum = sum + p;
+    }
+    sum
+}
