@@ -575,8 +575,6 @@ impl<'a> Lowerer<'a> {
         let dispatched = match (poly_name, arg_ty) {
             ("print", Some(Ty::Int(_))) => "print_i64",
             ("print", Some(Ty::Str)) => "print_str",
-            ("free", Some(Ty::Vec)) => "free_vec",
-            ("free", Some(Ty::Str)) => "free_str",
             _ => {
                 return HirExprKind::Unsupported(format!(
                     "no dispatch for polymorphic builtin `{}` with that argument type",

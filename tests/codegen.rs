@@ -1215,17 +1215,20 @@ fn enum_returned_from_function() {
     assert_eq!(run_main(src), 1);
 }
 
-// ---- free(x) builtin ----
+// ---- ARC reclamation (step 2 of the reclamation ladder) ----
 
 #[test]
-fn free_vec_does_not_crash() {
+fn arc_vec_local_dropped_at_scope_exit() {
+    // The vec_new descriptor and its element array are dealloc'd at
+    // function exit. We can't observe the dealloc directly from Rune,
+    // but if release misbehaves (double-free, stale read) the JIT
+    // crashes — so "the program produces 42" is the assertion.
     let src = r#"
         fn main() -> i64 {
             let v = vec_new();
             v.push(1);
             v.push(2);
             v.push(3);
-            free(v);
             42
         }
     "#;
@@ -1233,35 +1236,133 @@ fn free_vec_does_not_crash() {
 }
 
 #[test]
-fn free_concat_str_does_not_crash() {
+fn arc_concat_str_dropped_at_scope_exit() {
     let src = r#"
         fn main() -> i64 {
             let s = "foo" + "bar";
-            free(s);
-            42
+            s.len()
         }
     "#;
-    assert_eq!(run_main(src), 42);
+    assert_eq!(run_main(src), 6);
 }
 
 #[test]
-fn free_in_loop_reclaims_steadily() {
-    // Allocate 1000 Vecs, free each. With reclamation, memory stays bounded;
-    // without it, peak ~24KB descriptors + ~few KB elements. Either way it
-    // doesn't crash, which is the assertion.
+fn arc_in_loop_reclaims_steadily() {
+    // Each iteration allocates a Vec, uses it, and drops it at the end
+    // of the loop body. With ARC, memory stays bounded; without it,
+    // peak ~32KB descriptors + ~few KB elements. The 100_000-iteration
+    // count is the smoke test for steady reclamation — a leaking
+    // program would spike to ~tens of MB.
     let src = r#"
         fn main() -> i64 {
             let mut i = 0;
-            while i < 1000 {
+            while i < 100000 {
                 let v = vec_new();
                 v.push(i);
-                free(v);
                 i = i + 1;
             }
             i
         }
     "#;
-    assert_eq!(run_main(src), 1000);
+    assert_eq!(run_main(src), 100000);
+}
+
+#[test]
+fn arc_concat_in_loop_reclaims() {
+    // Each iteration allocates a fresh concat-str, uses .len(), and
+    // drops it on body scope exit. If release misbehaves the JIT
+    // crashes; if it leaks the test still passes but RSS grows.
+    let src = r#"
+        fn main() -> i64 {
+            let mut i = 0;
+            let mut total = 0;
+            while i < 100000 {
+                let s = "x" + "y";
+                total = total + s.len();
+                i = i + 1;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 200000);
+}
+
+#[test]
+fn arc_return_local_vec_caller_uses_it() {
+    // The callee retains the local before returning, then the
+    // scope-exit release brings net to +1 (caller-owned).
+    let src = r#"
+        fn make() -> Vec {
+            let v = vec_new();
+            v.push(10);
+            v.push(20);
+            v
+        }
+        fn main() -> i64 {
+            let v = make();
+            v.get(0) + v.get(1)
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn arc_return_local_str_caller_uses_it() {
+    let src = r#"
+        fn make() -> str {
+            let s = "hello, " + "world";
+            s
+        }
+        fn main() -> i64 {
+            let s = make();
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn arc_explicit_return_releases_locals() {
+    // Verifies that early-return through if-branch releases locals
+    // correctly. `extra` is dealloc'd on the return path; `v` is
+    // retained for the caller.
+    let src = r#"
+        fn pick(cond: bool) -> Vec {
+            let v = vec_new();
+            v.push(1);
+            if cond {
+                let extra = vec_new();
+                extra.push(99);
+                return v;
+            }
+            v
+        }
+        fn main() -> i64 {
+            let a = pick(true);
+            let b = pick(false);
+            a.get(0) + b.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn arc_str_literal_no_op_release() {
+    // String literals have rc = -1 sentinel; release is a no-op.
+    // Iterating 100k times exercises the sentinel path without crash.
+    let src = r#"
+        fn main() -> i64 {
+            let mut i = 0;
+            let mut total = 0;
+            while i < 100000 {
+                let s = "literal";
+                total = total + s.len();
+                i = i + 1;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 700000);
 }
 
 // ---- match codegen ----

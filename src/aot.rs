@@ -21,6 +21,7 @@ const RUNTIME_C: &str = r#"
 struct rune_str {
     const char* ptr;
     int64_t     len;
+    int64_t     rc;   // ARC refcount; -1 = literal (never reclaim)
 };
 
 void rune_print_i64(int64_t x) {
@@ -42,6 +43,7 @@ int8_t rune_str_eq(const struct rune_str* a, const struct rune_str* b) {
 struct rune_str* rune_str_concat(const struct rune_str* a, const struct rune_str* b) {
     int64_t total_len = a->len + b->len;
     struct rune_str* result = (struct rune_str*)malloc(sizeof(struct rune_str));
+    result->rc = 1;
     if (total_len == 0) {
         result->ptr = (const char*)0;
         result->len = 0;
@@ -66,6 +68,7 @@ struct rune_str* rune_str_slice(const struct rune_str* s, int64_t start, int64_t
     end   = clamp_i64(end,   start, s->len);
     int64_t new_len = end - start;
     struct rune_str* result = (struct rune_str*)malloc(sizeof(struct rune_str));
+    result->rc = 1;
     if (new_len == 0) {
         result->ptr = (const char*)0;
         result->len = 0;
@@ -104,6 +107,7 @@ struct rune_vec {
     int64_t* ptr;
     int64_t  len;
     int64_t  cap;
+    int64_t  rc;     // ARC refcount; always >= 1 for heap (no Vec literals)
 };
 
 struct rune_vec* rune_vec_new(void) {
@@ -111,6 +115,7 @@ struct rune_vec* rune_vec_new(void) {
     v->ptr = (int64_t*)0;
     v->len = 0;
     v->cap = 0;
+    v->rc = 1;
     return v;
 }
 
@@ -138,14 +143,28 @@ void rune_panic_bounds(int64_t idx, int64_t len) {
     exit(1);
 }
 
-void rune_free_str(struct rune_str* s) {
-    if (s == NULL) return;
+void rune_retain_str(struct rune_str* s) {
+    if (s == NULL || s->rc == -1) return;
+    s->rc += 1;
+}
+
+void rune_release_str(struct rune_str* s) {
+    if (s == NULL || s->rc == -1) return;
+    s->rc -= 1;
+    if (s->rc > 0) return;
     if (s->ptr != NULL) free((void*)s->ptr);
     free(s);
 }
 
-void rune_free_vec(struct rune_vec* v) {
-    if (v == NULL) return;
+void rune_retain_vec(struct rune_vec* v) {
+    if (v == NULL || v->rc == -1) return;
+    v->rc += 1;
+}
+
+void rune_release_vec(struct rune_vec* v) {
+    if (v == NULL || v->rc == -1) return;
+    v->rc -= 1;
+    if (v->rc > 0) return;
     if (v->ptr != NULL) free(v->ptr);
     free(v);
 }

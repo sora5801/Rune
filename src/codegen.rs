@@ -49,11 +49,16 @@ pub struct Codegen<M: Module> {
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
-/// codegen/runtime boundary. 16 bytes, 8-byte aligned.
+/// codegen/runtime boundary. 24 bytes, 8-byte aligned.
+///
+/// `rc` is the ARC refcount. Stack-allocated descriptors (string
+/// literals) use the sentinel value `-1` to mean "never reclaim";
+/// heap-allocated descriptors start at `1` and dealloc on `0`.
 #[repr(C)]
 struct RuneStr {
     ptr: *const u8,
     len: i64,
+    rc: i64,
 }
 
 /// Host implementation of `print(i64)` for JIT mode.
@@ -61,12 +66,16 @@ extern "C" fn rune_runtime_print_i64(x: i64) {
     println!("{}", x);
 }
 
-/// Vec descriptor: `{ ptr: *mut i64, len: i64, cap: i64 }` — 24 bytes.
+/// Vec descriptor: `{ ptr, len, cap, rc }` — 32 bytes.
+/// See `RuneStr` for the `rc` sentinel convention; today only string
+/// literals use a stack descriptor, so Vec descriptors are always
+/// heap-allocated and rc starts at 1.
 #[repr(C)]
 struct RuneVec {
     ptr: *mut i64,
     len: i64,
     cap: i64,
+    rc: i64,
 }
 
 extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
@@ -76,6 +85,7 @@ extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
         (*v).ptr = std::ptr::null_mut();
         (*v).len = 0;
         (*v).cap = 0;
+        (*v).rc = 1;
         v
     }
 }
@@ -208,6 +218,7 @@ extern "C" fn rune_runtime_str_slice(
         let end = end.max(start).min(s.len);
         let new_len = end - start;
         let desc = alloc(Layout::new::<RuneStr>()) as *mut RuneStr;
+        (*desc).rc = 1;
         if new_len == 0 {
             (*desc).ptr = std::ptr::null();
             (*desc).len = 0;
@@ -240,13 +251,37 @@ extern "C" fn rune_runtime_panic_no_match() -> ! {
     std::process::exit(1);
 }
 
-/// Reclaims a heap-allocated string descriptor + its bytes. Pairs with
-/// `rune_str_concat` and `rune_str_slice` — calling it on a literal
-/// string is undefined behavior (the bytes live in `.rodata`).
-extern "C" fn rune_runtime_free_str(s: *mut RuneStr) {
+/// Increment the refcount of a heap-allocated string descriptor.
+/// No-op on the rc=-1 sentinel used by literal strings (stack
+/// descriptors). Null is also a no-op for defensive safety.
+extern "C" fn rune_runtime_retain_str(s: *mut RuneStr) {
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        let rc = (*s).rc;
+        if rc == -1 {
+            return;
+        }
+        (*s).rc = rc + 1;
+    }
+}
+
+/// Decrement the refcount of a string descriptor. Deallocates when
+/// the count hits zero. No-op on the sentinel.
+extern "C" fn rune_runtime_release_str(s: *mut RuneStr) {
     use std::alloc::{dealloc, Layout};
     unsafe {
         if s.is_null() {
+            return;
+        }
+        let rc = (*s).rc;
+        if rc == -1 {
+            return;
+        }
+        let new_rc = rc - 1;
+        (*s).rc = new_rc;
+        if new_rc > 0 {
             return;
         }
         let s_ref = &*s;
@@ -261,11 +296,32 @@ extern "C" fn rune_runtime_free_str(s: *mut RuneStr) {
     }
 }
 
-/// Reclaims a heap-allocated Vec descriptor + its element array.
-extern "C" fn rune_runtime_free_vec(v: *mut RuneVec) {
+extern "C" fn rune_runtime_retain_vec(v: *mut RuneVec) {
+    unsafe {
+        if v.is_null() {
+            return;
+        }
+        let rc = (*v).rc;
+        if rc == -1 {
+            return;
+        }
+        (*v).rc = rc + 1;
+    }
+}
+
+extern "C" fn rune_runtime_release_vec(v: *mut RuneVec) {
     use std::alloc::{dealloc, Layout};
     unsafe {
         if v.is_null() {
+            return;
+        }
+        let rc = (*v).rc;
+        if rc == -1 {
+            return;
+        }
+        let new_rc = rc - 1;
+        (*v).rc = new_rc;
+        if new_rc > 0 {
             return;
         }
         let v_ref = &*v;
@@ -289,6 +345,7 @@ extern "C" fn rune_runtime_str_concat(a: *const RuneStr, b: *const RuneStr) -> *
         let total_len = a.len + b.len;
         let desc_layout = Layout::new::<RuneStr>();
         let desc = alloc(desc_layout) as *mut RuneStr;
+        (*desc).rc = 1;
         if total_len == 0 {
             (*desc).ptr = std::ptr::null();
             (*desc).len = 0;
@@ -369,6 +426,7 @@ impl<M: Module> Codegen<M> {
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
+            arc_locals: Vec::new(),
         };
 
         for (i, p) in f.params.iter().enumerate() {
@@ -445,8 +503,10 @@ impl Codegen<JITModule> {
         builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
         builder.symbol("rune_panic_bounds", rune_runtime_panic_bounds as *const u8);
         builder.symbol("rune_panic_no_match", rune_runtime_panic_no_match as *const u8);
-        builder.symbol("rune_free_str", rune_runtime_free_str as *const u8);
-        builder.symbol("rune_free_vec", rune_runtime_free_vec as *const u8);
+        builder.symbol("rune_retain_str", rune_runtime_retain_str as *const u8);
+        builder.symbol("rune_release_str", rune_runtime_release_str as *const u8);
+        builder.symbol("rune_retain_vec", rune_runtime_retain_vec as *const u8);
+        builder.symbol("rune_release_vec", rune_runtime_release_vec as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -574,6 +634,10 @@ struct FnCodegen<'a, M: Module> {
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
+    /// Stack of locals that own a +1 ARC ref and need to be released
+    /// at scope exit. Each entry is the Cranelift Variable holding the
+    /// pointer plus the ARC type (Vec or Str) to pick the runtime helper.
+    arc_locals: Vec<(Variable, Ty)>,
 }
 
 impl<'a, M: Module> FnCodegen<'a, M> {
@@ -593,14 +657,71 @@ impl<'a, M: Module> FnCodegen<'a, M> {
     }
 
     fn compile_block(&mut self, b: &HirBlock) -> Result<Option<Value>, CodegenError> {
+        let snapshot = self.arc_locals.len();
         let mut last_val: Option<Value> = None;
-        for s in &b.stmts {
+        let mut tail_escapes_local_arc_ty: Option<Ty> = None;
+        for (i, s) in b.stmts.iter().enumerate() {
             last_val = self.compile_stmt(s)?;
             if self.is_filled() {
                 break;
             }
+            // Detect a tail expression statement (last in the block, no
+            // semicolon) whose value is a borrowed Local read of an ARC
+            // type. We need to retain it before the scope-exit release
+            // below so the caller receives +1.
+            if i + 1 == b.stmts.len() {
+                if let HirStmt::Expr(e, false) = s {
+                    if let HirExprKind::Local(_) = &e.kind {
+                        if is_arc_type(&e.ty) {
+                            tail_escapes_local_arc_ty = Some(e.ty.clone());
+                        }
+                    }
+                }
+            }
         }
+        // Retain a borrowed tail value if needed, then release everything
+        // pushed during this block's scope.
+        if !self.is_filled() {
+            if let (Some(v), Some(ty)) = (last_val, tail_escapes_local_arc_ty) {
+                self.emit_arc_call("retain", &ty, v)?;
+            }
+            self.release_arc_locals_to(snapshot)?;
+        }
+        self.arc_locals.truncate(snapshot);
         Ok(last_val)
+    }
+
+    /// Emit a release call on each arc_local from index `target` to the
+    /// current end. Does not truncate the vector — callers truncate after
+    /// emitting all paths that exit the scope.
+    fn release_arc_locals_to(&mut self, target: usize) -> Result<(), CodegenError> {
+        for i in (target..self.arc_locals.len()).rev() {
+            let (var, ty) = (self.arc_locals[i].0, self.arc_locals[i].1.clone());
+            let v = self.builder.use_var(var);
+            self.emit_arc_call("release", &ty, v)?;
+        }
+        Ok(())
+    }
+
+    /// Emit retain or release for every active arc_local across all scopes.
+    /// Used at return statements where execution leaves the function.
+    fn release_all_arc_locals(&mut self) -> Result<(), CodegenError> {
+        self.release_arc_locals_to(0)
+    }
+
+    fn emit_arc_call(
+        &mut self,
+        action: &str,
+        ty: &Ty,
+        value: Value,
+    ) -> Result<(), CodegenError> {
+        let helper = arc_helper_name(action, ty)?;
+        let func_id = self.ensure_runtime_func(helper)?;
+        let local_func = self
+            .module
+            .declare_func_in_func(func_id, self.builder.func);
+        self.builder.ins().call(local_func, &[value]);
+        Ok(())
     }
 
     fn compile_stmt(&mut self, s: &HirStmt) -> Result<Option<Value>, CodegenError> {
@@ -609,17 +730,30 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let cty = cranelift_type(&l.ty)?;
                 let var = self.alloc_var();
                 self.builder.declare_var(var, cty);
+                let mut owns_arc = false;
                 if let Some(init) = &l.init {
                     let v = self
                         .compile_expr(init)?
                         .ok_or_else(|| CodegenError("let initializer produced no value".into()))?;
                     self.builder.def_var(var, v);
+                    // Register this local as ARC-owning iff the init is
+                    // a fresh +1 producer (anything but reading another
+                    // local — copies between ARC locals are not tracked
+                    // in v0.x; see session 018 deep dive).
+                    if is_arc_type(&l.ty)
+                        && !matches!(init.kind, HirExprKind::Local(_))
+                    {
+                        owns_arc = true;
+                    }
                 } else {
                     let z = self.builder.ins().iconst(cty, 0);
                     self.builder.def_var(var, z);
                 }
                 if let Some(sym) = l.sym {
                     self.var_map.insert(sym, var);
+                }
+                if owns_arc {
+                    self.arc_locals.push((var, l.ty.clone()));
                 }
                 Ok(None)
             }
@@ -743,10 +877,19 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     let val = self
                         .compile_expr(v)?
                         .ok_or_else(|| CodegenError("return value produced no value".into()))?;
+                    // If the returned value is a borrowed Local read of an
+                    // ARC type, retain it so the caller receives +1 after
+                    // we release all locals below.
+                    if let HirExprKind::Local(_) = &v.kind {
+                        if is_arc_type(&v.ty) {
+                            self.emit_arc_call("retain", &v.ty, val)?;
+                        }
+                    }
                     vec![val]
                 } else {
                     vec![]
                 };
+                self.release_all_arc_locals()?;
                 self.builder.ins().return_(&vals);
                 let after = self.builder.create_block();
                 self.builder.switch_to_block(after);
@@ -796,10 +939,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             self.builder.ins().symbol_value(types::I64, gv)
         };
 
-        // 2. Build a 16-byte (ptr, len) descriptor on the stack.
+        // 2. Build a 24-byte (ptr, len, rc) descriptor on the stack.
+        //    rc = -1 marks it as a literal so retain/release become no-ops.
         let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            16,
+            24,
             3,
         ));
         self.builder.ins().stack_store(bytes_ptr, slot, 0);
@@ -808,6 +952,8 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             .ins()
             .iconst(types::I64, text.len() as i64);
         self.builder.ins().stack_store(len_const, slot, 8);
+        let sentinel = self.builder.ins().iconst(types::I64, -1);
+        self.builder.ins().stack_store(sentinel, slot, 16);
 
         Ok(Some(self.builder.ins().stack_addr(types::I64, slot, 0)))
     }
@@ -1753,6 +1899,29 @@ impl<'a, M: Module> FnCodegen<'a, M> {
     }
 }
 
+/// Types whose values are heap-allocated descriptors managed by ARC.
+/// Stack-allocated string literals also have this type but use the
+/// rc=-1 sentinel so retain/release become no-ops.
+fn is_arc_type(ty: &Ty) -> bool {
+    matches!(ty, Ty::Vec | Ty::Str)
+}
+
+fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> {
+    Ok(match (action, ty) {
+        ("retain", Ty::Vec) => "retain_vec",
+        ("release", Ty::Vec) => "release_vec",
+        ("retain", Ty::Str) => "retain_str",
+        ("release", Ty::Str) => "release_str",
+        _ => {
+            return Err(CodegenError(format!(
+                "no ARC helper for action `{}` on `{}`",
+                action,
+                ty.display()
+            )));
+        }
+    })
+}
+
 fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
     Ok(match ty {
         Ty::Bool => types::I8,
@@ -1900,15 +2069,25 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             ("rune_panic_bounds", sig)
         }
-        "free_str" => {
+        "retain_str" => {
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // *RuneStr
-            ("rune_free_str", sig)
+            ("rune_retain_str", sig)
         }
-        "free_vec" => {
+        "release_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *RuneStr
+            ("rune_release_str", sig)
+        }
+        "retain_vec" => {
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // *RuneVec
-            ("rune_free_vec", sig)
+            ("rune_retain_vec", sig)
+        }
+        "release_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *RuneVec
+            ("rune_release_vec", sig)
         }
         "panic_no_match" => {
             // () -> never; same trap-after-call shape as panic_bounds.

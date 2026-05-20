@@ -85,7 +85,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 95 integration tests.
+- 91 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -146,11 +146,15 @@ rune: linked with clang -> primes.exe
     Non-exhaustive matches and unreachable arms are compile-time
     errors; a runtime `rune_panic_no_match` backstop stays wired as
     defense in depth.
-  - Manual reclamation: **`free(x)`** polymorphic builtin dispatches
-    to `free_vec` / `free_str`. Step 1 of the reclamation ladder
-    (ARC is step 2).
+  - **ARC reclamation (step 2 of the reclamation ladder).** Vec and
+    concat/sliced str descriptors carry a refcount; codegen tracks
+    "owned ARC locals" per scope and emits release calls at scope
+    exit. Returning a local of ARC type retains first so the caller
+    gets +1. String literals use a `rc=-1` sentinel so the runtime
+    helpers no-op on them. Non-atomic (single-threaded only); ARC-on-
+    copy and struct fields are still to come.
 - ABI: target-native (effectively `extern "C"`).
-- 123 JIT codegen tests + 34 AOT tests.
+- 128 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -174,13 +178,14 @@ at lowering with a clear error if reached.
 
 ## Roadmap
 
-1. Char literal codegen + `as` cast codegen + parser precedence fix
+1. ARC-on-copy (`let y = x` retains) + ARC for struct fields
+2. Char literal codegen + `as` cast codegen + parser precedence fix
    for `!f(x)`
-2. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
-3. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
-4. ARC for heap allocations (step 2 of the reclamation ladder)
-5. Traits / interfaces
-6. Self-hosted bootstrap (long-term)
+3. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
+4. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
+5. `weak` references for cycle breaking
+6. Traits / interfaces
+7. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 
