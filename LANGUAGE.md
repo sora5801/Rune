@@ -37,7 +37,7 @@ via Cranelift; compiler written in Rust.
 
 ## Numeric types
 
-**Status: Tentative.** Rust-like sized scalars.
+**Status: Decided.** Rust-like sized scalars.
 
 | Family | Types |
 | --- | --- |
@@ -46,10 +46,15 @@ via Cranelift; compiler written in Rust.
 | Pointer-sized | `isize`, `usize` |
 | Floating point | `f32`, `f64` |
 
-- Default integer type for unannotated literals: `i32`.
-- Default float type: `f64`.
+- **Default integer type for unannotated literals: `i64`** (pinned 2026-05-19).
+- **Default float type: `f64`** (pinned 2026-05-19).
 - Numeric literal suffixes (e.g. `42i64`, `3.14f32`) will be added in the lexer
   once the type checker needs them.
+
+**Why `i64` over `i32`:** Rune targets 64-bit native via Cranelift; word-sized
+default keeps array indexing and `usize` interop ergonomic. Swift made the
+same choice with `Int`. Rust's `i32` default is historical (32-bit-friendly,
+pre-2015 era) and forces noisy casts for any sized container.
 
 **Why sized:** maps cleanly to Cranelift's primitive IR types. Reasonable for
 a systems-leaning language; trivial to interop with C.
@@ -60,16 +65,34 @@ memory layout.
 
 ## Mutability
 
-**Status: Tentative.** Immutable bindings by default; opt-in mutability with
-`let mut`.
+**Status: Decided.** Immutable bindings by default; opt-in mutability with
+`let mut`. Enforcement is **strict** — assignment to an immutable binding is
+a type error, not a warning.
 
-- `let x = 5;` — immutable binding.
-- `let mut x = 5; x += 1;` — mutable.
-- Function parameters are immutable in their declaration; rebinding inside a
-  function body uses ordinary `let`/`let mut`.
+- `let x = 5;` — immutable binding. `x = 6;` is rejected.
+- `let mut x = 5; x += 1;` — mutable. Compound assignment also requires `mut`.
+- Function parameters are immutable in their declaration. To mutate a
+  parameter's value inside the function body, rebind with `let mut`.
 
-**Why:** matches Rust/Swift. Encourages explicit mutation. Aligns with the
-parser's existing keyword set.
+**Why:** matches Rust/Swift. Encourages explicit mutation. The `mut` keyword
+isn't decorative — the type checker rejects writes to immutable bindings.
+
+## Name resolution
+
+**Status: Decided.** Lexical scoping with shadowing allowed.
+
+- Innermost scope first, then enclosing scopes, then the module, then
+  built-ins (primitive type names).
+- **Shadowing within the same scope is allowed.** `let x = 1; let x = "hi";`
+  rebinds `x` to a new binding (possibly with a different type). Each
+  `let` creates a fresh symbol; references between the two declarations
+  resolve to whichever was most recently declared.
+- Forward references between top-level items work (two-pass resolution:
+  collect declarations first, then resolve bodies).
+
+**Why allow shadowing:** retains Rust's idiomatic stepwise refinement
+(`let x = parse(); let x = x?;`). Banning it would also break the natural
+`let mut x = ...; let x = x;` pattern for "freeze this after building it."
 
 ## Memory model
 
@@ -175,3 +198,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | --- | --- | --- |
 | 2026-05-19 | Initial draft | Syntax decided; numerics, mutability, error handling, strings, compilation model tentative; memory model, type system, modules, concurrency open |
 | 2026-05-19 | Parser implemented | Syntactic decisions pinned via implementation: Pratt precedence table, postfix `?` and `as`, `match` arm shape (`pat => expr,`), `else if` chains, expression-oriented blocks with optional trailing expression. Comparison operators currently left-associative (Rust treats them as non-associative — open). |
+| 2026-05-19 | Resolver + type checker | Three previously-tentative decisions pinned: default integer type → `i64` (was `i32` placeholder); mutability enforcement → strict (immutable bindings can't be reassigned); name resolution → lexical scoping with shadowing allowed. Bottom-up monomorphic type checker landed. |

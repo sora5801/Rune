@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use rune::{Lexer, Parser};
+use rune::{Checker, Lexer, Parser, Resolver};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -13,6 +13,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "tokens" => cmd_tokens(&args),
         "ast" => cmd_ast(&args),
+        "check" => cmd_check(&args),
         "--help" | "-h" | "help" => {
             print_usage();
             ExitCode::SUCCESS
@@ -31,6 +32,7 @@ fn print_usage() {
     eprintln!("commands:");
     eprintln!("  tokens <file>    print tokens from a source file");
     eprintln!("  ast <file>       parse and print the AST");
+    eprintln!("  check <file>     parse, resolve names, type-check");
 }
 
 fn read_source(path: &str) -> Result<String, ExitCode> {
@@ -76,21 +78,50 @@ fn cmd_ast(args: &[String]) -> ExitCode {
     let (module, parse_errors) = Parser::new(tokens).parse_module();
     println!("{:#?}", module);
     let mut had_errors = false;
-    if !lex_errors.is_empty() {
-        eprintln!();
-        for err in &lex_errors {
-            eprintln!("{}", err);
-        }
+    for err in &lex_errors {
+        eprintln!("{}", err);
         had_errors = true;
     }
-    if !parse_errors.is_empty() {
-        if lex_errors.is_empty() {
-            eprintln!();
-        }
-        for err in &parse_errors {
-            eprintln!("{}", err);
-        }
+    for err in &parse_errors {
+        eprintln!("{}", err);
         had_errors = true;
+    }
+    if had_errors { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+fn cmd_check(args: &[String]) -> ExitCode {
+    let Some(path) = args.get(1) else {
+        eprintln!("usage: rune check <file>");
+        return ExitCode::from(2);
+    };
+    let source = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let (module, parse_errors) = Parser::new(tokens).parse_module();
+    let (resolutions, resolve_errors) = Resolver::new().resolve_module(&module);
+    let check_results = Checker::new(&resolutions).check_module(&module);
+
+    let mut had_errors = false;
+    for err in &lex_errors {
+        eprintln!("{}", err);
+        had_errors = true;
+    }
+    for err in &parse_errors {
+        eprintln!("{}", err);
+        had_errors = true;
+    }
+    for err in &resolve_errors {
+        eprintln!("{}", err);
+        had_errors = true;
+    }
+    for err in &check_results.errors {
+        eprintln!("{}", err);
+        had_errors = true;
+    }
+    if !had_errors {
+        println!("ok");
     }
     if had_errors { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }

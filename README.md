@@ -5,7 +5,8 @@ targeting native code via Cranelift.
 
 ## Status
 
-**Pre-alpha — lexer + parser.** No name resolution, type checker, or codegen yet.
+**Pre-alpha — front end (lexer, parser, resolver, type checker) complete.**
+No code generation yet.
 
 ## Implementation state
 
@@ -52,16 +53,50 @@ targeting native code via Cranelift.
 - Error recovery synchronizes at item-starting keywords
 - 37 integration tests
 
-### Type checker — not started
+### Resolver — done
+
+- Two-pass: declare top-level items, then resolve bodies. Order-independent
+  forward references between items work.
+- Built-in type names (`bool`, `char`, `str`, `i8`–`i64`, `u8`–`u64`,
+  `isize`/`usize`, `f32`/`f64`) pre-populated as symbols.
+- Lexical scoping with shadowing allowed inside the same scope.
+- Resolves identifier paths in expression and type position.
+- Records `path → symbol` and `declaration → symbol` mappings for the
+  type checker to consume.
+
+### Type checker — done
+
+- Primitive types: `bool`, `char`, `i8`–`i64`, `u8`–`u64`, `isize`,
+  `usize`, `f32`, `f64`, `str`, `()`.
+- Inferred array types from literals (`[1, 2, 3]` → `[i64; 3]`).
+- Unannotated `int` literals default to **`i64`**, `float` literals to
+  **`f64`**.
+- `let` checks initializer type against annotation; infers type when no
+  annotation; rejects bindings with neither type nor init.
+- **Mutability is strictly enforced**: assignment to an immutable binding,
+  parameter, or const is a type error.
+- Binary operators check operand types: arithmetic and bitwise require
+  matching numeric / integer operands; comparison returns `bool`; logical
+  `&&`/`||` require `bool`; comparison on `<`/`>`/`<=`/`>=` requires
+  ordered (numeric or `char`).
+- Unary: `-` numeric, `!` bool, `~` integer.
+- `if`/`else` branches must unify; `if` without `else` must yield `()`.
+- `while` condition must be `bool`. `for x in arr` binds element type.
+- Function calls check arity and argument types against the declared
+  signature; returns the declared return type.
+- `as` casts allowed between numeric / `bool` / `char` / integer pairs.
+- Cascading errors are suppressed via a sentinel `Error` type.
+- 40 integration tests.
+
 ### Code generation — not started
 
 ## Roadmap
 
-1. Resolver / name resolution
-2. Type checker
-3. HIR + lowering
-4. Cranelift codegen (hello-world first)
-5. Minimal stdlib (print, arithmetic, basic collections)
+1. HIR + lowering
+2. Cranelift codegen (hello-world first)
+3. Minimal stdlib (print, arithmetic, basic collections)
+4. Method calls + struct field type-checking
+5. Generics (parametric polymorphism)
 6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
@@ -91,6 +126,7 @@ cargo test
 ```
 rune tokens <file.rn>    # dump tokens from a source file
 rune ast <file.rn>       # parse and dump the AST
+rune check <file.rn>     # parse, resolve names, type-check
 ```
 
 ## Documentation
