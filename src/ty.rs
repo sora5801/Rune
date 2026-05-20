@@ -54,8 +54,15 @@ pub enum Ty {
     /// once parametric polymorphism arrives.
     Vec,
     Fn { params: Vec<Ty>, ret: Box<Ty> },
-    Struct(SymbolId),
-    Enum(SymbolId),
+    /// A struct type, with its type arguments at this use site.
+    /// Empty `Vec` for non-generic structs; for generic structs the
+    /// args are populated by the resolver from `Path::generic_args`.
+    /// The arg list is what lets `b.value` on `Box<i64>` resolve the
+    /// field to i64 even though the struct's layout has TypeVar.
+    Struct(SymbolId, Vec<Ty>),
+    /// An enum type, with its type arguments. Same convention as
+    /// Struct: empty Vec for non-generic.
+    Enum(SymbolId, Vec<Ty>),
     /// A generic type parameter (`T` inside `fn id<T>(x: T) -> T`).
     /// Opaque to the checker; the codegen path bails when one of these
     /// reaches it (monomorphization is step 2 of the generics roadmap).
@@ -94,14 +101,23 @@ impl Ty {
     /// `TypeVar` is opaque — it's compatible with anything, since the
     /// monomorphizer will resolve it to a concrete type later. This is
     /// a coarse rule but suffices for v0.x without trait constraints.
+    /// Struct/Enum with matching syms are compatible regardless of
+    /// their type-arg lists — args may differ at variant-construction
+    /// sites (where we use `[]`) vs use sites (where the path carries
+    /// the args). The monomorphizer + lowerer use the args directly
+    /// for codegen, not the checker's `compatible`.
     pub fn compatible(&self, other: &Ty) -> bool {
-        self.is_error()
-            || other.is_error()
-            || self.is_never()
-            || other.is_never()
-            || matches!(self, Ty::TypeVar(_))
-            || matches!(other, Ty::TypeVar(_))
-            || self == other
+        if self.is_error() || other.is_error() || self.is_never() || other.is_never() {
+            return true;
+        }
+        if matches!(self, Ty::TypeVar(_)) || matches!(other, Ty::TypeVar(_)) {
+            return true;
+        }
+        match (self, other) {
+            (Ty::Struct(s1, _), Ty::Struct(s2, _)) => s1 == s2,
+            (Ty::Enum(s1, _), Ty::Enum(s2, _)) => s1 == s2,
+            _ => self == other,
+        }
     }
 
     /// Unify two branch types into one (used for `if`/`else`, `match` arms).
@@ -127,8 +143,20 @@ impl Ty {
                 let ps: Vec<String> = params.iter().map(|t| t.display()).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display())
             }
-            Ty::Struct(id) => format!("struct#{}", id.0),
-            Ty::Enum(id) => format!("enum#{}", id.0),
+            Ty::Struct(id, args) | Ty::Enum(id, args) => {
+                let prefix = if matches!(self, Ty::Struct(_, _)) {
+                    "struct"
+                } else {
+                    "enum"
+                };
+                if args.is_empty() {
+                    format!("{}#{}", prefix, id.0)
+                } else {
+                    let arg_strs: Vec<String> =
+                        args.iter().map(|t| t.display()).collect();
+                    format!("{}#{}<{}>", prefix, id.0, arg_strs.join(", "))
+                }
+            }
             Ty::TypeVar(id) => format!("T#{}", id.0),
             Ty::Never => "!".into(),
             Ty::Error => "?".into(),

@@ -2177,10 +2177,6 @@ fn generics_struct_field_i64() {
 
 #[test]
 fn generics_struct_double_box() {
-    // Multiple instantiations of the same generic struct. Each reads
-    // its single i64-sized field. (Arithmetic on TypeVar fields is
-    // not supported in v0.x; that would need per-instantiation
-    // struct types, which is a future cleanup.)
     let src = r#"
         struct Box<T> { value: T }
         fn main() -> i64 {
@@ -2189,6 +2185,100 @@ fn generics_struct_double_box() {
         }
     "#;
     assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn generics_struct_field_arithmetic() {
+    // After session 023, struct field types are substituted via the
+    // receiver's type args. `b1.value + b2.value` resolves to i64
+    // + i64 instead of TypeVar + TypeVar.
+    let src = r#"
+        struct Box<T> { value: T }
+        fn main() -> i64 {
+            let b1 = Box { value: 5 };
+            let b2 = Box { value: 10 };
+            b1.value + b2.value
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn generics_struct_two_fields_pair() {
+    let src = r#"
+        struct Pair<A, B> { left: A, right: B }
+        fn main() -> i64 {
+            let p = Pair { left: 7, right: 3 };
+            p.left + p.right
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn generics_struct_passed_to_generic_fn() {
+    // Unifies `Box<i64>` against `Box<T>` to bind T=i64, so the
+    // unbox function gets specialized as unbox$$Box_i64 or similar.
+    let src = r#"
+        struct Box<T> { value: T }
+        fn unbox<T>(b: Box<T>) -> T { b.value }
+        fn main() -> i64 {
+            let b = Box { value: 99 };
+            unbox(b)
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
+fn generics_option_i64() {
+    // Classic Option<T> works end-to-end thanks to enum-arg
+    // inference at variant construction.
+    let src = r#"
+        enum Option<T> { Some(T), None }
+        fn unwrap_or(o: Option<i64>, def: i64) -> i64 {
+            match o {
+                Option::Some(x) => x,
+                Option::None => def,
+            }
+        }
+        fn main() -> i64 {
+            unwrap_or(Option::Some(42), 0) + unwrap_or(Option::None, -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
+fn generics_result_two_params() {
+    let src = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        fn code(r: Result<i64, str>) -> i64 {
+            match r {
+                Result::Ok(n) => n,
+                Result::Err(_) => -1,
+            }
+        }
+        fn main() -> i64 {
+            code(Result::Ok(7)) + code(Result::Err("bad"))
+        }
+    "#;
+    // 7 + (-1) = 6
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn generics_struct_field_str_method() {
+    // Now that the field's concrete type is resolved at the use
+    // site, `.len()` on a str field works.
+    let src = r#"
+        struct Box<T> { value: T }
+        fn main() -> i64 {
+            let b = Box { value: "hello" };
+            b.value.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
 }
 
 #[test]

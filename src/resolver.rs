@@ -84,6 +84,12 @@ pub struct Resolutions {
     /// validate `Variant { name: val }` construction and
     /// destructure patterns.
     pub enum_variant_field_names: HashMap<SymbolId, Vec<String>>,
+    /// Generic type-parameter symbols per generic struct, in
+    /// declaration order. Lets users of `Ty::Struct(sym, args)`
+    /// build a substitution mapping for the struct's fields.
+    pub struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Same for enums.
+    pub enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     /// Enums that have at least one payload-bearing variant. These use
     /// a heap-allocated `{ tag, payload, rc }` descriptor at runtime
     /// instead of the plain i64 discriminant used by tag-only enums.
@@ -124,6 +130,8 @@ pub struct Resolver {
     enum_variant_payloads: HashMap<SymbolId, Vec<crate::ast::Type>>,
     enum_variant_field_names: HashMap<SymbolId, Vec<String>>,
     enum_has_payload: std::collections::HashSet<SymbolId>,
+    struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
+    enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     errors: Vec<ResolveError>,
 }
 
@@ -143,6 +151,8 @@ impl Resolver {
             enum_variant_payloads: HashMap::new(),
             enum_variant_field_names: HashMap::new(),
             enum_has_payload: std::collections::HashSet::new(),
+            struct_generics: HashMap::new(),
+            enum_generics: HashMap::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -175,6 +185,8 @@ impl Resolver {
                 enum_variant_payloads: self.enum_variant_payloads,
                 enum_variant_field_names: self.enum_variant_field_names,
                 enum_has_payload: self.enum_has_payload,
+                struct_generics: self.struct_generics,
+                enum_generics: self.enum_generics,
             },
             self.errors,
         )
@@ -418,9 +430,16 @@ impl Resolver {
 
     fn resolve_struct(&mut self, s: &StructDecl) {
         self.enter_scope();
+        let mut gen_syms: Vec<SymbolId> = Vec::with_capacity(s.generics.len());
         for g in &s.generics {
             let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
             self.decl_to_sym.insert(g.span, id);
+            gen_syms.push(id);
+        }
+        if !gen_syms.is_empty() {
+            if let Some(&struct_sym) = self.decl_to_sym.get(&s.name.span) {
+                self.struct_generics.insert(struct_sym, gen_syms);
+            }
         }
         for f in &s.fields {
             self.resolve_type(&f.ty);
@@ -430,9 +449,16 @@ impl Resolver {
 
     fn resolve_enum(&mut self, e: &EnumDecl) {
         self.enter_scope();
+        let mut gen_syms: Vec<SymbolId> = Vec::with_capacity(e.generics.len());
         for g in &e.generics {
             let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
             self.decl_to_sym.insert(g.span, id);
+            gen_syms.push(id);
+        }
+        if !gen_syms.is_empty() {
+            if let Some(&enum_sym) = self.decl_to_sym.get(&e.name.span) {
+                self.enum_generics.insert(enum_sym, gen_syms);
+            }
         }
         for v in &e.variants {
             match &v.fields {

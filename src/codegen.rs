@@ -755,7 +755,7 @@ impl<M: Module> Codegen<M> {
         value: Value,
     ) -> Result<(), CodegenError> {
         // Nested struct or payload enum: call its synthesized release.
-        if let Ty::Struct(sym) = ty {
+        if let Ty::Struct(sym, _) = ty {
             let func_id = *self
                 .struct_release_funcs
                 .get(sym)
@@ -764,7 +764,7 @@ impl<M: Module> Codegen<M> {
             builder.ins().call(local, &[value]);
             return Ok(());
         }
-        if let Ty::Enum(sym) = ty {
+        if let Ty::Enum(sym, _) = ty {
             if let Some(&func_id) = self.enum_release_funcs.get(sym) {
                 let local = self.module.declare_func_in_func(func_id, builder.func);
                 builder.ins().call(local, &[value]);
@@ -1154,7 +1154,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // Struct values: inline retain (rc++) or call the synthesized
         // per-struct release function (which does rc--, walks ARC
         // fields, and dealloc's at zero).
-        if let Ty::Struct(sym) = ty {
+        if let Ty::Struct(sym, _) = ty {
             let size = *self.struct_sizes.get(sym).unwrap_or(&0);
             match action {
                 "retain" => {
@@ -1198,7 +1198,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // Payload enums: retain inline (rc++ at the per-enum rc
         // offset); release dispatches to the synthesized per-enum
         // function which walks the variant and dealloc's properly.
-        if let Ty::Enum(sym) = ty {
+        if let Ty::Enum(sym, _) = ty {
             if self.enum_has_payload.contains(sym) {
                 let max_arity = enum_max_arity(*sym, self.enum_payload_tys);
                 let rc_offset = 8 + 8 * max_arity as i32;
@@ -1305,7 +1305,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // variant, allocate a per-enum-sized descriptor with
                 // tag and rc set; payload slots stay zero. Otherwise
                 // the value is just the i64 discriminant.
-                if let Ty::Enum(enum_sym) = &e.ty {
+                if let Ty::Enum(enum_sym, _) = &e.ty {
                     if self.enum_has_payload.contains(enum_sym) {
                         let max_arity = enum_max_arity(*enum_sym, self.enum_payload_tys);
                         let field_size = 8 + 8 * max_arity as i64;
@@ -2519,7 +2519,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // i64 discriminant.
                 let has_payload = matches!(
                     scrutinee_ty,
-                    Ty::Enum(sym) if self.enum_has_payload.contains(sym)
+                    Ty::Enum(sym, _) if self.enum_has_payload.contains(sym)
                 );
                 let tag = if has_payload {
                     self.builder
@@ -2727,8 +2727,8 @@ fn is_arc_type(
 ) -> bool {
     match ty {
         Ty::Vec | Ty::Str => true,
-        Ty::Struct(_) => true,
-        Ty::Enum(sym) => enum_has_payload.contains(sym),
+        Ty::Struct(_, _) => true,
+        Ty::Enum(sym, _) => enum_has_payload.contains(sym),
         _ => false,
     }
 }
@@ -2739,8 +2739,8 @@ fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> 
         ("release", Ty::Vec) => "release_vec",
         ("retain", Ty::Str) => "retain_str",
         ("release", Ty::Str) => "release_str",
-        ("retain", Ty::Enum(_)) => "retain_enum",
-        ("release", Ty::Enum(_)) => "release_enum",
+        ("retain", Ty::Enum(_, _)) => "retain_enum",
+        ("release", Ty::Enum(_, _)) => "release_enum",
         _ => {
             return Err(CodegenError(format!(
                 "no ARC helper for action `{}` on `{}`",
@@ -2763,11 +2763,11 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         // Strings are represented as a pointer to a (ptr, len) descriptor.
         Ty::Str => types::I64,
         // Structs are represented as a pointer to their stack-allocated body.
-        Ty::Struct(_) => types::I64,
+        Ty::Struct(_, _) => types::I64,
         // Vec is a pointer to a heap-allocated descriptor (`{ ptr, len, cap }`).
         Ty::Vec => types::I64,
         // Unit-variant enums are stored as their i64 discriminant.
-        Ty::Enum(_) => types::I64,
+        Ty::Enum(_, _) => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -2795,7 +2795,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_) | Ty::Vec | Ty::Enum(_) => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec | Ty::Enum(_, _) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",

@@ -65,8 +65,9 @@ rune: linked with clang -> primes.exe
   str>`)
 - Generic type parameters on `fn`/`struct`/`enum` items. Generic
   functions are monomorphized per concrete instantiation
-  (`id$$i64`, `pair$$i64$$str`). Generic structs work for
-  i64-shaped fields; full generic struct types are still a follow-up.
+  (`id$$i64`, `pair$$i64$$str`). `Ty::Struct` and `Ty::Enum` carry
+  type args, so `Box<i64>`, `Option<T>`, `Result<T, E>` etc. all
+  work end-to-end.
 - Error recovery at item-starting keywords
 - 47 integration tests
 
@@ -176,7 +177,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 167 JIT codegen tests + 34 AOT tests.
+- 172 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -193,19 +194,15 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** `?` (try), full generic struct types
-(passing `Box<i64>` to `unbox<T>` doesn't infer T yet),
-returning/passing arrays across function boundaries. Most emit
-`Unsupported(msg)` at lowering with a clear error if reached.
+**Not yet codegen'd:** `?` (try), returning/passing arrays across
+function boundaries. Most emit `Unsupported(msg)` at lowering with
+a clear error if reached.
 
 ## Roadmap
 
-1. Full generic struct/enum types — embed type args in `Ty::Struct`
-   and `Ty::Enum` so generic struct fields and `Option<T>` /
-   `Result<T, E>` work end-to-end
-2. `Weak<T>` for cycle breaking (now unblocked once `Option<T>`
-   works)
-3. Traits / interfaces for bounded generics (`T: Display`)
+1. `Weak<T>` for cycle breaking (now buildable on `Option<T>`)
+2. Traits / interfaces for bounded generics (`T: Display`)
+3. `?` operator desugared to Result matching
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

@@ -55,7 +55,7 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .filter(|f| match &f.ty {
                         Ty::Vec | Ty::Str => true,
-                        Ty::Struct(inner) => struct_arc_fields.contains_key(inner),
+                        Ty::Struct(inner, _) => struct_arc_fields.contains_key(inner),
                         _ => false,
                     })
                     .map(|f| (f.offset, f.ty.clone()))
@@ -258,13 +258,16 @@ impl<'a> Lowerer<'a> {
                 if let ast::Expr::Field { receiver, name, .. } = lhs.as_ref() {
                     let recv = self.lower_expr(receiver);
                     let (offset, field_ty) = match &recv.ty {
-                        Ty::Struct(sym_id) => match self
+                        Ty::Struct(sym_id, args) => match self
                             .check
                             .struct_layouts
                             .get(sym_id)
                             .and_then(|l| l.field(&name.name))
                         {
-                            Some(f) => (f.offset, f.ty.clone()),
+                            Some(f) => {
+                                let subst = build_struct_subst(self.res, *sym_id, args);
+                                (f.offset, apply_subst(&f.ty, &subst))
+                            }
                             None => {
                                 return HirExprKind::Unsupported(format!(
                                     "no field `{}` on struct",
@@ -350,7 +353,7 @@ impl<'a> Lowerer<'a> {
                 // User-defined methods on structs (via `impl`) are lowered
                 // to a regular Call with the receiver as the first
                 // argument. Builtin methods go through HirExprKind::MethodCall.
-                if let Ty::Struct(struct_sym) = &receiver_hir.ty {
+                if let Ty::Struct(struct_sym, _) = &receiver_hir.ty {
                     let key = (*struct_sym, method.name.clone());
                     if let Some(&method_sym) = self.res.impl_methods.get(&key) {
                         let mut call_args = Vec::with_capacity(args.len() + 1);
@@ -545,7 +548,7 @@ impl<'a> Lowerer<'a> {
 
     fn lower_field_access(&self, receiver: &ast::Expr, name: &ast::Ident) -> HirExprKind {
         let recv_hir = self.lower_expr(receiver);
-        let Ty::Struct(sym_id) = &recv_hir.ty else {
+        let Ty::Struct(sym_id, args) = &recv_hir.ty else {
             return HirExprKind::Unsupported("field access on non-struct".into());
         };
         let Some(layout) = self.check.struct_layouts.get(sym_id) else {
@@ -554,10 +557,14 @@ impl<'a> Lowerer<'a> {
         let Some(field) = layout.field(&name.name) else {
             return HirExprKind::Unsupported(format!("no field `{}`", name.name));
         };
+        // Substitute the field's declared type using the receiver's
+        // generic args so the FieldAccess HIR carries the concrete
+        // type at this use site.
+        let subst = build_struct_subst(self.res, *sym_id, args);
         HirExprKind::FieldAccess {
             receiver: Box::new(recv_hir),
             offset: field.offset,
-            field_ty: field.ty.clone(),
+            field_ty: apply_subst(&field.ty, &subst),
         }
     }
 
@@ -567,10 +574,28 @@ impl<'a> Lowerer<'a> {
         arms: &[ast::MatchArm],
     ) -> HirExprKind {
         let scrutinee_h = self.lower_expr(scrutinee);
+        // For generic enum scrutinees, build a per-enum subst so
+        // payload bindings can resolve TypeVar to the concrete arg.
+        let scrutinee_subst: std::collections::HashMap<SymbolId, Ty> =
+            if let Ty::Enum(enum_sym, args) = &scrutinee_h.ty {
+                self.res
+                    .enum_generics
+                    .get(enum_sym)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(g, t)| (*g, t.clone()))
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
         let mut hir_arms: Vec<HirMatchArm> = Vec::with_capacity(arms.len());
         for arm in arms {
             let mut patterns: Vec<HirPattern> = Vec::new();
-            if let Err(msg) = self.collect_arm_patterns(&arm.pat, &mut patterns) {
+            if let Err(msg) =
+                self.collect_arm_patterns(&arm.pat, &mut patterns, &scrutinee_subst)
+            {
                 return HirExprKind::Unsupported(msg);
             }
             let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
@@ -587,6 +612,7 @@ impl<'a> Lowerer<'a> {
         &self,
         pat: &ast::Pattern,
         out: &mut Vec<HirPattern>,
+        subst: &std::collections::HashMap<SymbolId, Ty>,
     ) -> Result<(), String> {
         match pat {
             ast::Pattern::Wildcard(_) => out.push(HirPattern::Wildcard),
@@ -654,12 +680,13 @@ impl<'a> Lowerer<'a> {
                 let mut bindings: Vec<(Ty, Option<SymbolId>)> =
                     Vec::with_capacity(decl_names.len());
                 for (i, decl_name) in decl_names.iter().enumerate() {
-                    let payload_ty = self
+                    let raw_ty = self
                         .check
                         .type_resolutions
                         .get(&payload_asts[i].span())
                         .cloned()
                         .unwrap_or(Ty::Error);
+                    let payload_ty = apply_subst(&raw_ty, subst);
                     let binding = match fields.iter().find(|(n, _)| &n.name == decl_name) {
                         Some((_, ast::Pattern::Wildcard(_))) => None,
                         Some((_, ast::Pattern::Ident { name, .. })) => {
@@ -705,12 +732,15 @@ impl<'a> Lowerer<'a> {
                 let mut bindings: Vec<(Ty, Option<SymbolId>)> =
                     Vec::with_capacity(fields.len());
                 for (field, payload_ast) in fields.iter().zip(&payload_asts) {
-                    let payload_ty = self
+                    let raw_ty = self
                         .check
                         .type_resolutions
                         .get(&payload_ast.span())
                         .cloned()
                         .unwrap_or(Ty::Error);
+                    // Substitute the scrutinee enum's generic args
+                    // so a `Some(x)` arm on `Option<i64>` binds x:i64.
+                    let payload_ty = apply_subst(&raw_ty, subst);
                     let binding = match field {
                         ast::Pattern::Wildcard(_) => None,
                         ast::Pattern::Ident { name, .. } => {
@@ -729,7 +759,7 @@ impl<'a> Lowerer<'a> {
             }
             ast::Pattern::Or { patterns, .. } => {
                 for sub in patterns {
-                    self.collect_arm_patterns(sub, out)?;
+                    self.collect_arm_patterns(sub, out, subst)?;
                 }
             }
         }
@@ -843,6 +873,40 @@ impl<'a> Lowerer<'a> {
             name: dispatched.to_string(),
             args: lowered_args,
         }
+    }
+}
+
+fn build_struct_subst(
+    res: &Resolutions,
+    struct_sym: SymbolId,
+    use_args: &[Ty],
+) -> std::collections::HashMap<SymbolId, Ty> {
+    let mut subst = std::collections::HashMap::new();
+    if let Some(generics) = res.struct_generics.get(&struct_sym) {
+        for (gsym, arg) in generics.iter().zip(use_args.iter()) {
+            subst.insert(*gsym, arg.clone());
+        }
+    }
+    subst
+}
+
+fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
+    match ty {
+        Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Array(elem, n) => Ty::Array(Box::new(apply_subst(elem, subst)), *n),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params.iter().map(|t| apply_subst(t, subst)).collect(),
+            ret: Box::new(apply_subst(ret, subst)),
+        },
+        Ty::Struct(s, args) => Ty::Struct(
+            *s,
+            args.iter().map(|t| apply_subst(t, subst)).collect(),
+        ),
+        Ty::Enum(s, args) => Ty::Enum(
+            *s,
+            args.iter().map(|t| apply_subst(t, subst)).collect(),
+        ),
+        _ => ty.clone(),
     }
 }
 

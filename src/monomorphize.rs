@@ -282,8 +282,9 @@ fn infer_type_args(generic: &HirFn, args: &[HirExpr]) -> Option<Vec<Ty>> {
 }
 
 /// Best-effort unification: every `TypeVar(t)` on the `param` side
-/// binds `t` to the matching concrete on the `arg` side. Concrete-
-/// concrete pairs must already be equal (no implicit coercions).
+/// binds `t` to the matching concrete on the `arg` side. Struct/Enum
+/// type args unify element-wise so passing `Box<i64>` to a function
+/// expecting `Box<T>` infers T = i64.
 fn unify(param: &Ty, arg: &Ty, subst: &mut HashMap<SymbolId, Ty>) -> bool {
     match (param, arg) {
         (Ty::TypeVar(t), concrete) => match subst.get(t) {
@@ -293,9 +294,21 @@ fn unify(param: &Ty, arg: &Ty, subst: &mut HashMap<SymbolId, Ty>) -> bool {
             }
             Some(prev) => prev == concrete,
         },
-        // Element-wise unification on shaped types. For v0.x most
-        // composite types are non-parametric; once Vec<T> et al. are
-        // generic this becomes more interesting.
+        (Ty::Struct(s1, pargs), Ty::Struct(s2, aargs))
+        | (Ty::Enum(s1, pargs), Ty::Enum(s2, aargs))
+            if s1 == s2 =>
+        {
+            // Args lengths may differ when one side is the "empty
+            // args" placeholder used for variant construction; only
+            // unify the positions we can.
+            for (p, a) in pargs.iter().zip(aargs.iter()) {
+                if !unify(p, a, subst) {
+                    return false;
+                }
+            }
+            true
+        }
+        (Ty::Array(p_elem, _), Ty::Array(a_elem, _)) => unify(p_elem, a_elem, subst),
         (a, b) => a == b,
     }
 }
@@ -331,6 +344,14 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
             params: params.iter().map(|t| subst_ty(t, subst)).collect(),
             ret: Box::new(subst_ty(ret, subst)),
         },
+        Ty::Struct(s, args) => Ty::Struct(
+            *s,
+            args.iter().map(|t| subst_ty(t, subst)).collect(),
+        ),
+        Ty::Enum(s, args) => Ty::Enum(
+            *s,
+            args.iter().map(|t| subst_ty(t, subst)).collect(),
+        ),
         _ => ty.clone(),
     }
 }
@@ -653,8 +674,22 @@ fn mangle_ty(t: &Ty) -> String {
         Ty::Unit => "unit".into(),
         Ty::Vec => "Vec".into(),
         Ty::Array(e, n) => format!("arr{}_{}", mangle_ty(e), n),
-        Ty::Struct(s) => format!("S{}", s.0),
-        Ty::Enum(s) => format!("E{}", s.0),
+        Ty::Struct(s, args) => {
+            if args.is_empty() {
+                format!("S{}", s.0)
+            } else {
+                let inner: Vec<String> = args.iter().map(mangle_ty).collect();
+                format!("S{}_{}", s.0, inner.join("_"))
+            }
+        }
+        Ty::Enum(s, args) => {
+            if args.is_empty() {
+                format!("E{}", s.0)
+            } else {
+                let inner: Vec<String> = args.iter().map(mangle_ty).collect();
+                format!("E{}_{}", s.0, inner.join("_"))
+            }
+        }
         _ => "x".into(),
     }
 }

@@ -168,13 +168,15 @@ impl<'r> Checker<'r> {
                 };
                 let kind = self.res.symbol(sym_id).kind.clone();
                 let name = self.res.symbol(sym_id).name.clone();
+                // Resolve the path's generic args (e.g. `<i64>` in
+                // `Vec<i64>`) so generic struct/enum types carry their
+                // instantiation.
+                let type_args: Vec<Ty> =
+                    p.generic_args.iter().map(|t| self.resolve_type(t)).collect();
                 let ty = match kind {
                     SymbolKind::BuiltinType(t) => t,
-                    SymbolKind::Struct => Ty::Struct(sym_id),
-                    SymbolKind::Enum => Ty::Enum(sym_id),
-                    // Generic type parameters appear opaquely as `TypeVar`
-                    // in the checker. Codegen will reject any function whose
-                    // body still mentions one (monomorphization is step 2).
+                    SymbolKind::Struct => Ty::Struct(sym_id, type_args.clone()),
+                    SymbolKind::Enum => Ty::Enum(sym_id, type_args.clone()),
                     SymbolKind::TypeParam => Ty::TypeVar(sym_id),
                     _ => {
                         self.error(p.span, format!("`{}` is not a type", name));
@@ -372,7 +374,7 @@ impl<'r> Checker<'r> {
                     );
                 }
             }
-            Ty::Enum(enum_sym) => {
+            Ty::Enum(enum_sym, _) => {
                 let Some(variants) = self.res.enum_variants.get(enum_sym) else {
                     return;
                 };
@@ -553,7 +555,7 @@ impl<'r> Checker<'r> {
                 let kind = self.res.symbol(sym_id).kind.clone();
                 match kind {
                     SymbolKind::EnumVariant { enum_sym, .. } => {
-                        let pat_ty = Ty::Enum(enum_sym);
+                        let pat_ty = Ty::Enum(enum_sym, Vec::new());
                         if !scrutinee_ty.is_error()
                             && !pat_ty.compatible(scrutinee_ty)
                         {
@@ -683,10 +685,11 @@ impl<'r> Checker<'r> {
             }
             Pattern::TupleVariant { path, fields, .. } => {
                 // Bind each sub-pattern to the corresponding payload
-                // type. Mismatched arity surfaces as an error in
-                // `check_tuple_variant_pattern` — the bind walk falls
-                // through with whatever payloads we have.
+                // type. For a generic enum scrutinee like `Option<i64>`,
+                // substitute the enum's generic args so the binding
+                // type is concrete (i64, not TypeVar(T)).
                 if let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) {
+                    let subst = build_enum_subst_from_scrutinee(self.res, ty);
                     let payloads: Vec<Ty> = self
                         .res
                         .enum_variant_payloads
@@ -694,7 +697,7 @@ impl<'r> Checker<'r> {
                         .cloned()
                         .unwrap_or_default()
                         .iter()
-                        .map(|t| self.resolve_type(t))
+                        .map(|t| apply_subst(&self.resolve_type(t), &subst))
                         .collect();
                     for (sub, pty) in fields.iter().zip(payloads.iter()) {
                         self.bind_pattern(sub, pty);
@@ -703,6 +706,7 @@ impl<'r> Checker<'r> {
             }
             Pattern::NamedVariant { path, fields, .. } => {
                 if let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) {
+                    let subst = build_enum_subst_from_scrutinee(self.res, ty);
                     let decl_names = self
                         .res
                         .enum_variant_field_names
@@ -716,7 +720,7 @@ impl<'r> Checker<'r> {
                         .cloned()
                         .unwrap_or_default()
                         .iter()
-                        .map(|t| self.resolve_type(t))
+                        .map(|t| apply_subst(&self.resolve_type(t), &subst))
                         .collect();
                     for (name, sub) in fields {
                         if let Some(idx) =
@@ -753,7 +757,7 @@ impl<'r> Checker<'r> {
             self.error(span, "named-variant pattern path is not an enum variant");
             return;
         };
-        let enum_ty = Ty::Enum(enum_sym);
+        let enum_ty = Ty::Enum(enum_sym, Vec::new());
         if !scrutinee_ty.is_error() && !enum_ty.compatible(scrutinee_ty) {
             self.error(
                 span,
@@ -842,7 +846,7 @@ impl<'r> Checker<'r> {
             self.error(span, "tuple-variant pattern path is not an enum variant");
             return;
         };
-        let enum_ty = Ty::Enum(enum_sym);
+        let enum_ty = Ty::Enum(enum_sym, Vec::new());
         if !scrutinee_ty.is_error() && !enum_ty.compatible(scrutinee_ty) {
             self.error(
                 span,
@@ -998,7 +1002,10 @@ impl<'r> Checker<'r> {
             }
             SymbolKind::EnumVariant { enum_sym, .. } => {
                 // The value of an enum variant has the enum's type.
-                Ty::Enum(enum_sym)
+                // Type args left empty here; if the enum is generic
+                // the use-site context (`let x: Option<i64> = None`)
+                // unifies against this via `compatible`.
+                Ty::Enum(enum_sym, Vec::new())
             }
             SymbolKind::BuiltinType(_)
             | SymbolKind::Struct
@@ -1377,7 +1384,7 @@ impl<'r> Checker<'r> {
             for a in args {
                 self.check_expr(a);
             }
-            return Ty::Enum(enum_sym);
+            return Ty::Enum(enum_sym, Vec::new());
         }
         if payload_tys.len() != args.len() {
             self.error(
@@ -1391,8 +1398,14 @@ impl<'r> Checker<'r> {
                 ),
             );
         }
+        // Walk payload positions, unifying declared types vs actual
+        // arg types so the enum's generic args can be inferred from
+        // the constructor (e.g., `Some(5)` → Option<i64>).
+        let mut subst: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
         for (i, (param_ty, arg)) in payload_tys.iter().zip(args).enumerate() {
             let arg_ty = self.check_expr(arg);
+            unify_typevars(param_ty, &arg_ty, &mut subst);
             if !arg_ty.compatible(param_ty) {
                 self.error(
                     arg.span(),
@@ -1405,7 +1418,8 @@ impl<'r> Checker<'r> {
                 );
             }
         }
-        Ty::Enum(enum_sym)
+        let enum_args = enum_generic_args(self.res, enum_sym, &subst);
+        Ty::Enum(enum_sym, enum_args)
     }
 
     fn check_named_variant_lit(
@@ -1430,7 +1444,7 @@ impl<'r> Checker<'r> {
                     self.res.symbol(variant_sym).name,
                 ),
             );
-            return Ty::Enum(enum_sym);
+            return Ty::Enum(enum_sym, Vec::new());
         };
         let decl_tys: Vec<Ty> = self
             .res
@@ -1507,14 +1521,14 @@ impl<'r> Checker<'r> {
                 );
             }
         }
-        Ty::Enum(enum_sym)
+        Ty::Enum(enum_sym, Vec::new())
     }
 
     /// Look up a method declared in an `impl` block on a struct type.
     /// Returns the method's externally-visible signature (without the
     /// `self` parameter).
     fn user_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
-        let Ty::Struct(sym_id) = recv else { return None };
+        let Ty::Struct(sym_id, _) = recv else { return None };
         let &method_sym = self.res.impl_methods.get(&(*sym_id, name.to_string()))?;
         let method_span = self.res.symbol(method_sym).span;
         let fn_ty = self.fn_signatures.get(&method_span)?;
@@ -1556,7 +1570,12 @@ impl<'r> Checker<'r> {
         };
 
         // Track which fields have been provided so we can flag missing/duplicates.
+        // Also infer the struct's generic args from field types so the
+        // resulting Ty::Struct carries them — downstream field access
+        // can then resolve TypeVar to the concrete instantiation.
         let mut provided = std::collections::HashSet::new();
+        let mut subst: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
         for init in fields {
             let value_ty = self.check_expr(&init.value);
             let Some(decl_field) = layout.field(&init.name.name) else {
@@ -1566,6 +1585,7 @@ impl<'r> Checker<'r> {
                 );
                 continue;
             };
+            unify_typevars(&decl_field.ty, &value_ty, &mut subst);
             if !value_ty.compatible(&decl_field.ty) {
                 self.error(
                     init.value.span(),
@@ -1592,12 +1612,25 @@ impl<'r> Checker<'r> {
                 );
             }
         }
-        Ty::Struct(sym_id)
+        // Build the instantiated args list in the struct's generic-
+        // param declaration order. Params we couldn't infer stay as
+        // their original TypeVar — codegen / monomorphizer treats
+        // those as i64 sized later.
+        let args: Vec<Ty> = self
+            .res
+            .struct_generics
+            .get(&sym_id)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|g| subst.get(g).cloned().unwrap_or_else(|| Ty::TypeVar(*g)))
+            .collect();
+        Ty::Struct(sym_id, args)
     }
 
     fn check_field_access(&mut self, receiver: &Expr, name: &Ident, span: Span) -> Ty {
         let recv_ty = self.check_expr(receiver);
-        let Ty::Struct(sym_id) = recv_ty else {
+        let Ty::Struct(sym_id, recv_args) = recv_ty else {
             if !recv_ty.is_error() {
                 self.error(
                     span,
@@ -1621,7 +1654,11 @@ impl<'r> Checker<'r> {
             );
             return Ty::Error;
         };
-        field.ty.clone()
+        // Substitute TypeVar in the field type using the receiver's
+        // generic args so `b.value` on `Box<i64>` returns i64 instead
+        // of TypeVar(T).
+        let subst = build_struct_subst(self.res, sym_id, &recv_args);
+        apply_subst(&field.ty, &subst)
     }
 
     fn check_method_call(
@@ -1960,12 +1997,10 @@ impl<'r> Checker<'r> {
 }
 
 /// Types that `print` (the polymorphic builtin) currently supports.
-/// Minimal positional unification: every `TypeVar(t)` on the param
-/// side binds `t` to the corresponding concrete arg type. The
-/// substitution is shared across param positions so a `T` used twice
-/// must bind to the same concrete (the second occurrence overwrites,
-/// but the call site's compatibility check has already rejected
-/// mismatches).
+/// Recursive positional unification. Every `TypeVar(t)` on the
+/// param side binds `t` to the corresponding concrete on the arg
+/// side. Struct/Enum type args unify element-wise so passing
+/// `Box<i64>` to `unbox<T>(b: Box<T>) -> T` infers T = i64.
 fn unify_typevars(
     param: &Ty,
     arg: &Ty,
@@ -1974,6 +2009,17 @@ fn unify_typevars(
     match (param, arg) {
         (Ty::TypeVar(t), concrete) => {
             subst.insert(*t, concrete.clone());
+        }
+        (Ty::Struct(s1, pargs), Ty::Struct(s2, aargs))
+        | (Ty::Enum(s1, pargs), Ty::Enum(s2, aargs))
+            if s1 == s2 && pargs.len() == aargs.len() =>
+        {
+            for (p, a) in pargs.iter().zip(aargs.iter()) {
+                unify_typevars(p, a, subst);
+            }
+        }
+        (Ty::Array(p_elem, _), Ty::Array(a_elem, _)) => {
+            unify_typevars(p_elem, a_elem, subst);
         }
         _ => {}
     }
@@ -1987,8 +2033,70 @@ fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
             params: params.iter().map(|t| apply_subst(t, subst)).collect(),
             ret: Box::new(apply_subst(ret, subst)),
         },
+        Ty::Struct(s, args) => Ty::Struct(
+            *s,
+            args.iter().map(|t| apply_subst(t, subst)).collect(),
+        ),
+        Ty::Enum(s, args) => Ty::Enum(
+            *s,
+            args.iter().map(|t| apply_subst(t, subst)).collect(),
+        ),
         _ => ty.clone(),
     }
+}
+
+/// Build a substitution map from a struct's generic param syms to
+/// the type args at a use site. Used by field-access type resolution
+/// so a `Box<i64>` value's `value` field resolves to i64.
+fn build_struct_subst(
+    res: &crate::resolver::Resolutions,
+    struct_sym: SymbolId,
+    use_args: &[Ty],
+) -> std::collections::HashMap<SymbolId, Ty> {
+    let mut subst = std::collections::HashMap::new();
+    if let Some(generics) = res.struct_generics.get(&struct_sym) {
+        for (gsym, arg) in generics.iter().zip(use_args.iter()) {
+            subst.insert(*gsym, arg.clone());
+        }
+    }
+    subst
+}
+
+/// Build a subst for the scrutinee of a `match`. If the scrutinee
+/// is a generic enum type (`Option<i64>`), pair the enum's declared
+/// generic param symbols with the scrutinee's type args. Empty for
+/// non-enum / non-generic scrutinees.
+fn build_enum_subst_from_scrutinee(
+    res: &crate::resolver::Resolutions,
+    scrutinee_ty: &Ty,
+) -> std::collections::HashMap<SymbolId, Ty> {
+    let mut subst = std::collections::HashMap::new();
+    if let Ty::Enum(enum_sym, args) = scrutinee_ty {
+        if let Some(generics) = res.enum_generics.get(enum_sym) {
+            for (gsym, arg) in generics.iter().zip(args.iter()) {
+                subst.insert(*gsym, arg.clone());
+            }
+        }
+    }
+    subst
+}
+
+/// Read out a generic enum's args in declaration order from an
+/// inferred subst built during variant construction. Params not
+/// inferred (e.g., `None` on `Option<T>` with no payload) stay as
+/// TypeVar; downstream context can refine them.
+fn enum_generic_args(
+    res: &crate::resolver::Resolutions,
+    enum_sym: SymbolId,
+    subst: &std::collections::HashMap<SymbolId, Ty>,
+) -> Vec<Ty> {
+    res.enum_generics
+        .get(&enum_sym)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|g| subst.get(g).cloned().unwrap_or_else(|| Ty::TypeVar(*g)))
+        .collect()
 }
 
 fn is_printable(t: &Ty) -> bool {
