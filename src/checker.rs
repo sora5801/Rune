@@ -332,6 +332,17 @@ impl<'r> Checker<'r> {
                 params: b.params.clone(),
                 ret: Box::new(b.ret.clone()),
             },
+            SymbolKind::PolyBuiltinFn(_) => {
+                self.error(
+                    p.span,
+                    format!(
+                        "`{}` is a polymorphic builtin and cannot be used as a value; \
+                         use it in a call expression",
+                        name
+                    ),
+                );
+                Ty::Error
+            }
             SymbolKind::BuiltinType(_) | SymbolKind::Struct | SymbolKind::Enum => {
                 self.error(p.span, format!("`{}` is a type, not a value", name));
                 Ty::Error
@@ -550,7 +561,9 @@ impl<'r> Checker<'r> {
                     SymbolKind::Const => {
                         self.error(span, format!("cannot assign to const `{}`", name));
                     }
-                    SymbolKind::Fn | SymbolKind::BuiltinFn(_) => {
+                    SymbolKind::Fn
+                    | SymbolKind::BuiltinFn(_)
+                    | SymbolKind::PolyBuiltinFn(_) => {
                         self.error(span, format!("cannot assign to function `{}`", name));
                     }
                     SymbolKind::BuiltinType(_)
@@ -570,6 +583,15 @@ impl<'r> Checker<'r> {
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
+        // Intercept calls to polymorphic builtins before checking the callee
+        // as a value expression — they have no single signature to bind.
+        if let Expr::Path(p) = callee {
+            if let Some(&sym_id) = self.res.path_to_sym.get(&p.span) {
+                if let SymbolKind::PolyBuiltinFn(name) = self.res.symbol(sym_id).kind.clone() {
+                    return self.check_poly_builtin_call(name, args, span);
+                }
+            }
+        }
         let callee_ty = self.check_expr(callee);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
         match callee_ty {
@@ -604,6 +626,45 @@ impl<'r> Checker<'r> {
             Ty::Error => Ty::Error,
             other => {
                 self.error(span, format!("cannot call value of type `{}`", other.display()));
+                Ty::Error
+            }
+        }
+    }
+
+    fn check_poly_builtin_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
+        match name {
+            "print" => {
+                if arg_tys.len() != 1 {
+                    self.error(
+                        span,
+                        format!(
+                            "`print` expects 1 argument, found {}",
+                            arg_tys.len()
+                        ),
+                    );
+                    return Ty::Unit;
+                }
+                let t = &arg_tys[0];
+                if !t.is_error() && !is_printable(t) {
+                    self.error(
+                        args[0].span(),
+                        format!(
+                            "`print` does not yet support values of type `{}` \
+                             (currently: i64-family integers and str)",
+                            t.display()
+                        ),
+                    );
+                }
+                Ty::Unit
+            }
+            _ => {
+                self.error(span, format!("unknown polymorphic builtin `{}`", name));
                 Ty::Error
             }
         }
@@ -794,6 +855,11 @@ impl<'r> Checker<'r> {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.errors.push(TypeError { message: msg.into(), span });
     }
+}
+
+/// Types that `print` (the polymorphic builtin) currently supports.
+fn is_printable(t: &Ty) -> bool {
+    matches!(t, Ty::Int(_) | Ty::Str)
 }
 
 fn binop_symbol(op: BinOp) -> &'static str {

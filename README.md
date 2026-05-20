@@ -17,6 +17,8 @@ $ rune run examples/greet.rn
 Hello, world!
 Hello, Rune!
 Hello, Cranelift!
+Total greeted:
+3
 $ rune build examples/primes.rn --release && ./primes.exe ; echo $?
 rune: linked with clang -> primes.exe
 2 3 5 7 11 13 17 19
@@ -102,9 +104,11 @@ rune: linked with clang -> primes.exe
     **`+` / `+=`** (concatenation) via runtime `rune_str_concat` that
     mallocs a fresh descriptor + buffer; result is process-lifetime
     heap (no free yet).
-  - Host builtins: **`print(i64)`** and **`print_str(str)`** —
-    registered with `JITBuilder::symbol` for JIT, defined in the
-    embedded C runtime for AOT.
+  - Host builtins: **polymorphic `print(x)`** dispatches on argument
+    type to `print_i64` (for any int) or `print_str` (for `str`).
+    Explicit-typed variants `print_i64` and `print_str` remain callable
+    directly. All three are registered with `JITBuilder::symbol` for
+    JIT and defined in the embedded C runtime for AOT.
 - ABI: target-native (effectively `extern "C"`).
 - 33 JIT tests + 14 AOT tests.
 
@@ -131,15 +135,13 @@ if reached.
 ## Roadmap
 
 1. Heap-allocated arrays / dynamic vectors
-2. Polymorphic `print` (unify `print(i64)` and `print_str(str)` via
-   overloading or traits)
-3. String methods: `.len()`, indexing, slicing
-4. Struct/enum field-aware codegen
-5. Method calls + field type-checking
-6. Bounds checks on array indexing
-7. Reclamation for heap allocations (ARC, arenas, or GC)
-8. Generics (parametric polymorphism)
-9. Self-hosted bootstrap (long-term)
+2. String methods: `.len()`, indexing, slicing
+3. Struct/enum field-aware codegen
+4. Method calls + field type-checking
+5. Bounds checks on array indexing
+6. Reclamation for heap allocations (ARC, arenas, or GC)
+7. Generics (parametric polymorphism) — retires `PolyBuiltinFn`
+8. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

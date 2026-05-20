@@ -30,8 +30,13 @@ pub struct Symbol {
 #[derive(Debug, Clone)]
 pub enum SymbolKind {
     BuiltinType(Ty),
-    /// Host-provided builtin function. Codegen knows how to call it.
+    /// Host-provided builtin function with a fixed signature.
     BuiltinFn(BuiltinFn),
+    /// Polymorphic builtin — the type checker accepts a set of argument
+    /// types and the lowerer dispatches to a concrete `BuiltinCall` based
+    /// on what was passed. Used for `print`, which accepts both `i64` and
+    /// `str`.
+    PolyBuiltinFn(&'static str),
     Fn,
     Local { mutable: bool },
     Param,
@@ -141,13 +146,14 @@ impl Resolver {
         for (name, ty) in builtins {
             self.intern(name.to_string(), zero, SymbolKind::BuiltinType(ty.clone()));
         }
-        // Builtin functions.
-        let print = BuiltinFn {
-            name: "print",
-            params: vec![Ty::Int(IntTy::I64)],
-            ret: Ty::Unit,
-        };
-        self.intern(print.name.to_string(), zero, SymbolKind::BuiltinFn(print));
+        // `print` dispatches by argument type at lowering time.
+        self.intern(
+            "print".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("print"),
+        );
+        // Explicit single-type variants stay available for users who want
+        // them, and are the targets of `print`'s dispatch.
         let print_str = BuiltinFn {
             name: "print_str",
             params: vec![Ty::Str],
@@ -157,6 +163,16 @@ impl Resolver {
             print_str.name.to_string(),
             zero,
             SymbolKind::BuiltinFn(print_str),
+        );
+        let print_i64 = BuiltinFn {
+            name: "print_i64",
+            params: vec![Ty::Int(IntTy::I64)],
+            ret: Ty::Unit,
+        };
+        self.intern(
+            print_i64.name.to_string(),
+            zero,
+            SymbolKind::BuiltinFn(print_i64),
         );
     }
 

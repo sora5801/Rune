@@ -217,6 +217,28 @@ non-char-boundary is a runtime panic (or a checked error — TBD).
 
 Defer concrete decisions until the parser is more than a toy.
 
+## Builtins
+
+**Status: Tentative.** Host-provided functions Rune programs can call
+without `use` or `import`.
+
+| Name | Signature | Dispatch |
+| --- | --- | --- |
+| `print(x)` | polymorphic over `x: i64` and `x: str` | Lowerer picks `print_i64` or `print_str` based on argument type |
+| `print_i64(x: i64)` | `fn(i64) -> ()` | Direct |
+| `print_str(s: str) -> ()` | `fn(str) -> ()` | Direct |
+
+The polymorphic dispatch lives in the lowerer
+(`Lowerer::lower_poly_call`) — it picks a concrete `BuiltinCall`
+target. No language-level overloading; no traits. The mechanism is
+called `SymbolKind::PolyBuiltinFn` and is intended to stay small until
+generics or traits arrive, at which point `print` can become a regular
+generic function and `PolyBuiltinFn` can retire.
+
+Future builtins will follow the same pattern: declare in the resolver,
+add a runtime symbol in `codegen.rs` (Rust for JIT) and `aot.rs`
+(`RUNTIME_C` for AOT), wire through `declare_builtin`.
+
 ## Compilation model
 
 **Status: Decided.**
@@ -266,3 +288,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | print + floats + --release + arrays/for | First host builtin: `print(i64)`, callable from both JIT (registered via `JITBuilder::symbol`) and AOT (embedded `RUNTIME_C` compiled inline by the linker driver). Float codegen tests landed (paths existed, now exercised). `rune build --release` maps to Cranelift `OptLevel::Speed`. Array literals stack-allocated via `StackSlot`; indexing via `iadd + load`; `for x in arr` desugars to a counter-based while loop. Memory model promoted Open → Tentative: stack-frame arena. |
 | 2026-05-19 | Strings | `str` as a 16-byte (ptr, len) descriptor; descriptor on the function's stack frame, bytes in the object's data section via `cranelift_module::declare_data`. `print_str(s: str)` builtin and `==`/`!=` for strings (runtime `rune_str_eq`: length compare + memcmp). Immutable; no concat, no methods, no slicing. Empty strings use `ptr = null + len = 0`; the runtime checks `len == 0` before dereferencing. `examples/hello_world.rn` prints "Hello, world!". |
 | 2026-05-19 | String concatenation | `+` and `+=` work on `str` operands. Codegen routes through a runtime `rune_str_concat` that mallocs a fresh descriptor + fresh byte buffer (process-lifetime leak; no free yet). Memory model gains "process-lifetime leak heap" for runtime-allocated strings. Concat results can be returned from functions, stored in mutable bindings, accumulated in loops. `examples/greet.rn` demonstrates `fn greet(name) -> str { "Hello, " + name + "!" }`. |
+| 2026-05-19 | Polymorphic `print` | New `SymbolKind::PolyBuiltinFn` variant. `print(x)` accepts both `i64` (any int variant) and `str`; the lowerer dispatches to `print_i64` or `print_str` based on argument type. Type checker special-cases the call. The explicit-typed builtins `print_i64` and `print_str` remain available for direct use. Intentionally narrow (just `print` is poly today); revisits once generics or traits exist. |

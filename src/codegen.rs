@@ -1066,7 +1066,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
 
 fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, CodegenError> {
     let (runtime_name, sig) = match name {
-        "print" => {
+        "print_i64" => {
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             ("rune_print_i64", sig)

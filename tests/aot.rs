@@ -361,6 +361,55 @@ fn aot_concat_returned_from_fn() {
     assert_eq!(stdout.trim(), "Hello, Rune!");
 }
 
+// ---- polymorphic print ----
+
+#[test]
+fn poly_print_int_then_str() {
+    let src = r#"
+        fn main() -> i64 {
+            print(42);
+            print("hello");
+            print(7);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["42", "hello", "7"]);
+}
+
+#[test]
+fn poly_print_in_loop_with_str() {
+    let src = r#"
+        fn main() -> i64 {
+            let names = ["Alice", "Bob", "Carol"];
+            for n in names {
+                print(n);
+            }
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["Alice", "Bob", "Carol"]);
+}
+
+#[test]
+fn poly_print_concat() {
+    let src = r#"
+        fn main() -> i64 {
+            let name = "Rune";
+            print("Hello, " + name + "!");
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "Hello, Rune!");
+}
+
 #[test]
 fn aot_concat_in_loop() {
     // Each iteration heap-allocates a new descriptor + bytes.

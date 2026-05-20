@@ -153,6 +153,7 @@ impl<'a> Lowerer<'a> {
                     name: self.res.symbol(sym).name.clone(),
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
                 },
+                Some(sym) if self.is_poly_builtin_fn_symbol(sym) => self.lower_poly_call(sym, args),
                 _ => HirExprKind::Unsupported("call target other than a named function".into()),
             },
             ast::Expr::Block(b) => HirExprKind::Block(self.lower_block(b)),
@@ -282,6 +283,37 @@ impl<'a> Lowerer<'a> {
 
     fn is_builtin_fn_symbol(&self, sym: crate::ty::SymbolId) -> bool {
         matches!(self.res.symbol(sym).kind, SymbolKind::BuiltinFn(_))
+    }
+
+    fn is_poly_builtin_fn_symbol(&self, sym: crate::ty::SymbolId) -> bool {
+        matches!(self.res.symbol(sym).kind, SymbolKind::PolyBuiltinFn(_))
+    }
+
+    fn lower_poly_call(
+        &self,
+        sym: crate::ty::SymbolId,
+        args: &[ast::Expr],
+    ) -> HirExprKind {
+        let poly_name = match &self.res.symbol(sym).kind {
+            SymbolKind::PolyBuiltinFn(n) => *n,
+            _ => unreachable!(),
+        };
+        let lowered_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+        let arg_ty = lowered_args.first().map(|a| &a.ty);
+        let dispatched = match (poly_name, arg_ty) {
+            ("print", Some(Ty::Int(_))) => "print_i64",
+            ("print", Some(Ty::Str)) => "print_str",
+            _ => {
+                return HirExprKind::Unsupported(format!(
+                    "no dispatch for polymorphic builtin `{}` with that argument type",
+                    poly_name
+                ));
+            }
+        };
+        HirExprKind::BuiltinCall {
+            name: dispatched.to_string(),
+            args: lowered_args,
+        }
     }
 }
 

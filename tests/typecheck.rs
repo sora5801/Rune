@@ -229,6 +229,50 @@ fn if_without_else_must_be_unit() {
     check_ok("fn main() { if true { } }");
 }
 
+// ---- polymorphic `print` ----
+
+#[test]
+fn print_accepts_int() {
+    check_ok("fn main() { print(42); }");
+}
+
+#[test]
+fn print_accepts_str() {
+    check_ok(r#"fn main() { print("hello"); }"#);
+}
+
+#[test]
+fn print_rejects_bool() {
+    check_has_error(
+        "fn main() { print(true); }",
+        "does not yet support",
+    );
+}
+
+#[test]
+fn print_rejects_zero_args() {
+    check_has_error(
+        "fn main() { print(); }",
+        "expects 1 argument",
+    );
+}
+
+#[test]
+fn print_rejects_two_args() {
+    check_has_error(
+        r#"fn main() { print(1, 2); }"#,
+        "expects 1 argument",
+    );
+}
+
+#[test]
+fn print_as_value_is_error() {
+    check_has_error(
+        "fn main() { let p = print; }",
+        "polymorphic builtin",
+    );
+}
+
 #[test]
 fn while_condition_must_be_bool() {
     check_has_error(
