@@ -132,6 +132,39 @@ function. Heap + ownership remains a v2 conversation.
 Once code can actually run end-to-end with stdlib, decide whether to graduate
 to ARC, ownership, or stay arena-based. Reversible.
 
+### Reclamation roadmap
+
+When the leak becomes painful, the realistic steps in order of effort:
+
+1. **Manual `free(x)` builtin.** Lowest friction: a single runtime
+   function that releases a `Vec`, concatenated `str`, or other
+   heap-allocated value. Unsafe — use-after-free is on the user.
+   Lets long-running programs reclaim memory without a runtime cost.
+2. **ARC (Automatic Reference Counting).** Insert refcount fields in
+   the heap descriptors for `Vec` and concat-`str`. Codegen emits
+   inc/dec calls on copies, drops, and reassignments. Cycle leaks
+   (mitigated later by `weak` references). Adds ~5–15% perf overhead.
+3. **Arena-with-explicit-scope.** `arena foo { ... }` blocks where
+   allocations go into `foo` and free at scope exit. More predictable
+   than ARC for batch workloads; ergonomic enough that we already
+   target this implicitly today (everything's the process arena).
+4. **Borrow checker.** Compile-time ownership tracking. The defining
+   feature if Rune ever pursues it; not a v0.x option.
+5. **Tracing GC.** Mark-and-sweep or generational. Real runtime,
+   harder to bootstrap, but ergonomic for the user. The "no thanks"
+   path for a systems language unless we explicitly pivot.
+
+Recommended order for actual implementation: 1 (manual `free`)
+before 2 (ARC), because ARC's invariants (every copy increments) are
+much easier to reason about once we know what "manual reclaim" looks
+like. Skipping 1 and going straight to ARC is also legitimate but
+risks getting the API wrong on the first try.
+
+The current process-lifetime leak is fine for the test corpus and
+example programs (`fib.rn`, `greet.rn`, `primes.rn`). It only becomes
+painful for daemons, long-running tests, or programs that do
+unbounded work in a single execution.
+
 ## Error handling
 
 **Status: Tentative.** Result + `?`, like Rust.
@@ -214,8 +247,10 @@ followed by `icmp eq, 0`. No runtime call.
   descriptor lives on the callee's stack frame. Returning concat
   results, slice results, or passed-in parameters is safe (the former
   two are heap-allocated, parameters live in the caller).
-- Bounds-checking on byte indexing. Slicing clamps; byte indexing
-  trusts.
+- Slice indexing **clamps** out-of-range bounds. Byte indexing
+  **panics** on out-of-range (via `rune_panic_bounds`, same as array
+  indexing). The discrepancy is intentional — slicing has a natural
+  clamp; reading a single byte doesn't.
 
 ## Type system
 
@@ -224,9 +259,53 @@ followed by `icmp eq, 0`. No runtime call.
 - Static, nominal types.
 - Type inference for local bindings; explicit return types on functions.
 - User-defined `struct` (with `impl` blocks for methods) and `enum`
-  (declarations parse, but enum codegen is deferred).
-- Generics (parametric polymorphism) — yes, but not in the first iteration.
+  (unit variants codegen as i64 discriminants; payload variants
+  deferred until match codegen lands).
+- Generics (parametric polymorphism) — designed below, not yet implemented.
 - Traits / protocols — desirable; deferred until after generics.
+
+### Generics roadmap
+
+The design space for parametric polymorphism:
+
+| Strategy | How | Tradeoff |
+| --- | --- | --- |
+| **Monomorphization** | Each call site `f<i64>(x)` and `f<str>(x)` compiles a separate specialized copy of `f`. Same as Rust, C++. | Linear in distinct type instantiations. Best perf. Code bloat. The pragmatic choice for systems languages. |
+| **Type erasure with single repr** | All `T` becomes a pointer (or fat pointer). One copy of `f` exists. | Works only when every `T` fits the chosen repr. Misses primitives by-value. C#/Java reference types take this path. |
+| **Boxing** | `T` always boxed. One copy of `f`. | Worst perf — heap-alloc per pass. Easiest to implement. |
+
+**Recommended path: monomorphization.** Matches Rune's systems-leaning
+intent, doesn't require ABI workarounds, and is what real users will
+expect from a Rust/Swift-flavored language.
+
+Work involved (rough sequence):
+
+1. **Parser**: parse `<T>` and `<T, U>` after function/struct/enum names
+   (lexer already has `<` and `>`; the parser needs to disambiguate
+   from comparison). Standard trick: after a path, peek for `<` and
+   try-parse as generics; on failure, rewind and treat as comparison.
+2. **AST**: `FnDecl::generics: Vec<Ident>`, `StructDecl::generics`,
+   etc. `Path::generic_args: Vec<Type>` for use sites.
+3. **Type system**: a `Ty::TypeVar(name)` for placeholders inside
+   generic bodies. Substitution at instantiation.
+4. **Type checker**: when checking a generic function body, treat
+   `T` as opaque. When checking a call site, infer `T` from argument
+   types and substitute.
+5. **Lowerer/codegen**: monomorphize. A `(SymbolId, Vec<Ty>)` keyed
+   cache of compiled instantiations. Each call site triggers
+   instantiation if absent. Mangled names: `f$$i64`, `f$$str`, etc.
+6. **Stdlib payoff**: `Vec<T>` retires the i64-only restriction.
+   `Option<T>`, `Result<T, E>`, etc. become expressible.
+7. **Inference**: at minimum, infer type parameters from arguments at
+   call sites. More sophisticated bidirectional inference can come
+   later.
+8. **Retires**: `SymbolKind::PolyBuiltinFn` (used today for `print`).
+   `print` becomes a regular `fn print<T: Display>(x: T)` once traits
+   exist; or special-cased away earlier.
+
+This is a substantial multi-session effort. Step 1 (parsing) alone
+needs careful integration with the existing Pratt parser because
+`<` is overloaded.
 
 **Structs (current state):**
 
@@ -399,3 +478,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Method calls + first methods | New `HirExprKind::MethodCall` variant. Type checker resolves methods via a hardcoded `resolve_method(recv_ty, name)` table. Codegen dispatches by `(recv_ty, name)` and mostly emits inline IR. Three methods land: `str.len()`, `str.is_empty()`, `arr.len()`. Mechanism extends to future methods (trivial: inline; non-trivial: route to runtime). |
 | 2026-05-19 | String indexing + slicing | New `ast::Expr::Range` (and parser support for `a..b` / `a..=b` as infix at precedence (3,4), below comparison). New `HirExprKind::StrByteIndex` (inline `load.i8` + `uextend.i64`) and `HirExprKind::StrSlice` (calls runtime `rune_str_slice` — mallocs new descriptor + bytes; clamps out-of-range indices). Range expressions outside a slice-index context are an explicit type-check error. Standalone ranges and partial forms (`..b`, `a..`, `..`) are deferred. |
 | 2026-05-19 | Range iter + str predicates + struct field access + Vec + impl blocks | Five features at once: (1) `for i in a..b { }` works via `HirExprKind::ForRange` — special-cased in the lowerer when the iter is a range. (2) Three new str methods via runtime calls: `starts_with`, `ends_with`, `contains`. (3) Struct field access end-to-end: new `Expr::StructLit`, parser support gated by `no_struct_lit` flag in condition position, `CheckResults::struct_layouts` with 8-byte-per-field padding, stack-slot codegen, field access via `load.<ty>` at offset. (4) `Vec` as a concrete builtin type — `vec_new()`, `.push`, `.get`, `.len`. Heap-allocated `{ptr, len, cap}` descriptor with realloc on grow. i64 elements only until generics. (5) `impl` blocks for inherent methods on structs — new `impl` keyword, `Item::Impl(ImplBlock)`, mangled method names (`Point__magnitude`), `Resolutions::impl_methods` table, lowerer rewrites `p.m()` to `Call(m_sym, [p])`. |
+| 2026-05-19 | Field assignment + bounds checks + enum codegen + generics/reclamation design | Three features land; two are design-only because the implementations are multi-session. (1) Field assignment `p.x = 5` via new `HirExprKind::FieldAssign`. Checker's `check_place_root_mutable` walks `a.b.c` to its root and verifies that root is `let mut`. (2) Inline bounds checks for array and string byte indexing — `emit_bounds_check` emits `brif` + a call to `rune_panic_bounds` that prints to stderr and `exit(1)`s. Slice indexing keeps the clamp behavior. (3) Enum codegen for unit variants — `SymbolKind::EnumVariant { enum_sym, discriminant }`, resolver gains two-segment path resolution (`EnumName::Variant`), checker returns `Ty::Enum(sym)` for the value, codegen emits `iconst.i64(discriminant)`. Enables `==`/`!=` dispatch via the existing icmp path. Match codegen still deferred. (4) **Generics: design pass only.** Monomorphization is the recommended strategy; multi-step roadmap added to LANGUAGE.md's "Type system" section. (5) **Reclamation: design pass only.** Five-step ladder added to LANGUAGE.md's "Memory model" section, with manual `free` builtin as step 1 and ARC as step 2. No code change. |
