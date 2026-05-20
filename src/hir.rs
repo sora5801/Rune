@@ -83,6 +83,14 @@ pub enum HirExprKind {
     /// Call to a host-provided builtin (`print`, etc.). Codegen emits a
     /// call to an imported C function (e.g. `rune_print_i64`).
     BuiltinCall { name: String, args: Vec<HirExpr> },
+    /// Method call (`receiver.method(args)`). Codegen dispatches based
+    /// on `receiver.ty` and `method` — most builtin methods compile to
+    /// inline IR (e.g. `str.len()` is a load from the descriptor).
+    MethodCall {
+        receiver: Box<HirExpr>,
+        method: String,
+        args: Vec<HirExpr>,
+    },
     /// Stack-allocated array literal. Value type is a pointer to the
     /// first element; element type and length are tracked statically.
     Array { elems: Vec<HirExpr>, elem_ty: Ty },

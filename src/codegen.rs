@@ -502,6 +502,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 }
             }
             HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
+            HirExprKind::MethodCall { receiver, method, args } => {
+                self.compile_method_call(receiver, method, args, &e.ty)
+            }
             HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
             HirExprKind::Index { array, index, elem_ty } => {
                 self.compile_index(array, index, elem_ty)
@@ -833,6 +836,53 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             Ok(Some(self.builder.block_params(merge_blk)[0]))
         } else {
             Ok(None)
+        }
+    }
+
+    fn compile_method_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[HirExpr],
+        _ret_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let recv_val = self
+            .compile_expr(receiver)?
+            .ok_or_else(|| CodegenError("method receiver produced no value".into()))?;
+        for a in args {
+            // Compile args for side effects even if the method ignores them.
+            self.compile_expr(a)?;
+        }
+        match (&receiver.ty, method) {
+            (Ty::Str, "len") => {
+                // Descriptor layout: { ptr: i64 @ 0, len: i64 @ 8 }
+                let len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), recv_val, 8);
+                Ok(Some(len))
+            }
+            (Ty::Str, "is_empty") => {
+                let len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), recv_val, 8);
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, len, zero);
+                Ok(Some(is_zero))
+            }
+            (Ty::Array(_, length), "len") => {
+                // Array length is statically known. The receiver expression
+                // was compiled for side effects; the result is just the
+                // constant.
+                let len = self.builder.ins().iconst(types::I64, *length as i64);
+                Ok(Some(len))
+            }
+            (recv_ty, _) => Err(CodegenError(format!(
+                "method `.{}` on `{}` is not implemented",
+                method,
+                recv_ty.display()
+            ))),
         }
     }
 

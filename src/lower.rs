@@ -171,7 +171,11 @@ impl<'a> Lowerer<'a> {
             }
             ast::Expr::Break(_) => HirExprKind::Unsupported("break".into()),
             ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
-            ast::Expr::MethodCall { .. } => HirExprKind::Unsupported("method calls".into()),
+            ast::Expr::MethodCall { receiver, method, args, .. } => HirExprKind::MethodCall {
+                receiver: Box::new(self.lower_expr(receiver)),
+                method: method.name.clone(),
+                args: args.iter().map(|a| self.lower_expr(a)).collect(),
+            },
             ast::Expr::Field { .. } => HirExprKind::Unsupported("field access".into()),
             ast::Expr::Index { receiver, index, .. } => {
                 let arr = self.lower_expr(receiver);

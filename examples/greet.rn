@@ -1,4 +1,4 @@
-// greet.rn — polymorphic `print` over both strings and integers.
+// greet.rn — polymorphic `print`, string concat, and string methods.
 // Run with `rune run examples/greet.rn`
 // or compile with `rune build examples/greet.rn --release`.
 
@@ -9,11 +9,15 @@ fn greet(name: str) -> str {
 fn main() -> i64 {
     let names = ["world", "Rune", "Cranelift"];
     let mut count = 0;
+    let mut total_bytes = 0;
     for n in names {
-        print(greet(n));
+        let g = greet(n);
+        print(g);
+        total_bytes = total_bytes + g.len();
         count = count + 1;
     }
-    print("Total greeted:");
+    print("greeted (count, total bytes):");
     print(count);
+    print(total_bytes);
     0
 }

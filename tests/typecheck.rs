@@ -273,6 +273,40 @@ fn print_as_value_is_error() {
     );
 }
 
+// ---- method calls ----
+
+#[test]
+fn str_len_typechecks() {
+    check_ok(r#"fn main() -> i64 { "hi".len() }"#);
+}
+
+#[test]
+fn str_is_empty_typechecks() {
+    check_ok(r#"fn main() -> bool { "".is_empty() }"#);
+}
+
+#[test]
+fn array_len_typechecks() {
+    check_ok("fn main() -> i64 { [1, 2, 3].len() }");
+}
+
+#[test]
+fn method_does_not_exist_on_type() {
+    check_has_error(
+        r#"fn main() -> i64 { (5).len() }"#,
+        "no method",
+    );
+}
+
+#[test]
+fn method_with_wrong_arg_count() {
+    // `.len()` takes no args.
+    check_has_error(
+        r#"fn main() -> i64 { "hi".len(1) }"#,
+        "expects 0 argument",
+    );
+}
+
 #[test]
 fn while_condition_must_be_bool() {
     check_has_error(

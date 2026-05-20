@@ -397,6 +397,34 @@ fn poly_print_in_loop_with_str() {
 }
 
 #[test]
+fn aot_print_str_len() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "Hello, Rune!";
+            print(s.len());
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "12");
+}
+
+#[test]
+fn aot_array_len_in_loop_bound() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            print(xs.len());
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "3");
+}
+
+#[test]
 fn poly_print_concat() {
     let src = r#"
         fn main() -> i64 {

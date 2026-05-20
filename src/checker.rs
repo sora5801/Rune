@@ -263,13 +263,8 @@ impl<'r> Checker<'r> {
             Expr::Assign { lhs, rhs, span } => self.check_assign(lhs, rhs, *span),
             Expr::AssignOp { op, lhs, rhs, span } => self.check_assign_op(*op, lhs, rhs, *span),
             Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
-            Expr::MethodCall { receiver, args, span, .. } => {
-                self.check_expr(receiver);
-                for a in args {
-                    self.check_expr(a);
-                }
-                self.error(*span, "method calls are not yet type-checked");
-                Ty::Error
+            Expr::MethodCall { receiver, method, args, span } => {
+                self.check_method_call(receiver, method, args, *span)
             }
             Expr::Field { receiver, span, .. } => {
                 self.check_expr(receiver);
@@ -631,6 +626,57 @@ impl<'r> Checker<'r> {
         }
     }
 
+    fn check_method_call(
+        &mut self,
+        receiver: &Expr,
+        method: &Ident,
+        args: &[Expr],
+        span: Span,
+    ) -> Ty {
+        let recv_ty = self.check_expr(receiver);
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
+        let Some(sig) = resolve_method(&recv_ty, &method.name) else {
+            if !recv_ty.is_error() {
+                self.error(
+                    span,
+                    format!(
+                        "no method `.{}` on type `{}`",
+                        method.name,
+                        recv_ty.display()
+                    ),
+                );
+            }
+            return Ty::Error;
+        };
+        if sig.params.len() != arg_tys.len() {
+            self.error(
+                span,
+                format!(
+                    "method `.{}` expects {} argument{}, found {}",
+                    method.name,
+                    sig.params.len(),
+                    if sig.params.len() == 1 { "" } else { "s" },
+                    arg_tys.len()
+                ),
+            );
+            return sig.ret;
+        }
+        for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
+            if !a.compatible(p) {
+                self.error(
+                    args[i].span(),
+                    format!(
+                        "argument {} has type `{}`, expected `{}`",
+                        i + 1,
+                        a.display(),
+                        p.display()
+                    ),
+                );
+            }
+        }
+        sig.ret
+    }
+
     fn check_poly_builtin_call(
         &mut self,
         name: &str,
@@ -860,6 +906,33 @@ impl<'r> Checker<'r> {
 /// Types that `print` (the polymorphic builtin) currently supports.
 fn is_printable(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Str)
+}
+
+/// Method signature, used by `check_method_call`.
+struct MethodSig {
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+/// Hardcoded method table for builtin types. Future: methods on
+/// user-defined types via `impl` blocks.
+fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
+    use crate::ty::IntTy;
+    match (recv, name) {
+        (Ty::Str, "len") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        (Ty::Str, "is_empty") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Bool,
+        }),
+        (Ty::Array(_, _), "len") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        _ => None,
+    }
 }
 
 fn binop_symbol(op: BinOp) -> &'static str {

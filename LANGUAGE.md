@@ -175,12 +175,23 @@ Empty strings (`""`) compile to a descriptor with `ptr = null` and
 `len = 0`. The runtime checks `len == 0` before dereferencing, so
 the null is safe.
 
+**Methods on `str`:**
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `s.len()` | `i64` | Byte length (not char count). UTF-8-aware programs need to remember this. |
+| `s.is_empty()` | `bool` | Equivalent to `s.len() == 0` but a single i8 compare. |
+
+Both compile to inline IR — `s.len()` is a `load.i64` from the
+descriptor's `len` field at offset 8; `s.is_empty()` does the load
+followed by `icmp eq, 0`. No runtime call.
+
 **Not yet:**
 
 - Owned/borrowed split (`String` vs `&str`). May never split if a single
   immutable type is good enough.
-- `.len()`, `.bytes()`, indexing, slicing. Methods aren't codegen'd at
-  all yet.
+- `.bytes()`, indexing (`s[i]`), slicing (`s[a..b]`), iteration over
+  chars.
 - Raw string literals (`r"..."`), triple-quoted multi-line strings,
   interpolation (`"\(expr)"` or `f"{expr}"`).
 - **Returning literal strings from functions** is unsound — the
@@ -222,6 +233,8 @@ Defer concrete decisions until the parser is more than a toy.
 **Status: Tentative.** Host-provided functions Rune programs can call
 without `use` or `import`.
 
+### Free functions
+
 | Name | Signature | Dispatch |
 | --- | --- | --- |
 | `print(x)` | polymorphic over `x: i64` and `x: str` | Lowerer picks `print_i64` or `print_str` based on argument type |
@@ -235,9 +248,33 @@ called `SymbolKind::PolyBuiltinFn` and is intended to stay small until
 generics or traits arrive, at which point `print` can become a regular
 generic function and `PolyBuiltinFn` can retire.
 
-Future builtins will follow the same pattern: declare in the resolver,
-add a runtime symbol in `codegen.rs` (Rust for JIT) and `aot.rs`
-(`RUNTIME_C` for AOT), wire through `declare_builtin`.
+### Methods on builtin types
+
+Method resolution is type-directed: the checker looks up the method by
+`(receiver_ty, method_name)` against a hardcoded table
+(`checker::resolve_method`). The lowerer emits `HirExprKind::MethodCall`
+and codegen dispatches based on the same `(ty, name)` pair, mostly
+inline (no runtime call).
+
+| Receiver | Method | Returns | Codegen |
+| --- | --- | --- | --- |
+| `str` | `len()` | `i64` | `load.i64` from descriptor offset 8 |
+| `str` | `is_empty()` | `bool` | `len + icmp eq, 0` |
+| `[T; N]` | `len()` | `i64` | static `iconst` of `N` |
+
+When `impl` blocks for user-defined types land, this table extends to
+look in user-defined method namespaces too.
+
+### Adding a builtin
+
+The plumbing is uniform:
+- Declare in the resolver (free functions) or add a row in
+  `resolve_method` (methods).
+- If the codegen path is non-trivial: add a runtime symbol in
+  `codegen.rs` (Rust for JIT) and `aot.rs::RUNTIME_C` (C for AOT),
+  and a case in `declare_builtin`.
+- Trivial methods (loads, arithmetic) can be inlined directly in
+  `compile_method_call`.
 
 ## Compilation model
 
@@ -289,3 +326,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Strings | `str` as a 16-byte (ptr, len) descriptor; descriptor on the function's stack frame, bytes in the object's data section via `cranelift_module::declare_data`. `print_str(s: str)` builtin and `==`/`!=` for strings (runtime `rune_str_eq`: length compare + memcmp). Immutable; no concat, no methods, no slicing. Empty strings use `ptr = null + len = 0`; the runtime checks `len == 0` before dereferencing. `examples/hello_world.rn` prints "Hello, world!". |
 | 2026-05-19 | String concatenation | `+` and `+=` work on `str` operands. Codegen routes through a runtime `rune_str_concat` that mallocs a fresh descriptor + fresh byte buffer (process-lifetime leak; no free yet). Memory model gains "process-lifetime leak heap" for runtime-allocated strings. Concat results can be returned from functions, stored in mutable bindings, accumulated in loops. `examples/greet.rn` demonstrates `fn greet(name) -> str { "Hello, " + name + "!" }`. |
 | 2026-05-19 | Polymorphic `print` | New `SymbolKind::PolyBuiltinFn` variant. `print(x)` accepts both `i64` (any int variant) and `str`; the lowerer dispatches to `print_i64` or `print_str` based on argument type. Type checker special-cases the call. The explicit-typed builtins `print_i64` and `print_str` remain available for direct use. Intentionally narrow (just `print` is poly today); revisits once generics or traits exist. |
+| 2026-05-19 | Method calls + first methods | New `HirExprKind::MethodCall` variant. Type checker resolves methods via a hardcoded `resolve_method(recv_ty, name)` table. Codegen dispatches by `(recv_ty, name)` and mostly emits inline IR. Three methods land: `str.len()`, `str.is_empty()`, `arr.len()`. Mechanism extends to future methods (trivial: inline; non-trivial: route to runtime). |
