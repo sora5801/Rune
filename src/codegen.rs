@@ -594,6 +594,13 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirExprKind::Fn(_) => {
                 Err(CodegenError("first-class function values are not supported".into()))
             }
+            HirExprKind::EnumVariant { discriminant } => {
+                let v = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, *discriminant as i64);
+                Ok(Some(v))
+            }
             HirExprKind::Unary { op, expr } => self.compile_unary(*op, expr, &e.ty),
             HirExprKind::Binary { op, lhs, rhs } => self.compile_binary(*op, lhs, rhs, &e.ty),
             HirExprKind::Logical { op, lhs, rhs } => self.compile_logical(*op, lhs, rhs),
@@ -1514,6 +1521,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Struct(_) => types::I64,
         // Vec is a pointer to a heap-allocated descriptor (`{ ptr, len, cap }`).
         Ty::Vec => types::I64,
+        // Unit-variant enums are stored as their i64 discriminant.
+        Ty::Enum(_) => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -1541,7 +1550,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_) | Ty::Vec => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_) | Ty::Vec | Ty::Enum(_) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",

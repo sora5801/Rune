@@ -1150,3 +1150,67 @@ fn str_compound_assign() {
     "#;
     assert_eq!(run_main(src), 1);
 }
+
+// ---- enums ----
+
+#[test]
+fn enum_variant_returns_discriminant() {
+    let src = r#"
+        enum Color { Red, Green, Blue }
+        fn main() -> i64 {
+            let c = Color::Green;
+            if c == Color::Red { 0 }
+            else if c == Color::Green { 1 }
+            else { 2 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn enum_first_variant_is_zero() {
+    let src = r#"
+        enum E { A, B, C }
+        fn main() -> i64 {
+            if E::A == E::A { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn enum_distinct_variants_not_equal() {
+    let src = r#"
+        enum E { A, B }
+        fn main() -> i64 {
+            if E::A != E::B { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn enum_passed_to_function() {
+    let src = r#"
+        enum Mode { On, Off }
+        fn is_on(m: Mode) -> bool { m == Mode::On }
+        fn main() -> i64 {
+            if is_on(Mode::On) { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn enum_returned_from_function() {
+    let src = r#"
+        enum Mode { On, Off }
+        fn pick(b: bool) -> Mode {
+            if b { Mode::On } else { Mode::Off }
+        }
+        fn main() -> i64 {
+            if pick(true) == Mode::On { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}

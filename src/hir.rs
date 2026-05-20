@@ -69,6 +69,9 @@ pub enum HirExprKind {
     Local(SymbolId),
     /// Reference to a function as a first-class value (not yet codegen-able).
     Fn(SymbolId),
+    /// `EnumName::Variant` — a unit-variant enum value, represented as
+    /// the i64 discriminant at runtime.
+    EnumVariant { discriminant: u32 },
     Unary { op: HirUnOp, expr: Box<HirExpr> },
     Binary { op: HirBinOp, lhs: Box<HirExpr>, rhs: Box<HirExpr> },
     /// Short-circuit logical operators — kept separate from `Binary`

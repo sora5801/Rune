@@ -342,6 +342,9 @@ impl<'a> Lowerer<'a> {
                 HirExprKind::Local(sym_id)
             }
             SymbolKind::Fn => HirExprKind::Fn(sym_id),
+            SymbolKind::EnumVariant { discriminant, .. } => {
+                HirExprKind::EnumVariant { discriminant }
+            }
             _ => HirExprKind::Unsupported("type name used as value".into()),
         }
     }

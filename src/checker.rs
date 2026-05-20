@@ -416,6 +416,10 @@ impl<'r> Checker<'r> {
                 );
                 Ty::Error
             }
+            SymbolKind::EnumVariant { enum_sym, .. } => {
+                // The value of an enum variant has the enum's type.
+                Ty::Enum(enum_sym)
+            }
             SymbolKind::BuiltinType(_) | SymbolKind::Struct | SymbolKind::Enum => {
                 self.error(p.span, format!("`{}` is a type, not a value", name));
                 Ty::Error
@@ -643,6 +647,12 @@ impl<'r> Checker<'r> {
                     | SymbolKind::Struct
                     | SymbolKind::Enum => {
                         self.error(span, format!("cannot assign to type `{}`", name));
+                    }
+                    SymbolKind::EnumVariant { .. } => {
+                        self.error(
+                            span,
+                            format!("cannot assign to enum variant `{}`", name),
+                        );
                     }
                 }
             }

@@ -42,6 +42,10 @@ pub enum SymbolKind {
     Param,
     Struct,
     Enum,
+    /// A unit variant of an enum. Carries its parent enum's symbol and its
+    /// numeric discriminant. v0.x supports only unit variants; payload
+    /// variants are deferred until match codegen lands.
+    EnumVariant { enum_sym: SymbolId, discriminant: u32 },
     Const,
 }
 
@@ -60,6 +64,10 @@ pub struct Resolutions {
     /// Populated from `impl` blocks. Builtin methods (`str.len()`, etc.) are
     /// resolved via the checker's hardcoded table instead.
     pub impl_methods: HashMap<(SymbolId, String), SymbolId>,
+    /// For each enum symbol, a map from variant name to the variant's
+    /// symbol. Variants aren't in the global scope — they're addressed
+    /// as `EnumName::VariantName`.
+    pub enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
 }
 
 impl Resolutions {
@@ -92,6 +100,7 @@ pub struct Resolver {
     path_to_sym: HashMap<Span, SymbolId>,
     decl_to_sym: HashMap<Span, SymbolId>,
     impl_methods: HashMap<(SymbolId, String), SymbolId>,
+    enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
     errors: Vec<ResolveError>,
 }
 
@@ -107,6 +116,7 @@ impl Resolver {
             path_to_sym: HashMap::new(),
             decl_to_sym: HashMap::new(),
             impl_methods: HashMap::new(),
+            enum_variants: HashMap::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -135,6 +145,7 @@ impl Resolver {
                 path_to_sym: self.path_to_sym,
                 decl_to_sym: self.decl_to_sym,
                 impl_methods: self.impl_methods,
+                enum_variants: self.enum_variants,
             },
             self.errors,
         )
@@ -290,6 +301,29 @@ impl Resolver {
         };
         let id = self.intern(name.name.clone(), name.span, kind);
         self.decl_to_sym.insert(name.span, id);
+
+        // For enums, also register each variant by name (off-scope —
+        // only addressable as EnumName::VariantName).
+        if let Item::Enum(e) = item {
+            let mut variants: HashMap<String, SymbolId> = HashMap::new();
+            for (discriminant, v) in e.variants.iter().enumerate() {
+                // Variant symbols sit outside any lexical scope. They get
+                // a fresh entry in `symbols` for span-keyed queries; lookups
+                // go through `enum_variants` instead of `scopes`.
+                let variant_id = SymbolId(self.symbols.len() as u32);
+                self.symbols.push(Symbol {
+                    name: v.name.name.clone(),
+                    span: v.name.span,
+                    kind: SymbolKind::EnumVariant {
+                        enum_sym: id,
+                        discriminant: discriminant as u32,
+                    },
+                });
+                self.decl_to_sym.insert(v.name.span, variant_id);
+                variants.insert(v.name.name.clone(), variant_id);
+            }
+            self.enum_variants.insert(id, variants);
+        }
     }
 
     // ---- pass 2: resolve bodies ----
@@ -402,13 +436,39 @@ impl Resolver {
 
     fn resolve_path(&mut self, p: &Path) {
         let first = &p.segments[0];
-        if let Some(id) = self.lookup(&first.name) {
-            self.path_to_sym.insert(p.span, id);
-        } else {
+        let Some(first_id) = self.lookup(&first.name) else {
             self.error(format!("unresolved name `{}`", first.name), p.span);
+            return;
+        };
+        if p.segments.len() == 1 {
+            self.path_to_sym.insert(p.span, first_id);
+            return;
         }
-        // Multi-segment paths (`std::io::println`) aren't resolved deeper.
-        // The type checker will flag use of an unsupported path shape.
+        // Two-segment path: `Enum::Variant` is the only shape we resolve.
+        if p.segments.len() == 2
+            && matches!(self.symbols[first_id.0 as usize].kind, SymbolKind::Enum)
+        {
+            let variant_name = &p.segments[1].name;
+            if let Some(map) = self.enum_variants.get(&first_id) {
+                if let Some(&variant_id) = map.get(variant_name) {
+                    self.path_to_sym.insert(p.span, variant_id);
+                    return;
+                }
+            }
+            self.error(
+                format!(
+                    "no variant `{}` on enum `{}`",
+                    variant_name, first.name
+                ),
+                p.span,
+            );
+            return;
+        }
+        // Longer paths (`a::b::c`, namespacing) not supported yet.
+        self.error(
+            format!("path `{}` has more segments than the resolver handles", first.name),
+            p.span,
+        );
     }
 
     fn resolve_expr(&mut self, e: &Expr) {
