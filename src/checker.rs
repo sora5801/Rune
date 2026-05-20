@@ -301,6 +301,156 @@ impl<'r> Checker<'r> {
         self.bind_pattern(&l.pat, &final_ty);
     }
 
+    /// Checks that a match expression's arms cover the scrutinee's
+    /// domain (or have a catch-all). Also flags arms that are
+    /// unreachable because an earlier arm matches everything they do.
+    fn check_match_exhaustiveness(
+        &mut self,
+        scrutinee_ty: &Ty,
+        arms: &[MatchArm],
+        match_span: Span,
+    ) {
+        use std::collections::HashSet;
+        if scrutinee_ty.is_error() {
+            return; // suppress cascade
+        }
+
+        // First pass: detect coverage and unreachable arms.
+        let mut catchall_seen: Option<Span> = None;
+        let mut covered_bools: HashSet<bool> = HashSet::new();
+        let mut covered_variants: HashSet<u32> = HashSet::new();
+        let mut covered_ints: HashSet<i64> = HashSet::new();
+        let mut covered_strs: HashSet<String> = HashSet::new();
+
+        for arm in arms {
+            // If a catch-all already fired, every subsequent arm is dead.
+            if catchall_seen.is_some() {
+                self.error(
+                    arm.pat.span(),
+                    "unreachable match arm — an earlier arm covers everything",
+                );
+                continue;
+            }
+            // Guarded arms don't "cover" the pattern fully (the guard
+            // can fail), so they don't add to coverage sets and they
+            // don't become catch-alls.
+            let guarded = arm.guard.is_some();
+            match &arm.pat {
+                Pattern::Wildcard(s) | Pattern::Ident { span: s, .. } => {
+                    if !guarded {
+                        catchall_seen = Some(*s);
+                    }
+                }
+                Pattern::Literal { lit, span: s } => match lit {
+                    Lit::Bool(b) => {
+                        if !covered_bools.insert(*b) {
+                            self.error(
+                                *s,
+                                format!("unreachable arm — `{}` was already covered", b),
+                            );
+                        }
+                    }
+                    Lit::Int(v) => {
+                        if !covered_ints.insert(*v) {
+                            self.error(
+                                *s,
+                                format!("unreachable arm — `{}` was already covered", v),
+                            );
+                        }
+                    }
+                    Lit::Str(text) => {
+                        if !covered_strs.insert(text.clone()) {
+                            self.error(
+                                *s,
+                                format!(
+                                    "unreachable arm — `\"{}\"` was already covered",
+                                    text
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                },
+                Pattern::Path { path, span: s } => {
+                    if let Some(&sid) = self.res.path_to_sym.get(&path.span) {
+                        if let SymbolKind::EnumVariant { discriminant, .. } =
+                            self.res.symbol(sid).kind
+                        {
+                            if !covered_variants.insert(discriminant) {
+                                self.error(
+                                    *s,
+                                    "unreachable arm — this variant was already covered",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if catchall_seen.is_some() {
+            return; // exhaustive by catch-all
+        }
+
+        // No catch-all — check domain coverage by type.
+        match scrutinee_ty {
+            Ty::Bool => {
+                let missing: Vec<&str> = [false, true]
+                    .iter()
+                    .filter(|b| !covered_bools.contains(b))
+                    .map(|b| if *b { "true" } else { "false" })
+                    .collect();
+                if !missing.is_empty() {
+                    self.error(
+                        match_span,
+                        format!(
+                            "non-exhaustive `match` on `bool`: missing arms for {}",
+                            missing.join(", ")
+                        ),
+                    );
+                }
+            }
+            Ty::Enum(enum_sym) => {
+                let Some(variants) = self.res.enum_variants.get(enum_sym) else {
+                    return;
+                };
+                let missing: Vec<String> = variants
+                    .iter()
+                    .filter_map(|(name, sid)| match self.res.symbol(*sid).kind {
+                        SymbolKind::EnumVariant { discriminant, .. }
+                            if !covered_variants.contains(&discriminant) =>
+                        {
+                            Some(name.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    let enum_name = self.res.symbol(*enum_sym).name.clone();
+                    self.error(
+                        match_span,
+                        format!(
+                            "non-exhaustive `match` on enum `{}`: missing arms for {}",
+                            enum_name,
+                            missing.join(", ")
+                        ),
+                    );
+                }
+            }
+            _ => {
+                // i64, str, char, float, Vec, struct, etc. — infinite or
+                // unenumerable domains. Require a catch-all.
+                self.error(
+                    match_span,
+                    format!(
+                        "non-exhaustive `match` on `{}`: add a `_` arm to catch the rest",
+                        scrutinee_ty.display()
+                    ),
+                );
+            }
+        }
+    }
+
     /// Validates that a pattern is compatible with a scrutinee type.
     /// Wildcard and Ident patterns always match. Literal patterns must
     /// have the right type. Path patterns must resolve to a variant of
@@ -1247,7 +1397,9 @@ impl<'r> Checker<'r> {
                 },
             });
         }
-        let _ = span;
+        // Exhaustiveness + unreachable-arm checking. Runs after per-arm
+        // type checks so we don't double-report on broken patterns.
+        self.check_match_exhaustiveness(&st, arms, span);
         result_ty.unwrap_or(Ty::Unit)
     }
 

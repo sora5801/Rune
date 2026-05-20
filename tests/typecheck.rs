@@ -573,3 +573,192 @@ fn free_rejects_bool() {
 fn free_rejects_zero_args() {
     check_has_error("fn main() { free(); }", "expects 1 argument");
 }
+
+// ---- match exhaustiveness ----
+
+#[test]
+fn match_enum_exhaustive_ok() {
+    check_ok(r#"
+        enum Mode { On, Off, Idle }
+        fn label(m: Mode) -> i64 {
+            match m {
+                Mode::On => 1,
+                Mode::Off => 0,
+                Mode::Idle => -1,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_enum_non_exhaustive_errors() {
+    check_has_error(
+        r#"
+        enum Mode { On, Off, Idle }
+        fn label(m: Mode) -> i64 {
+            match m {
+                Mode::On => 1,
+                Mode::Off => 0,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn match_enum_with_wildcard_ok() {
+    check_ok(r#"
+        enum Mode { On, Off, Idle }
+        fn label(m: Mode) -> i64 {
+            match m {
+                Mode::On => 1,
+                _ => 0,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_bool_exhaustive_ok() {
+    check_ok(r#"
+        fn label(b: bool) -> i64 {
+            match b {
+                true => 1,
+                false => 0,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_bool_missing_branch_errors() {
+    check_has_error(
+        r#"
+        fn label(b: bool) -> i64 {
+            match b {
+                true => 1,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn match_int_without_catchall_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                1 => 1,
+                2 => 2,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn match_int_with_catchall_ok() {
+    check_ok(r#"
+        fn main() -> i64 {
+            match 5 {
+                1 => 1,
+                2 => 2,
+                _ => 0,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_int_with_binding_catchall_ok() {
+    check_ok(r#"
+        fn main() -> i64 {
+            match 5 {
+                0 => 0,
+                n => n * 2,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_str_without_catchall_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match "x" {
+                "a" => 1,
+                "b" => 2,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn match_duplicate_enum_variant_is_unreachable() {
+    check_has_error(
+        r#"
+        enum E { A, B }
+        fn label(e: E) -> i64 {
+            match e {
+                E::A => 1,
+                E::A => 2,
+                E::B => 3,
+            }
+        }
+        "#,
+        "unreachable",
+    );
+}
+
+#[test]
+fn match_duplicate_int_is_unreachable() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 1 {
+                5 => 1,
+                5 => 2,
+                _ => 0,
+            }
+        }
+        "#,
+        "unreachable",
+    );
+}
+
+#[test]
+fn match_arm_after_catchall_is_unreachable() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 1 {
+                _ => 0,
+                5 => 1,
+            }
+        }
+        "#,
+        "unreachable",
+    );
+}
+
+#[test]
+fn match_arm_after_binding_catchall_is_unreachable() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 1 {
+                n => n,
+                5 => 1,
+            }
+        }
+        "#,
+        "unreachable",
+    );
+}
