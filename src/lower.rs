@@ -218,8 +218,9 @@ impl<'a> Lowerer<'a> {
                 HirLit::Float(*v, float_ty)
             }
             ast::Lit::Bool(b) => HirLit::Bool(*b),
-            // Str / Char have no codegen support yet.
-            ast::Lit::Str(_) | ast::Lit::Char(_) => HirLit::Unit,
+            ast::Lit::Str(s) => HirLit::Str(s.clone()),
+            // Char has no codegen support yet.
+            ast::Lit::Char(_) => HirLit::Unit,
         }
     }
 

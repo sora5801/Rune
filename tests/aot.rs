@@ -244,3 +244,88 @@ fn release_mode_builds_and_runs() {
     let status = Command::new(&exe).status().expect("run");
     assert_eq!(status.code(), Some(55));
 }
+
+// ---- strings ----
+
+#[test]
+fn print_string_literal() {
+    let src = r#"
+        fn main() -> i64 {
+            print_str("Hello, Rune!");
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "Hello, Rune!");
+}
+
+#[test]
+fn print_multiple_strings() {
+    let src = r#"
+        fn main() -> i64 {
+            print_str("first");
+            print_str("second");
+            print_str("third");
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["first", "second", "third"]);
+}
+
+#[test]
+fn print_string_with_escapes() {
+    let src = r#"
+        fn main() -> i64 {
+            print_str("Hello\tworld!");
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    // Normalize Windows CRLF to LF — the C runtime uses stdout in text mode.
+    let stdout = stdout.replace("\r\n", "\n");
+    assert_eq!(stdout, "Hello\tworld!\n");
+}
+
+#[test]
+fn mixed_print_and_print_str() {
+    let src = r#"
+        fn main() -> i64 {
+            print_str("The answer is:");
+            print(42);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines, vec!["The answer is:", "42"]);
+}
+
+#[test]
+fn string_eq_controls_exit_code() {
+    let src = r#"
+        fn main() -> i64 {
+            let greeting = "hello";
+            if greeting == "hello" { 42 } else { 0 }
+        }
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn aot_string_passed_to_function() {
+    let src = r#"
+        fn matches_hello(s: str) -> bool {
+            s == "hello"
+        }
+        fn main() -> i64 {
+            if matches_hello("hello") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(build_and_run(src), 1);
+}

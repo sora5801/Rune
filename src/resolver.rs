@@ -148,6 +148,16 @@ impl Resolver {
             ret: Ty::Unit,
         };
         self.intern(print.name.to_string(), zero, SymbolKind::BuiltinFn(print));
+        let print_str = BuiltinFn {
+            name: "print_str",
+            params: vec![Ty::Str],
+            ret: Ty::Unit,
+        };
+        self.intern(
+            print_str.name.to_string(),
+            zero,
+            SymbolKind::BuiltinFn(print_str),
+        );
     }
 
     /// Insert a symbol into the current scope. Shadowing is allowed —

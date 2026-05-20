@@ -116,6 +116,7 @@ pub enum HirLit {
     Int(i64, IntTy),
     Float(f64, FloatTy),
     Bool(bool),
+    Str(String),
     Unit,
 }
 

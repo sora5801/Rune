@@ -407,3 +407,90 @@ fn array_of_bools_via_indexing() {
     "#;
     assert_eq!(run_main(src), 1);
 }
+
+// ---- strings ----
+
+#[test]
+fn string_literal_compiles() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello";
+            let _ = s;
+            42
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn string_eq_same_value() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello";
+            let t = "hello";
+            if s == t { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn string_eq_different_value() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello";
+            let t = "world";
+            if s == t { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn string_ne() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello";
+            let t = "world";
+            if s != t { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn string_eq_different_length() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hi";
+            let t = "hello";
+            if s == t { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn string_eq_empty() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "";
+            let t = "";
+            if s == t { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn string_passed_to_function() {
+    let src = r#"
+        fn matches_hello(s: str) -> bool {
+            s == "hello"
+        }
+        fn main() -> i64 {
+            if matches_hello("hello") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}

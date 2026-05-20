@@ -1,0 +1,8 @@
+// hello_world.rn — the classic.
+// Run with `rune run examples/hello_world.rn`
+// or compile with `rune build examples/hello_world.rn --release`.
+
+fn main() -> i64 {
+    print_str("Hello, world!");
+    0
+}

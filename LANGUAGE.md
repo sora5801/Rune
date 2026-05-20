@@ -142,17 +142,43 @@ let n = parse(input)?;
 
 ## Strings
 
-**Status: Tentative.** UTF-8 throughout, two types.
+**Status: Tentative.** UTF-8 throughout, one type: `str`.
 
-- `str` — owned, heap-allocated, growable (rough equivalent of Rust's `String`).
-- `&str` — borrowed slice into existing storage.
+Implementation as of 2026-05-19:
 
-Indexing is **byte-indexed**. Slicing on a non-char-boundary is a runtime
-panic (or a checked error — TBD). UTF-8-only avoids the UTF-16/wchar
-complication.
+- `str` is a **fat pointer** — a 16-byte (`ptr`, `len`) descriptor.
+- The descriptor lives on the **function's stack frame** (current memory
+  model is stack-frame arena; same as arrays).
+- String **literals** have their bytes embedded in the object's data
+  section via `cranelift_module::declare_data`. The descriptor's `ptr`
+  is a relocation to that static data; `len` is a constant.
+- Strings are **immutable** in this iteration. No concat, no methods,
+  no indexing-into-str (slicing UTF-8 needs char-boundary care).
+- **Equality** (`==`/`!=`) is implemented — codegen routes through a
+  runtime `rune_str_eq` that does length compare + memcmp.
+- **`print_str(s: str) -> ()`** builtin prints the bytes followed by a
+  newline. (Future: unify with `print(i64)` once we have overloading
+  or generics.)
 
-**Open:** raw string literals (`r"..."`), triple-quoted multi-line strings,
-string interpolation (`"\(expr)"` or `f"{expr}"`).
+Empty strings (`""`) compile to a descriptor with `ptr = null` and
+`len = 0`. The runtime checks `len == 0` before dereferencing, so
+the null is safe.
+
+**Not yet:**
+
+- Owned/borrowed split (`String` vs `&str`). May never split if a single
+  immutable type is good enough.
+- Concatenation. Would require heap allocation — the next memory-model
+  conversation.
+- `.len()`, `.bytes()`, indexing, slicing. Methods aren't codegen'd at
+  all yet.
+- Raw string literals (`r"..."`), triple-quoted multi-line strings,
+  interpolation (`"\(expr)"` or `f"{expr}"`).
+- Returning strings from functions. Stack-allocated descriptor means
+  it can't escape its frame.
+
+Indexing semantics, once added, will be **byte-indexed**. Slicing on a
+non-char-boundary is a runtime panic (or a checked error — TBD).
 
 ## Type system
 
@@ -227,3 +253,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | HIR + Cranelift codegen | Compilation model promoted to Decided. Cranelift JIT backend, target-native ABI (`extern "C"`), `fn main() -> i64` as entry. AST-shaped HIR with `Ty` on every node (over MIR/CFG). First runnable Rune: `rune run examples/fib.rn` prints `55`. |
 | 2026-05-19 | AOT executables | `rune build <file>` produces a native `.exe` via `cranelift-object` + external C linker driver. Default linker discovery: `clang` → `gcc` → `cc`, overridable via `$RUNE_LINKER`. Rune's `main` is renamed internally to `__rune_main`; a synthesized `int main(void)` calls it and truncates the i64 return to a 32-bit OS exit code. `rune build examples/fib.rn && ./fib.exe; echo $?` → `55`. |
 | 2026-05-19 | print + floats + --release + arrays/for | First host builtin: `print(i64)`, callable from both JIT (registered via `JITBuilder::symbol`) and AOT (embedded `RUNTIME_C` compiled inline by the linker driver). Float codegen tests landed (paths existed, now exercised). `rune build --release` maps to Cranelift `OptLevel::Speed`. Array literals stack-allocated via `StackSlot`; indexing via `iadd + load`; `for x in arr` desugars to a counter-based while loop. Memory model promoted Open → Tentative: stack-frame arena. |
+| 2026-05-19 | Strings | `str` as a 16-byte (ptr, len) descriptor; descriptor on the function's stack frame, bytes in the object's data section via `cranelift_module::declare_data`. `print_str(s: str)` builtin and `==`/`!=` for strings (runtime `rune_str_eq`: length compare + memcmp). Immutable; no concat, no methods, no slicing. Empty strings use `ptr = null + len = 0`; the runtime checks `len == 0` before dereferencing. `examples/hello_world.rn` prints "Hello, world!". |

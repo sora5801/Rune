@@ -10,12 +10,31 @@ use crate::hir::{HirItem, HirModule};
 use crate::ty::SymbolId;
 
 /// Minimal Rune runtime: defines C symbols the codegen imports.
+///
+/// `struct rune_str` here matches the layout emitted by codegen.rs:
+/// a 16-byte (pointer, length) descriptor on the stack.
 const RUNTIME_C: &str = r#"
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
+
+struct rune_str {
+    const char* ptr;
+    int64_t     len;
+};
 
 void rune_print_i64(int64_t x) {
     printf("%lld\n", (long long)x);
+}
+
+void rune_print_str(const struct rune_str* s) {
+    fwrite(s->ptr, 1, (size_t)s->len, stdout);
+    fputc('\n', stdout);
+}
+
+int8_t rune_str_eq(const struct rune_str* a, const struct rune_str* b) {
+    if (a->len != b->len) return 0;
+    return (int8_t)(memcmp(a->ptr, b->ptr, (size_t)a->len) == 0);
 }
 "#;
 

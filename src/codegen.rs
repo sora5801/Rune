@@ -13,7 +13,7 @@ use std::fmt;
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 
 use crate::hir::*;
@@ -42,15 +42,59 @@ pub struct Codegen<M: Module> {
     module: M,
     sym_to_func: HashMap<SymbolId, FuncId>,
     sym_to_sig: HashMap<SymbolId, Signature>,
-    /// Imported builtin host functions, declared lazily on first use.
+    /// Imported builtin and internal-runtime functions, declared lazily.
     builtin_funcs: HashMap<String, FuncId>,
+    /// Monotonic counter for naming unique string-literal data symbols.
+    next_str_id: u32,
 }
 
-/// Host implementation of `print(i64)` for JIT mode. Linked-against
-/// `rune_print_i64` in AOT mode is provided by the runtime C source
-/// embedded in [`crate::aot`].
+/// Layout of a Rune string descriptor, mirrored on both sides of the
+/// codegen/runtime boundary. 16 bytes, 8-byte aligned.
+#[repr(C)]
+struct RuneStr {
+    ptr: *const u8,
+    len: i64,
+}
+
+/// Host implementation of `print(i64)` for JIT mode.
 extern "C" fn rune_runtime_print_i64(x: i64) {
     println!("{}", x);
+}
+
+/// Host implementation of `print_str(str)` for JIT mode.
+extern "C" fn rune_runtime_print_str(s: *const RuneStr) {
+    unsafe {
+        let s = &*s;
+        if s.len == 0 {
+            println!();
+            return;
+        }
+        // Rune source literals are UTF-8 by construction.
+        let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+        let text = std::str::from_utf8_unchecked(slice);
+        println!("{}", text);
+    }
+}
+
+/// Host implementation of string equality for JIT mode. Returns 1 if equal,
+/// 0 otherwise.
+extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
+    unsafe {
+        let a = &*a;
+        let b = &*b;
+        if a.len != b.len {
+            return 0;
+        }
+        // Empty strings: lengths match, contents trivially equal. Skip
+        // from_raw_parts (its safety precondition rejects null even for
+        // zero-length slices).
+        if a.len == 0 {
+            return 1;
+        }
+        let aa = std::slice::from_raw_parts(a.ptr, a.len as usize);
+        let bb = std::slice::from_raw_parts(b.ptr, b.len as usize);
+        if aa == bb { 1 } else { 0 }
+    }
 }
 
 // ---- generic methods: compile any module backend ----
@@ -110,6 +154,7 @@ impl<M: Module> Codegen<M> {
             module: &mut self.module,
             sym_to_func: &self.sym_to_func,
             builtin_funcs: &mut self.builtin_funcs,
+            next_str_id: &mut self.next_str_id,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -176,12 +221,15 @@ impl Codegen<JITModule> {
             .map_err(|e| CodegenError(e.to_string()))?;
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol("rune_print_i64", rune_runtime_print_i64 as *const u8);
+        builder.symbol("rune_print_str", rune_runtime_print_str as *const u8);
+        builder.symbol("rune_str_eq", rune_runtime_str_eq as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
             sym_to_func: HashMap::new(),
             sym_to_sig: HashMap::new(),
             builtin_funcs: HashMap::new(),
+            next_str_id: 0,
         })
     }
 
@@ -229,6 +277,7 @@ impl Codegen<ObjectModule> {
             sym_to_func: HashMap::new(),
             sym_to_sig: HashMap::new(),
             builtin_funcs: HashMap::new(),
+            next_str_id: 0,
         })
     }
 
@@ -297,6 +346,7 @@ struct FnCodegen<'a, M: Module> {
     module: &'a mut M,
     sym_to_func: &'a HashMap<SymbolId, FuncId>,
     builtin_funcs: &'a mut HashMap<String, FuncId>,
+    next_str_id: &'a mut u32,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -460,9 +510,48 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirLit::Float(v, FloatTy::F32) => self.builder.ins().f32const(*v as f32),
             HirLit::Float(v, FloatTy::F64) => self.builder.ins().f64const(*v),
             HirLit::Bool(b) => self.builder.ins().iconst(types::I8, if *b { 1 } else { 0 }),
+            HirLit::Str(text) => return self.compile_str_literal(text),
             HirLit::Unit => return Ok(None),
         };
         Ok(Some(v))
+    }
+
+    fn compile_str_literal(&mut self, text: &str) -> Result<Option<Value>, CodegenError> {
+        // 1. Get a pointer to the bytes. Empty strings use a null pointer
+        //    (Cranelift's `define_data` rejects zero-length payloads, and
+        //    `memcmp(_, _, 0)` is well-defined regardless of pointer value).
+        let bytes_ptr = if text.is_empty() {
+            self.builder.ins().iconst(types::I64, 0)
+        } else {
+            let data_name = format!("rune_str_{}", *self.next_str_id);
+            *self.next_str_id += 1;
+            let data_id = self
+                .module
+                .declare_data(&data_name, Linkage::Local, false, false)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            let mut desc = DataDescription::new();
+            desc.define(text.as_bytes().to_vec().into_boxed_slice());
+            self.module
+                .define_data(data_id, &desc)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            let gv = self.module.declare_data_in_func(data_id, self.builder.func);
+            self.builder.ins().symbol_value(types::I64, gv)
+        };
+
+        // 2. Build a 16-byte (ptr, len) descriptor on the stack.
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
+        self.builder.ins().stack_store(bytes_ptr, slot, 0);
+        let len_const = self
+            .builder
+            .ins()
+            .iconst(types::I64, text.len() as i64);
+        self.builder.ins().stack_store(len_const, slot, 8);
+
+        Ok(Some(self.builder.ins().stack_addr(types::I64, slot, 0)))
     }
 
     fn compile_unary(
@@ -547,6 +636,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     return Err(CodegenError("float modulo not supported".into()));
                 }
                 if signed { self.builder.ins().srem(l, r) } else { self.builder.ins().urem(l, r) }
+            }
+            HirBinOp::Eq | HirBinOp::Ne if matches!(ty, Ty::Str) => {
+                let func_id = self.ensure_runtime_func("str_eq")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[l, r]);
+                let eq = self.builder.inst_results(inst)[0];
+                if matches!(op, HirBinOp::Ne) {
+                    let one = self.builder.ins().iconst(types::I8, 1);
+                    self.builder.ins().bxor(eq, one)
+                } else {
+                    eq
+                }
             }
             HirBinOp::Eq => {
                 if is_float { self.builder.ins().fcmp(FloatCC::Equal, l, r) }
@@ -696,14 +799,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         name: &str,
         args: &[HirExpr],
     ) -> Result<Option<Value>, CodegenError> {
-        let func_id = match self.builtin_funcs.get(name) {
-            Some(&id) => id,
-            None => {
-                let id = declare_builtin(self.module, name)?;
-                self.builtin_funcs.insert(name.to_string(), id);
-                id
-            }
-        };
+        let func_id = self.ensure_runtime_func(name)?;
         let local_func = self.module.declare_func_in_func(func_id, self.builder.func);
         let mut arg_vals = Vec::with_capacity(args.len());
         for a in args {
@@ -715,6 +811,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let inst = self.builder.ins().call(local_func, &arg_vals);
         let results = self.builder.inst_results(inst);
         if results.is_empty() { Ok(None) } else { Ok(Some(results[0])) }
+    }
+
+    fn ensure_runtime_func(&mut self, name: &str) -> Result<FuncId, CodegenError> {
+        if let Some(&id) = self.builtin_funcs.get(name) {
+            return Ok(id);
+        }
+        let id = declare_builtin(self.module, name)?;
+        self.builtin_funcs.insert(name.to_string(), id);
+        Ok(id)
     }
 
     fn compile_array(
@@ -878,6 +983,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Char => types::I32,
         // Arrays are represented as a pointer to their first element.
         Ty::Array(_, _) => types::I64,
+        // Strings are represented as a pointer to a (ptr, len) descriptor.
+        Ty::Str => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -905,7 +1012,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) => 8,
+        Ty::Array(_, _) | Ty::Str => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",
@@ -921,6 +1028,20 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             ("rune_print_i64", sig)
+        }
+        "print_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *const RuneStr
+            ("rune_print_str", sig)
+        }
+        // Internal-only runtime helper: codegen calls this for `==`/`!=`
+        // on `str` operands. Not surfaced through the resolver.
+        "str_eq" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // a
+            sig.params.push(AbiParam::new(types::I64)); // b
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_str_eq", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };
