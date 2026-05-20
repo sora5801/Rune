@@ -1,0 +1,85 @@
+//! Ahead-of-time compilation helpers — produce a native object file from
+//! a Rune HIR and shell out to a C-style linker driver to produce an
+//! executable.
+
+use std::path::Path;
+use std::process::Command;
+
+use crate::codegen::{Codegen, CodegenError, OptLevel};
+use crate::hir::{HirItem, HirModule};
+use crate::ty::SymbolId;
+
+/// Compile a Rune module to a native object file (returned as bytes).
+///
+/// Renames Rune's `main` to `__rune_main` in place and synthesizes a
+/// C-compatible `int main(void)` that calls it and truncates the i64
+/// return to the i32 exit code.
+pub fn build_object(hir: &mut HirModule, module_name: &str) -> Result<Vec<u8>, CodegenError> {
+    let rune_main_sym = rename_main(hir).ok_or_else(|| {
+        CodegenError("no `main` function in module".into())
+    })?;
+    let mut cg = Codegen::new_object(module_name, OptLevel::None)?;
+    cg.compile_module(hir)?;
+    let rune_main_id = cg
+        .func_id(rune_main_sym)
+        .ok_or_else(|| CodegenError("main was not declared".into()))?;
+    cg.emit_c_main_wrapper(rune_main_id)?;
+    cg.finish()
+}
+
+fn rename_main(hir: &mut HirModule) -> Option<SymbolId> {
+    for item in &mut hir.items {
+        let HirItem::Fn(f) = item;
+        if f.name == "main" {
+            let sym = f.sym;
+            f.name = "__rune_main".to_string();
+            return Some(sym);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkError {
+    pub tried: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl std::fmt::Display for LinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "no working linker found among {:?}.", self.tried)?;
+        for e in &self.errors {
+            writeln!(f, "  {}", e)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LinkError {}
+
+/// Invoke a C-style linker driver to produce `output` from `obj`.
+///
+/// Tries `$RUNE_LINKER` first if set, then `clang`, `gcc`, `cc` in order.
+/// The first one that succeeds wins; returns the linker that worked.
+pub fn link(obj: &Path, output: &Path) -> Result<String, LinkError> {
+    let candidates: Vec<String> = if let Ok(custom) = std::env::var("RUNE_LINKER") {
+        vec![custom]
+    } else {
+        vec!["clang".into(), "gcc".into(), "cc".into()]
+    };
+    let mut errors = Vec::new();
+    for cand in &candidates {
+        let result = Command::new(cand).arg(obj).arg("-o").arg(output).output();
+        match result {
+            Ok(out) if out.status.success() => return Ok(cand.clone()),
+            Ok(out) => errors.push(format!(
+                "{} exited with {:?}: {}",
+                cand,
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => errors.push(format!("{}: {}", cand, e)),
+        }
+    }
+    Err(LinkError { tried: candidates, errors })
+}

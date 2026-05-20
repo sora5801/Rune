@@ -1,13 +1,11 @@
-//! Cranelift JIT codegen for Rune's HIR.
+//! Cranelift codegen for Rune's HIR.
 //!
-//! Produces in-memory machine code via `cranelift_jit`. Functions are
-//! compiled with the target's native calling convention (effectively
-//! `extern "C"`), so the host can call them via `transmute`.
+//! Generic over `cranelift_module::Module`. Two backends instantiate it:
+//! - `Codegen<JITModule>` — JIT compilation for `rune run`.
+//! - `Codegen<ObjectModule>` — AOT object emission for `rune build`.
 //!
-//! Scope: i64/i32/i16/i8 (and unsigned/pointer-sized counterparts),
-//! f32/f64, bool, unit. Arithmetic, comparison, bitwise, logical
-//! (short-circuit), unary, if/else, while, let bindings with mutability,
-//! Rune-to-Rune function calls, `return`.
+//! The per-function machinery (`FnCodegen`) is shared. Backend-specific
+//! finalization is split across two specialized `impl` blocks.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -16,6 +14,7 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_object::{ObjectBuilder, ObjectModule, ObjectProduct};
 
 use crate::hir::*;
 use crate::ty::{FloatTy, IntTy, SymbolId, Ty};
@@ -39,35 +38,15 @@ impl From<&str> for CodegenError {
     fn from(s: &str) -> Self { Self(s.to_string()) }
 }
 
-pub struct Codegen {
-    module: JITModule,
+pub struct Codegen<M: Module> {
+    module: M,
     sym_to_func: HashMap<SymbolId, FuncId>,
     sym_to_sig: HashMap<SymbolId, Signature>,
 }
 
-impl Codegen {
-    pub fn new() -> Result<Self, CodegenError> {
-        let mut flag_builder = settings::builder();
-        flag_builder.set("use_colocated_libcalls", "false")
-            .map_err(|e| CodegenError(e.to_string()))?;
-        flag_builder.set("is_pic", "false")
-            .map_err(|e| CodegenError(e.to_string()))?;
-        flag_builder.set("opt_level", "none")
-            .map_err(|e| CodegenError(e.to_string()))?;
-        let isa_builder = cranelift_native::builder()
-            .map_err(|s| CodegenError(format!("host machine ISA: {}", s)))?;
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| CodegenError(e.to_string()))?;
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        let module = JITModule::new(builder);
-        Ok(Self {
-            module,
-            sym_to_func: HashMap::new(),
-            sym_to_sig: HashMap::new(),
-        })
-    }
+// ---- generic methods: compile any module backend ----
 
+impl<M: Module> Codegen<M> {
     pub fn compile_module(&mut self, hir: &HirModule) -> Result<(), CodegenError> {
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
@@ -85,10 +64,11 @@ impl Codegen {
             let HirItem::Fn(f) = item;
             self.define_fn(f)?;
         }
-        self.module
-            .finalize_definitions()
-            .map_err(|e| CodegenError(e.to_string()))?;
         Ok(())
+    }
+
+    pub fn func_id(&self, sym: SymbolId) -> Option<FuncId> {
+        self.sym_to_func.get(&sym).copied()
     }
 
     fn fn_signature(&self, f: &HirFn) -> Result<Signature, CodegenError> {
@@ -115,7 +95,6 @@ impl Codegen {
         builder.switch_to_block(entry);
         builder.seal_block(entry);
 
-        // Snapshot signature info we need for the body before we move builder.
         let ret_ty = f.ret_ty.clone();
 
         let mut fc = FnCodegen {
@@ -126,7 +105,6 @@ impl Codegen {
             var_counter: 0,
         };
 
-        // Declare each parameter as a Variable, seeded from the block params.
         for (i, p) in f.params.iter().enumerate() {
             let var = fc.alloc_var();
             let cty = cranelift_type(&p.ty)?;
@@ -165,6 +143,38 @@ impl Codegen {
         self.module.clear_context(&mut ctx);
         Ok(())
     }
+}
+
+// ---- JIT-only ----
+
+impl Codegen<JITModule> {
+    pub fn new_jit() -> Result<Self, CodegenError> {
+        let mut flag_builder = settings::builder();
+        flag_builder
+            .set("use_colocated_libcalls", "false")
+            .map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder
+            .set("is_pic", "false")
+            .map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder
+            .set("opt_level", "none")
+            .map_err(|e| CodegenError(e.to_string()))?;
+        let isa_builder = cranelift_native::builder()
+            .map_err(|s| CodegenError(format!("host machine ISA: {}", s)))?;
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| CodegenError(e.to_string()))?;
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let module = JITModule::new(builder);
+        Ok(Self { module, sym_to_func: HashMap::new(), sym_to_sig: HashMap::new() })
+    }
+
+    pub fn finalize(&mut self) -> Result<(), CodegenError> {
+        self.module
+            .finalize_definitions()
+            .map_err(|e| CodegenError(e.to_string()))?;
+        Ok(())
+    }
 
     pub fn get_function_ptr(&self, sym: SymbolId) -> Option<*const u8> {
         let func_id = self.sym_to_func.get(&sym)?;
@@ -172,15 +182,105 @@ impl Codegen {
     }
 }
 
-struct FnCodegen<'a> {
-    module: &'a mut JITModule,
+// ---- Object-only ----
+
+impl Codegen<ObjectModule> {
+    pub fn new_object(module_name: &str, opt_level: OptLevel) -> Result<Self, CodegenError> {
+        let mut flag_builder = settings::builder();
+        flag_builder
+            .set("use_colocated_libcalls", "false")
+            .map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder
+            .set("is_pic", "true")
+            .map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder
+            .set("opt_level", opt_level.as_str())
+            .map_err(|e| CodegenError(e.to_string()))?;
+        let isa_builder = cranelift_native::builder()
+            .map_err(|s| CodegenError(format!("host machine ISA: {}", s)))?;
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| CodegenError(e.to_string()))?;
+        let builder = ObjectBuilder::new(
+            isa,
+            module_name,
+            cranelift_module::default_libcall_names(),
+        )
+        .map_err(|e| CodegenError(e.to_string()))?;
+        let module = ObjectModule::new(builder);
+        Ok(Self { module, sym_to_func: HashMap::new(), sym_to_sig: HashMap::new() })
+    }
+
+    /// Emit a C-compatible `int main(void)` that calls the Rune main
+    /// (passed in as `rune_main_id`) and truncates its `i64` return value
+    /// to `i32` for the OS exit code.
+    pub fn emit_c_main_wrapper(&mut self, rune_main_id: FuncId) -> Result<(), CodegenError> {
+        let mut sig = self.module.make_signature();
+        sig.returns.push(AbiParam::new(types::I32));
+        let func_id = self
+            .module
+            .declare_function("main", Linkage::Export, &sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut bctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut bctx);
+
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let rune_main_ref = self.module.declare_func_in_func(rune_main_id, builder.func);
+        let inst = builder.ins().call(rune_main_ref, &[]);
+        let rune_result = builder.inst_results(inst)[0];
+        let exit_code = builder.ins().ireduce(types::I32, rune_result);
+        builder.ins().return_(&[exit_code]);
+        builder.finalize();
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<Vec<u8>, CodegenError> {
+        let product: ObjectProduct = self.module.finish();
+        product
+            .emit()
+            .map_err(|e| CodegenError(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    None,
+    Speed,
+    SpeedAndSize,
+}
+
+impl OptLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            OptLevel::None => "none",
+            OptLevel::Speed => "speed",
+            OptLevel::SpeedAndSize => "speed_and_size",
+        }
+    }
+}
+
+// ---- per-function codegen (generic over Module) ----
+
+struct FnCodegen<'a, M: Module> {
+    module: &'a mut M,
     sym_to_func: &'a HashMap<SymbolId, FuncId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
 }
 
-impl<'a> FnCodegen<'a> {
+impl<'a, M: Module> FnCodegen<'a, M> {
     fn alloc_var(&mut self) -> Variable {
         let v = Variable::new(self.var_counter as usize);
         self.var_counter += 1;
@@ -201,7 +301,6 @@ impl<'a> FnCodegen<'a> {
         for s in &b.stmts {
             last_val = self.compile_stmt(s)?;
             if self.is_filled() {
-                // Control flow diverged (return). No further code runs.
                 break;
             }
         }
@@ -311,8 +410,6 @@ impl<'a> FnCodegen<'a> {
                     vec![]
                 };
                 self.builder.ins().return_(&vals);
-                // After a return the current block has a terminator. Switch
-                // to a fresh unreachable block so subsequent IR is well-formed.
                 let after = self.builder.create_block();
                 self.builder.switch_to_block(after);
                 self.builder.seal_block(after);
@@ -354,7 +451,6 @@ impl<'a> FnCodegen<'a> {
                 _ => return Err(CodegenError(format!("cannot negate `{}`", ty.display()))),
             },
             HirUnOp::Not => {
-                // bool: xor with 1
                 let one = self.builder.ins().iconst(types::I8, 1);
                 self.builder.ins().bxor(v, one)
             }
@@ -376,8 +472,6 @@ impl<'a> FnCodegen<'a> {
         let r = self
             .compile_expr(rhs)?
             .ok_or_else(|| CodegenError("rhs produced no value".into()))?;
-        // For comparison the *operand* type matters; for arithmetic the
-        // result type and operand type are the same.
         let operand_ty = match op {
             HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt | HirBinOp::Gt
             | HirBinOp::Le | HirBinOp::Ge => &lhs.ty,
@@ -425,54 +519,32 @@ impl<'a> FnCodegen<'a> {
                 if signed { self.builder.ins().srem(l, r) } else { self.builder.ins().urem(l, r) }
             }
             HirBinOp::Eq => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::Equal, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::Equal, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::Equal, l, r) }
+                else { self.builder.ins().icmp(IntCC::Equal, l, r) }
             }
             HirBinOp::Ne => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::NotEqual, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::NotEqual, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::NotEqual, l, r) }
+                else { self.builder.ins().icmp(IntCC::NotEqual, l, r) }
             }
             HirBinOp::Lt => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::LessThan, l, r)
-                } else if signed {
-                    self.builder.ins().icmp(IntCC::SignedLessThan, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::UnsignedLessThan, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::LessThan, l, r) }
+                else if signed { self.builder.ins().icmp(IntCC::SignedLessThan, l, r) }
+                else { self.builder.ins().icmp(IntCC::UnsignedLessThan, l, r) }
             }
             HirBinOp::Gt => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::GreaterThan, l, r)
-                } else if signed {
-                    self.builder.ins().icmp(IntCC::SignedGreaterThan, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::UnsignedGreaterThan, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::GreaterThan, l, r) }
+                else if signed { self.builder.ins().icmp(IntCC::SignedGreaterThan, l, r) }
+                else { self.builder.ins().icmp(IntCC::UnsignedGreaterThan, l, r) }
             }
             HirBinOp::Le => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::LessThanOrEqual, l, r)
-                } else if signed {
-                    self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::LessThanOrEqual, l, r) }
+                else if signed { self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, l, r) }
+                else { self.builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, l, r) }
             }
             HirBinOp::Ge => {
-                if is_float {
-                    self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r)
-                } else if signed {
-                    self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r)
-                } else {
-                    self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, l, r)
-                }
+                if is_float { self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, l, r) }
+                else if signed { self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r) }
+                else { self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, l, r) }
             }
             HirBinOp::BitAnd => self.builder.ins().band(l, r),
             HirBinOp::BitOr => self.builder.ins().bor(l, r),
@@ -491,8 +563,6 @@ impl<'a> FnCodegen<'a> {
         lhs: &HirExpr,
         rhs: &HirExpr,
     ) -> Result<Option<Value>, CodegenError> {
-        // a && b → if a { b } else { false }
-        // a || b → if a { true } else { b }
         let l = self
             .compile_expr(lhs)?
             .ok_or_else(|| CodegenError("logical lhs produced no value".into()))?;
@@ -503,7 +573,6 @@ impl<'a> FnCodegen<'a> {
 
         self.builder.ins().brif(l, then_blk, &[], else_blk, &[]);
 
-        // then
         self.builder.switch_to_block(then_blk);
         self.builder.seal_block(then_blk);
         let then_v = match op {
@@ -516,7 +585,6 @@ impl<'a> FnCodegen<'a> {
             self.builder.ins().jump(merge_blk, &[then_v]);
         }
 
-        // else
         self.builder.switch_to_block(else_blk);
         self.builder.seal_block(else_blk);
         let else_v = match op {
@@ -529,7 +597,6 @@ impl<'a> FnCodegen<'a> {
             self.builder.ins().jump(merge_blk, &[else_v]);
         }
 
-        // merge
         self.builder.switch_to_block(merge_blk);
         self.builder.seal_block(merge_blk);
         Ok(Some(self.builder.block_params(merge_blk)[0]))
@@ -557,7 +624,6 @@ impl<'a> FnCodegen<'a> {
 
         self.builder.ins().brif(cond_v, then_blk, &[], else_blk, &[]);
 
-        // then
         self.builder.switch_to_block(then_blk);
         self.builder.seal_block(then_blk);
         let then_val = self.compile_block(then_b)?;
@@ -572,7 +638,6 @@ impl<'a> FnCodegen<'a> {
             }
         }
 
-        // else
         self.builder.switch_to_block(else_blk);
         self.builder.seal_block(else_blk);
         let else_val = if let Some(e) = else_b { self.compile_expr(e)? } else { None };
@@ -587,7 +652,6 @@ impl<'a> FnCodegen<'a> {
             }
         }
 
-        // merge
         self.builder.switch_to_block(merge_blk);
         self.builder.seal_block(merge_blk);
         if produces_value {

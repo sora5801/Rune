@@ -5,11 +5,14 @@ targeting native code via Cranelift.
 
 ## Status
 
-**Pre-alpha — front end + JIT codegen complete.** First Rune programs run via
-`rune run`. No stdlib, no AOT executables, no generics yet.
+**Pre-alpha — full pipeline lex → parse → check → codegen, both JIT and AOT.**
+No stdlib, no generics yet.
 
 ```
 $ rune run examples/fib.rn
+55
+$ rune build examples/fib.rn && ./fib.exe; echo $?
+rune: linked with clang -> fib.exe
 55
 ```
 
@@ -73,8 +76,8 @@ $ rune run examples/fib.rn
 - AST-shaped HIR (`src/hir.rs`) with `Ty` on every node; paths resolved to
   `SymbolId`. Unsupported variants funneled into `Unsupported(msg)`.
 - Lowering pass at `src/lower.rs`.
-- Cranelift JIT codegen (`src/codegen.rs`): compiles to in-memory native
-  code via `cranelift-jit`.
+- Cranelift codegen (`src/codegen.rs`) generic over `Module` —
+  parameterized backend used by both JIT and AOT paths.
 - Covers: integers (i8/i16/i32/i64 + unsigned + isize/usize), bool,
   arithmetic, comparison, bitwise, shifts, unary, short-circuit `&&`/`||`,
   `if`/`else` as both statement and expression, `else if` chains, `while`,
@@ -82,21 +85,34 @@ $ rune run examples/fib.rn
   function calls (forward references, recursion, mutual recursion),
   early `return`.
 - ABI: target-native (effectively `extern "C"`).
-- 23 integration tests covering literal arithmetic, control flow,
-  recursion (factorial, fib), short-circuit evaluation, early return.
-- **Not yet:** floats (lexer + checker accept them; codegen path partially
-  wired but untested), strings, arrays, `for` loops, `match`, struct/enum
-  values, method/field access, `?`, `as` casts.
+- 23 JIT tests + 8 AOT tests.
+
+### AOT executables — done
+
+- `rune build <file>` produces a native executable via `cranelift-object`
+  + an external C-style linker driver.
+- `src/aot.rs`: `build_object` renames Rune's `main` to `__rune_main`,
+  emits a synthesized `int main(void)` that calls it and truncates the
+  i64 return to the i32 exit code. `link` shells out to `clang` →
+  `gcc` → `cc` (first one that succeeds wins); `$RUNE_LINKER` overrides.
+- Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
+  `-o <path>` overrides. The intermediate `.o` is kept next to the
+  output for inspection.
+
+**Not yet codegen'd anywhere:** floats (paths wired, untested), strings,
+arrays, `for` loops, `match`, struct/enum values, method/field access,
+`?`, `as` casts. All emit `Unsupported(msg)` at lowering with a clear
+error if reached.
 
 ## Roadmap
 
-1. AOT codegen (`cranelift-object`) + linker invocation
-2. `print(i64)` host builtin + I/O
-3. Float codegen tests + char/str support
-4. Array codegen
-5. Struct/enum field-aware codegen
-6. Method calls + field type-checking
-7. Generics (parametric polymorphism)
+1. `print(i64)` host builtin + I/O — Rune programs that print something
+2. Float codegen tests + char/str support
+3. Array codegen (forces a memory-model decision)
+4. Struct/enum field-aware codegen
+5. Method calls + field type-checking
+6. Generics (parametric polymorphism)
+7. Optimizer pass (Cranelift `opt_level = "speed"`)
 8. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
@@ -124,11 +140,15 @@ cargo test
 ## CLI
 
 ```
-rune tokens <file.rn>    # dump tokens
-rune ast <file.rn>       # parse and dump the AST
-rune check <file.rn>     # parse, resolve names, type-check
-rune run <file.rn>       # JIT-compile and execute `main() -> i64`
+rune tokens <file.rn>           # dump tokens
+rune ast <file.rn>              # parse and dump the AST
+rune check <file.rn>            # parse, resolve names, type-check
+rune run <file.rn>              # JIT-compile and execute `main() -> i64`
+rune build <file.rn> [-o out]   # AOT-compile to a native executable
 ```
+
+`rune build` requires a C-style linker on PATH. The discovery order is
+`clang` → `gcc` → `cc`. Override with `RUNE_LINKER=<name>`.
 
 ## Documentation
 

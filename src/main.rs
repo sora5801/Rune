@@ -1,8 +1,11 @@
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use rune::{Checker, Codegen, Lexer, Lowerer, Parser, Resolver, Resolutions, SymbolId, SymbolKind};
+use rune::{
+    aot, Checker, Codegen, Lexer, Lowerer, Parser, Resolver, Resolutions, SymbolId, SymbolKind,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -15,6 +18,7 @@ fn main() -> ExitCode {
         "ast" => cmd_ast(&args),
         "check" => cmd_check(&args),
         "run" => cmd_run(&args),
+        "build" => cmd_build(&args),
         "--help" | "-h" | "help" => {
             print_usage();
             ExitCode::SUCCESS
@@ -31,10 +35,11 @@ fn print_usage() {
     eprintln!("usage: rune <command> [args]");
     eprintln!();
     eprintln!("commands:");
-    eprintln!("  tokens <file>    print tokens from a source file");
-    eprintln!("  ast <file>       parse and print the AST");
-    eprintln!("  check <file>     parse, resolve names, type-check");
-    eprintln!("  run <file>       JIT-compile and execute `main() -> i64`");
+    eprintln!("  tokens <file>           print tokens from a source file");
+    eprintln!("  ast <file>              parse and print the AST");
+    eprintln!("  check <file>            parse, resolve names, type-check");
+    eprintln!("  run <file>              JIT-compile and execute `main() -> i64`");
+    eprintln!("  build <file> [-o out]   AOT-compile to a native executable");
 }
 
 fn read_source(path: &str) -> Result<String, ExitCode> {
@@ -139,7 +144,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     }
 
     let hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
-    let mut cg = match Codegen::new() {
+    let mut cg = match Codegen::new_jit() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("rune: {}", e);
@@ -147,6 +152,10 @@ fn cmd_run(args: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = cg.compile_module(&hir) {
+        eprintln!("rune: {}", e);
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = cg.finalize() {
         eprintln!("rune: {}", e);
         return ExitCode::FAILURE;
     }
@@ -161,11 +170,88 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    // `main` must be `fn() -> i64` per session-004 contract.
     let main_fn: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
     let result = main_fn();
     println!("{}", result);
     ExitCode::SUCCESS
+}
+
+fn cmd_build(args: &[String]) -> ExitCode {
+    let Some(input_path) = args.get(1) else {
+        eprintln!("usage: rune build <file> [-o output]");
+        return ExitCode::from(2);
+    };
+    let output_path = derive_output_path(input_path, args);
+
+    let source = match read_source(input_path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let (module, parse_errors) = Parser::new(tokens).parse_module();
+    let (resolutions, resolve_errors) = Resolver::new().resolve_module(&module);
+    let check_results = Checker::new(&resolutions).check_module(&module);
+
+    let mut had_errors = false;
+    for err in &lex_errors { eprintln!("{}", err); had_errors = true; }
+    for err in &parse_errors { eprintln!("{}", err); had_errors = true; }
+    for err in &resolve_errors { eprintln!("{}", err); had_errors = true; }
+    for err in &check_results.errors { eprintln!("{}", err); had_errors = true; }
+    if had_errors {
+        return ExitCode::FAILURE;
+    }
+
+    let mut hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
+
+    let module_name = Path::new(input_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rune_module")
+        .to_string();
+
+    let bytes = match aot::build_object(&mut hir, &module_name) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("rune: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let obj_path = output_path.with_extension("o");
+    if let Err(e) = fs::write(&obj_path, &bytes) {
+        eprintln!("rune: writing {}: {}", obj_path.display(), e);
+        return ExitCode::FAILURE;
+    }
+
+    match aot::link(&obj_path, &output_path) {
+        Ok(linker) => {
+            println!("rune: linked with {} -> {}", linker, output_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rune: link failed");
+            eprintln!("{}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn derive_output_path(input_path: &str, args: &[String]) -> PathBuf {
+    for (i, a) in args.iter().enumerate() {
+        if a == "-o" {
+            if let Some(p) = args.get(i + 1) {
+                return PathBuf::from(p);
+            }
+        }
+    }
+    let stem = Path::new(input_path)
+        .file_stem()
+        .unwrap_or_default();
+    let mut out = PathBuf::from(stem);
+    if cfg!(windows) {
+        out.set_extension("exe");
+    }
+    out
 }
 
 fn find_main(res: &Resolutions) -> Option<SymbolId> {

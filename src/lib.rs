@@ -1,3 +1,4 @@
+pub mod aot;
 pub mod ast;
 pub mod checker;
 pub mod codegen;
@@ -9,9 +10,10 @@ pub mod resolver;
 pub mod token;
 pub mod ty;
 
+pub use aot::{build_object, link, LinkError};
 pub use ast::*;
 pub use checker::{CheckResults, Checker, TypeError};
-pub use codegen::{Codegen, CodegenError};
+pub use codegen::{Codegen, CodegenError, OptLevel};
 pub use hir::{HirModule, HirItem, HirFn};
 pub use lexer::{LexError, Lexer};
 pub use lower::Lowerer;

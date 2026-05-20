@@ -12,8 +12,9 @@ fn run_main(src: &str) -> i64 {
     assert!(cr.errors.is_empty(), "type errors: {:?}", cr.errors);
     let hir = Lowerer::new(&res, &cr).lower_module(&module);
 
-    let mut cg = Codegen::new().expect("codegen init");
+    let mut cg = Codegen::new_jit().expect("codegen init");
     cg.compile_module(&hir).expect("compile module");
+    cg.finalize().expect("finalize");
 
     let main_sym = res
         .symbols

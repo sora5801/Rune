@@ -176,9 +176,10 @@ Defer concrete decisions until the parser is more than a toy.
 
 **Status: Decided.**
 
-- **Backend:** Cranelift, via `cranelift-jit` (in-memory codegen).
-  Programs JIT-compile and run from `rune run`. AOT to a `.o` file
-  via `cranelift-object` is a later session.
+- **Backend:** Cranelift. Two output modes:
+  - `cranelift-jit` (in-memory codegen) for `rune run` — fastest feedback.
+  - `cranelift-object` + external C linker driver for `rune build`,
+    producing a native executable.
 - **ABI:** the target's default native calling convention — SystemV
   on Linux, WindowsFastcall on Windows, AAPCS on ARM. Effectively
   `extern "C"`. Trivial C interop later; a Rune-specific CC isn't
@@ -215,3 +216,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Parser implemented | Syntactic decisions pinned via implementation: Pratt precedence table, postfix `?` and `as`, `match` arm shape (`pat => expr,`), `else if` chains, expression-oriented blocks with optional trailing expression. Comparison operators currently left-associative (Rust treats them as non-associative — open). |
 | 2026-05-19 | Resolver + type checker | Three previously-tentative decisions pinned: default integer type → `i64` (was `i32` placeholder); mutability enforcement → strict (immutable bindings can't be reassigned); name resolution → lexical scoping with shadowing allowed. Bottom-up monomorphic type checker landed. |
 | 2026-05-19 | HIR + Cranelift codegen | Compilation model promoted to Decided. Cranelift JIT backend, target-native ABI (`extern "C"`), `fn main() -> i64` as entry. AST-shaped HIR with `Ty` on every node (over MIR/CFG). First runnable Rune: `rune run examples/fib.rn` prints `55`. |
+| 2026-05-19 | AOT executables | `rune build <file>` produces a native `.exe` via `cranelift-object` + external C linker driver. Default linker discovery: `clang` → `gcc` → `cc`, overridable via `$RUNE_LINKER`. Rune's `main` is renamed internally to `__rune_main`; a synthesized `int main(void)` calls it and truncates the i64 return to a 32-bit OS exit code. `rune build examples/fib.rn && ./fib.exe; echo $?` → `55`. |
