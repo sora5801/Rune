@@ -329,3 +329,53 @@ fn aot_string_passed_to_function() {
     "#;
     assert_eq!(build_and_run(src), 1);
 }
+
+// ---- string concatenation ----
+
+#[test]
+fn aot_print_concat() {
+    let src = r#"
+        fn main() -> i64 {
+            print_str("hello, " + "world");
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "hello, world");
+}
+
+#[test]
+fn aot_concat_returned_from_fn() {
+    let src = r#"
+        fn greet(name: str) -> str {
+            "Hello, " + name + "!"
+        }
+        fn main() -> i64 {
+            print_str(greet("Rune"));
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "Hello, Rune!");
+}
+
+#[test]
+fn aot_concat_in_loop() {
+    // Each iteration heap-allocates a new descriptor + bytes.
+    let src = r#"
+        fn main() -> i64 {
+            let parts = ["a", "b", "c"];
+            let mut acc = "";
+            for p in parts {
+                acc = acc + p;
+            }
+            print_str(acc);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "abc");
+}

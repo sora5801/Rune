@@ -97,6 +97,36 @@ extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
     }
 }
 
+/// Host implementation of string concatenation for JIT mode. Allocates a
+/// fresh descriptor + fresh byte buffer on the heap, never freed (leak by
+/// design — Rune v0.x is process-lifetime).
+extern "C" fn rune_runtime_str_concat(a: *const RuneStr, b: *const RuneStr) -> *mut RuneStr {
+    use std::alloc::{alloc, Layout};
+    unsafe {
+        let a = &*a;
+        let b = &*b;
+        let total_len = a.len + b.len;
+        let desc_layout = Layout::new::<RuneStr>();
+        let desc = alloc(desc_layout) as *mut RuneStr;
+        if total_len == 0 {
+            (*desc).ptr = std::ptr::null();
+            (*desc).len = 0;
+            return desc;
+        }
+        let bytes_layout = Layout::from_size_align(total_len as usize, 1).unwrap();
+        let bytes = alloc(bytes_layout);
+        if a.len > 0 {
+            std::ptr::copy_nonoverlapping(a.ptr, bytes, a.len as usize);
+        }
+        if b.len > 0 {
+            std::ptr::copy_nonoverlapping(b.ptr, bytes.add(a.len as usize), b.len as usize);
+        }
+        (*desc).ptr = bytes as *const u8;
+        (*desc).len = total_len;
+        desc
+    }
+}
+
 // ---- generic methods: compile any module backend ----
 
 impl<M: Module> Codegen<M> {
@@ -223,6 +253,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_print_i64", rune_runtime_print_i64 as *const u8);
         builder.symbol("rune_print_str", rune_runtime_print_str as *const u8);
         builder.symbol("rune_str_eq", rune_runtime_str_eq as *const u8);
+        builder.symbol("rune_str_concat", rune_runtime_str_concat as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -442,7 +473,10 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let r = self
                     .compile_expr(rhs)?
                     .ok_or_else(|| CodegenError("compound assign rhs produced no value".into()))?;
-                let new_val = self.compile_binop_value(*op, cur, r, &e.ty)?;
+                // The AssignOp expression itself is `()`-typed; the *operation*
+                // is on the variable's type (which equals rhs.ty after the
+                // type checker's compatibility check).
+                let new_val = self.compile_binop_value(*op, cur, r, &rhs.ty)?;
                 self.builder.def_var(var, new_val);
                 Ok(None)
             }
@@ -613,6 +647,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         );
         let is_float = matches!(ty, Ty::Float(_));
         let v = match op {
+            HirBinOp::Add if matches!(ty, Ty::Str) => {
+                let func_id = self.ensure_runtime_func("str_concat")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[l, r]);
+                self.builder.inst_results(inst)[0]
+            }
             HirBinOp::Add => {
                 if is_float { self.builder.ins().fadd(l, r) } else { self.builder.ins().iadd(l, r) }
             }
@@ -1042,6 +1084,15 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64)); // b
             sig.returns.push(AbiParam::new(types::I8));
             ("rune_str_eq", sig)
+        }
+        // Internal-only: codegen calls this for `+` on `str` operands.
+        // Allocates a new descriptor + bytes on the heap (process-lifetime).
+        "str_concat" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_str_concat", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };

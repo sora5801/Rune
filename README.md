@@ -13,6 +13,10 @@ work. No heap allocator yet, no generics.
 $ rune build examples/hello_world.rn --release && ./hello_world.exe
 rune: linked with clang -> hello_world.exe
 Hello, world!
+$ rune run examples/greet.rn
+Hello, world!
+Hello, Rune!
+Hello, Cranelift!
 $ rune build examples/primes.rn --release && ./primes.exe ; echo $?
 rune: linked with clang -> primes.exe
 2 3 5 7 11 13 17 19
@@ -94,8 +98,10 @@ rune: linked with clang -> primes.exe
     desugared to a counter-based while loop.
   - **String literals** as a 16-byte (ptr, len) descriptor — bytes in
     the object's data section, descriptor on the function's stack.
-    **`==`/`!=`** for strings via runtime `rune_str_eq` (length +
-    memcmp). Immutable; no concat yet.
+    **`==`/`!=`** for strings via runtime `rune_str_eq`.
+    **`+` / `+=`** (concatenation) via runtime `rune_str_concat` that
+    mallocs a fresh descriptor + buffer; result is process-lifetime
+    heap (no free yet).
   - Host builtins: **`print(i64)`** and **`print_str(str)`** —
     registered with `JITBuilder::symbol` for JIT, defined in the
     embedded C runtime for AOT.
@@ -124,15 +130,16 @@ if reached.
 
 ## Roadmap
 
-1. Heap-allocated strings + concatenation (forces the heap-alloc story)
-2. Heap-allocated arrays / dynamic vectors
-3. Polymorphic `print` (unify `print(i64)` and `print_str(str)` via
+1. Heap-allocated arrays / dynamic vectors
+2. Polymorphic `print` (unify `print(i64)` and `print_str(str)` via
    overloading or traits)
+3. String methods: `.len()`, indexing, slicing
 4. Struct/enum field-aware codegen
 5. Method calls + field type-checking
 6. Bounds checks on array indexing
-7. Generics (parametric polymorphism)
-8. Self-hosted bootstrap (long-term)
+7. Reclamation for heap allocations (ARC, arenas, or GC)
+8. Generics (parametric polymorphism)
+9. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

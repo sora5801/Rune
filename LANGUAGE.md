@@ -96,7 +96,9 @@ isn't decorative — the type checker rejects writes to immutable bindings.
 
 ## Memory model
 
-**Status: Tentative.** Stack-frame arena for now; heap and ownership deferred.
+**Status: Tentative.** Stack-frame arena for short-lived values + a
+process-lifetime leak heap for runtime-created strings. Ownership and
+reclamation deferred.
 
 Concrete state as of 2026-05-19:
 
@@ -105,7 +107,12 @@ Concrete state as of 2026-05-19:
   binding holds the slot's address. Lifetime is the function frame.
 - **Arrays cannot escape a function** — no array returns, no array params
   yet. The codegen errors on either.
-- **No heap allocator wired up.** No `Box`, no `Vec`, no `String`.
+- **String literals** stack-allocate a 16-byte `(ptr, len)` descriptor;
+  bytes live in `.rodata`.
+- **String concatenation** (`+` on `str` operands) allocates a fresh
+  descriptor + fresh byte buffer via `malloc`. **Never freed** —
+  process-lifetime leak by design. Fine for v0.x; reclamation is a
+  future ARC / arena / GC conversation.
 - **No bounds checks on indexing.** `arr[i]` trusts `i`. Adding checks is
   cheap; deferred until errors-as-values are designed.
 
@@ -117,9 +124,10 @@ Concrete state as of 2026-05-19:
 | Borrow checker | Compile-time ownership | High | Defining feature if pursued; months of work |
 | Tracing GC | Stop-the-world or concurrent collector | High | Real runtime; harder to bootstrap |
 
-**Tentative recommendation:** continue arena-only. Lift "stack-frame arena"
-to "explicit named arenas" once we want arrays escaping their function. Heap
-+ ownership is a v2 conversation.
+**Tentative recommendation:** continue stack arena + leak heap for v0.x.
+Lift to "explicit named arenas" or "ARC" when programs grow long enough
+that leaking becomes painful, or when we want arrays escaping their
+function. Heap + ownership remains a v2 conversation.
 
 Once code can actually run end-to-end with stdlib, decide whether to graduate
 to ARC, ownership, or stay arena-based. Reversible.
@@ -156,6 +164,9 @@ Implementation as of 2026-05-19:
   no indexing-into-str (slicing UTF-8 needs char-boundary care).
 - **Equality** (`==`/`!=`) is implemented — codegen routes through a
   runtime `rune_str_eq` that does length compare + memcmp.
+- **Concatenation** (`+` and `+=`) is implemented — codegen routes through
+  a runtime `rune_str_concat` that mallocs a fresh descriptor + fresh
+  byte buffer. The result lives on the heap until the process exits.
 - **`print_str(s: str) -> ()`** builtin prints the bytes followed by a
   newline. (Future: unify with `print(i64)` once we have overloading
   or generics.)
@@ -168,14 +179,14 @@ the null is safe.
 
 - Owned/borrowed split (`String` vs `&str`). May never split if a single
   immutable type is good enough.
-- Concatenation. Would require heap allocation — the next memory-model
-  conversation.
 - `.len()`, `.bytes()`, indexing, slicing. Methods aren't codegen'd at
   all yet.
 - Raw string literals (`r"..."`), triple-quoted multi-line strings,
   interpolation (`"\(expr)"` or `f"{expr}"`).
-- Returning strings from functions. Stack-allocated descriptor means
-  it can't escape its frame.
+- **Returning literal strings from functions** is unsound — the
+  descriptor lives on the callee's stack frame. Returning concat
+  results or passed-in parameters is safe (concat is heap-allocated,
+  parameters live in the caller).
 
 Indexing semantics, once added, will be **byte-indexed**. Slicing on a
 non-char-boundary is a runtime panic (or a checked error — TBD).
@@ -254,3 +265,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | AOT executables | `rune build <file>` produces a native `.exe` via `cranelift-object` + external C linker driver. Default linker discovery: `clang` → `gcc` → `cc`, overridable via `$RUNE_LINKER`. Rune's `main` is renamed internally to `__rune_main`; a synthesized `int main(void)` calls it and truncates the i64 return to a 32-bit OS exit code. `rune build examples/fib.rn && ./fib.exe; echo $?` → `55`. |
 | 2026-05-19 | print + floats + --release + arrays/for | First host builtin: `print(i64)`, callable from both JIT (registered via `JITBuilder::symbol`) and AOT (embedded `RUNTIME_C` compiled inline by the linker driver). Float codegen tests landed (paths existed, now exercised). `rune build --release` maps to Cranelift `OptLevel::Speed`. Array literals stack-allocated via `StackSlot`; indexing via `iadd + load`; `for x in arr` desugars to a counter-based while loop. Memory model promoted Open → Tentative: stack-frame arena. |
 | 2026-05-19 | Strings | `str` as a 16-byte (ptr, len) descriptor; descriptor on the function's stack frame, bytes in the object's data section via `cranelift_module::declare_data`. `print_str(s: str)` builtin and `==`/`!=` for strings (runtime `rune_str_eq`: length compare + memcmp). Immutable; no concat, no methods, no slicing. Empty strings use `ptr = null + len = 0`; the runtime checks `len == 0` before dereferencing. `examples/hello_world.rn` prints "Hello, world!". |
+| 2026-05-19 | String concatenation | `+` and `+=` work on `str` operands. Codegen routes through a runtime `rune_str_concat` that mallocs a fresh descriptor + fresh byte buffer (process-lifetime leak; no free yet). Memory model gains "process-lifetime leak heap" for runtime-allocated strings. Concat results can be returned from functions, stored in mutable bindings, accumulated in loops. `examples/greet.rn` demonstrates `fn greet(name) -> str { "Hello, " + name + "!" }`. |

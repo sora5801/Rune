@@ -36,6 +36,24 @@ int8_t rune_str_eq(const struct rune_str* a, const struct rune_str* b) {
     if (a->len != b->len) return 0;
     return (int8_t)(memcmp(a->ptr, b->ptr, (size_t)a->len) == 0);
 }
+
+#include <stdlib.h>
+
+struct rune_str* rune_str_concat(const struct rune_str* a, const struct rune_str* b) {
+    int64_t total_len = a->len + b->len;
+    struct rune_str* result = (struct rune_str*)malloc(sizeof(struct rune_str));
+    if (total_len == 0) {
+        result->ptr = (const char*)0;
+        result->len = 0;
+        return result;
+    }
+    char* bytes = (char*)malloc((size_t)total_len);
+    if (a->len > 0) memcpy(bytes, a->ptr, (size_t)a->len);
+    if (b->len > 0) memcpy(bytes + a->len, b->ptr, (size_t)b->len);
+    result->ptr = bytes;
+    result->len = total_len;
+    return result;
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

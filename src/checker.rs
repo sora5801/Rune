@@ -395,7 +395,24 @@ impl<'r> Checker<'r> {
         }
         let t = if lt.is_never() { rt.clone() } else { lt.clone() };
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+            BinOp::Add => {
+                // `+` concatenates strings as well as adding numbers.
+                if matches!(t, Ty::Str) {
+                    return Ty::Str;
+                }
+                if !t.is_numeric() {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `+` requires numeric or string operands, got `{}`",
+                            t.display()
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                t
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if !t.is_numeric() {
                     self.error(
                         span,
@@ -488,10 +505,11 @@ impl<'r> Checker<'r> {
                     ),
                 );
             }
+            let add_on_str = matches!(op, BinOp::Add) && matches!(lt, Ty::Str);
             let needs_numeric = matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-            );
+            ) && !add_on_str;
             if needs_numeric && !lt.is_numeric() {
                 self.error(
                     span,

@@ -494,3 +494,83 @@ fn string_passed_to_function() {
     "#;
     assert_eq!(run_main(src), 1);
 }
+
+// ---- string concatenation ----
+
+#[test]
+fn concat_basic() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "foo" + "bar";
+            if s == "foobar" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn concat_chained() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "a" + "b" + "c" + "d";
+            if s == "abcd" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn concat_with_empty() {
+    let src = r#"
+        fn main() -> i64 {
+            let a = "" + "hello";
+            let b = "hello" + "";
+            let c = "" + "";
+            if a == "hello" {
+                if b == "hello" {
+                    if c == "" { 1 } else { 0 }
+                } else { 0 }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn concat_returned_from_fn() {
+    let src = r#"
+        fn greet(name: str) -> str {
+            "Hello, " + name
+        }
+        fn main() -> i64 {
+            let g = greet("Rune");
+            if g == "Hello, Rune" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn concat_with_var() {
+    let src = r#"
+        fn main() -> i64 {
+            let name = "world";
+            let greeting = "hello, " + name;
+            if greeting == "hello, world" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_compound_assign() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut s = "foo";
+            s += "bar";
+            s += "baz";
+            if s == "foobarbaz" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
