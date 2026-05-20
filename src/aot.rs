@@ -77,6 +77,28 @@ struct rune_str* rune_str_slice(const struct rune_str* s, int64_t start, int64_t
     result->len = new_len;
     return result;
 }
+
+int8_t rune_str_starts_with(const struct rune_str* s, const struct rune_str* prefix) {
+    if (prefix->len > s->len) return 0;
+    if (prefix->len == 0) return 1;
+    return (int8_t)(memcmp(s->ptr, prefix->ptr, (size_t)prefix->len) == 0);
+}
+
+int8_t rune_str_ends_with(const struct rune_str* s, const struct rune_str* suffix) {
+    if (suffix->len > s->len) return 0;
+    if (suffix->len == 0) return 1;
+    return (int8_t)(memcmp(s->ptr + (s->len - suffix->len), suffix->ptr, (size_t)suffix->len) == 0);
+}
+
+int8_t rune_str_contains(const struct rune_str* s, const struct rune_str* needle) {
+    if (needle->len == 0) return 1;
+    if (needle->len > s->len) return 0;
+    int64_t last = s->len - needle->len;
+    for (int64_t i = 0; i <= last; i++) {
+        if (memcmp(s->ptr + i, needle->ptr, (size_t)needle->len) == 0) return 1;
+    }
+    return 0;
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

@@ -283,21 +283,47 @@ impl<'a> Lowerer<'a> {
         iter: &ast::Expr,
         body: &ast::Block,
     ) -> HirExprKind {
-        let iter_hir = self.lower_expr(iter);
-        let (elem_ty, length) = match &iter_hir.ty {
-            Ty::Array(elem, n) => ((**elem).clone(), *n),
-            _ => {
-                return HirExprKind::Unsupported(
-                    "for-loop iterator must be a stack-allocated array".into(),
-                );
-            }
-        };
         let local = match pat {
             ast::Pattern::Wildcard(_) => None,
             ast::Pattern::Ident { name, .. } => self.res.decl_to_sym.get(&name.span).copied(),
             ast::Pattern::Literal { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),
+                );
+            }
+        };
+        // Special-case `for x in a..b` so users don't need a real
+        // iterator protocol to iterate integer ranges.
+        if let ast::Expr::Range { start, end, inclusive, .. } = iter {
+            let start_h = start
+                .as_deref()
+                .map(|e| self.lower_expr(e))
+                .unwrap_or_else(|| HirExpr {
+                    kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                    ty: Ty::Int(IntTy::I64),
+                });
+            let end_h = end
+                .as_deref()
+                .map(|e| self.lower_expr(e))
+                .unwrap_or_else(|| HirExpr {
+                    kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                    ty: Ty::Int(IntTy::I64),
+                });
+            return HirExprKind::ForRange {
+                local,
+                start: Box::new(start_h),
+                end: Box::new(end_h),
+                inclusive: *inclusive,
+                body: self.lower_block(body),
+            };
+        }
+        let iter_hir = self.lower_expr(iter);
+        let (elem_ty, length) = match &iter_hir.ty {
+            Ty::Array(elem, n) => ((**elem).clone(), *n),
+            _ => {
+                return HirExprKind::Unsupported(
+                    "for-loop iterator must be a stack-allocated array or an integer range"
+                        .into(),
                 );
             }
         };

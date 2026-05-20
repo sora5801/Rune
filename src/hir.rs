@@ -122,6 +122,15 @@ pub enum HirExprKind {
         elem_ty: Ty,
         length: usize,
     },
+    /// `for local in start..end { body }`. Range-based iteration over
+    /// integers. Inclusive flag controls whether `end` is included.
+    ForRange {
+        local: Option<SymbolId>,
+        start: Box<HirExpr>,
+        end: Box<HirExpr>,
+        inclusive: bool,
+        body: HirBlock,
+    },
     Return(Option<Box<HirExpr>>),
     /// Stub for features not yet handled in codegen. Lowering succeeds
     /// to allow inspection, codegen fails with the embedded message.

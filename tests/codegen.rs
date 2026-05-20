@@ -562,6 +562,79 @@ fn concat_with_var() {
     assert_eq!(run_main(src), 1);
 }
 
+// ---- for over range ----
+
+#[test]
+fn for_over_exclusive_range() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum = 0;
+            for i in 0..10 {
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    assert_eq!(run_main(src), 45); // 0+1+...+9
+}
+
+#[test]
+fn for_over_inclusive_range() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum = 0;
+            for i in 1..=10 {
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    assert_eq!(run_main(src), 55); // 1+2+...+10
+}
+
+#[test]
+fn for_range_with_negative_bounds() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut acc = 0;
+            for i in -3..3 {
+                acc = acc + i;
+            }
+            acc
+        }
+    "#;
+    assert_eq!(run_main(src), -3); // -3 + -2 + -1 + 0 + 1 + 2 = -3
+}
+
+#[test]
+fn for_range_with_variable_bounds() {
+    let src = r#"
+        fn main() -> i64 {
+            let n = 5;
+            let mut total = 0;
+            for i in 0..n {
+                total = total + 1;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn for_range_empty_when_start_ge_end() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut hit = 0;
+            for i in 5..5 {
+                hit = hit + 1;
+            }
+            hit
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
 // ---- string methods ----
 
 #[test]
@@ -728,6 +801,86 @@ fn slice_of_concat() {
         fn main() -> i64 {
             let s = ("foo" + "bar")[1..5];
             if s == "ooba" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_starts_with_true() {
+    let src = r#"
+        fn main() -> i64 {
+            if "hello, world".starts_with("hello") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_starts_with_false() {
+    let src = r#"
+        fn main() -> i64 {
+            if "abc".starts_with("xyz") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn str_starts_with_empty_is_true() {
+    let src = r#"
+        fn main() -> i64 {
+            if "abc".starts_with("") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_ends_with_true() {
+    let src = r#"
+        fn main() -> i64 {
+            if "hello.txt".ends_with(".txt") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_ends_with_false() {
+    let src = r#"
+        fn main() -> i64 {
+            if "hello".ends_with("world") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn str_contains_true() {
+    let src = r#"
+        fn main() -> i64 {
+            if "hello, world".contains("o, w") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_contains_false() {
+    let src = r#"
+        fn main() -> i64 {
+            if "hello".contains("xyz") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn str_contains_self() {
+    let src = r#"
+        fn main() -> i64 {
+            if "abc".contains("abc") { 1 } else { 0 }
         }
     "#;
     assert_eq!(run_main(src), 1);

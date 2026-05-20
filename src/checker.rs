@@ -876,6 +876,24 @@ impl<'r> Checker<'r> {
     }
 
     fn check_for(&mut self, pat: &Pattern, iter: &Expr, body: &Block) -> Ty {
+        // Range iter is a special-cased pseudo-iterator over integers.
+        if let Expr::Range { start, end, .. } = iter {
+            for endpoint in [start.as_deref(), end.as_deref()].into_iter().flatten() {
+                let t = self.check_expr(endpoint);
+                if !t.is_integer() && !t.is_error() {
+                    self.error(
+                        endpoint.span(),
+                        format!(
+                            "range endpoints must be integers, found `{}`",
+                            t.display()
+                        ),
+                    );
+                }
+            }
+            self.bind_pattern(pat, &Ty::Int(crate::ty::IntTy::I64));
+            self.check_block(body);
+            return Ty::Unit;
+        }
         let it = self.check_expr(iter);
         let elem_ty = match it {
             Ty::Array(elem, _) => *elem,
@@ -973,6 +991,12 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
         }),
         (Ty::Str, "is_empty") => Some(MethodSig {
             params: vec![],
+            ret: Ty::Bool,
+        }),
+        (Ty::Str, "starts_with")
+        | (Ty::Str, "ends_with")
+        | (Ty::Str, "contains") => Some(MethodSig {
+            params: vec![Ty::Str],
             ret: Ty::Bool,
         }),
         (Ty::Array(_, _), "len") => Some(MethodSig {

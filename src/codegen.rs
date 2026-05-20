@@ -97,6 +97,44 @@ extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
     }
 }
 
+unsafe fn rune_str_bytes<'a>(s: *const RuneStr) -> &'a [u8] {
+    if s.is_null() { return &[]; }
+    let s = &*s;
+    if s.len <= 0 { return &[]; }
+    std::slice::from_raw_parts(s.ptr, s.len as usize)
+}
+
+extern "C" fn rune_runtime_str_starts_with(s: *const RuneStr, prefix: *const RuneStr) -> i8 {
+    unsafe {
+        let s = rune_str_bytes(s);
+        let prefix = rune_str_bytes(prefix);
+        if s.starts_with(prefix) { 1 } else { 0 }
+    }
+}
+
+extern "C" fn rune_runtime_str_ends_with(s: *const RuneStr, suffix: *const RuneStr) -> i8 {
+    unsafe {
+        let s = rune_str_bytes(s);
+        let suffix = rune_str_bytes(suffix);
+        if s.ends_with(suffix) { 1 } else { 0 }
+    }
+}
+
+extern "C" fn rune_runtime_str_contains(s: *const RuneStr, needle: *const RuneStr) -> i8 {
+    unsafe {
+        let s = rune_str_bytes(s);
+        let needle = rune_str_bytes(needle);
+        if needle.is_empty() {
+            return 1; // matches Rust's `&str::contains` convention
+        }
+        if needle.len() > s.len() { return 0; }
+        for window in s.windows(needle.len()) {
+            if window == needle { return 1; }
+        }
+        0
+    }
+}
+
 /// Host implementation of `s[a..b]` for JIT mode. Clamps out-of-range
 /// indices instead of panicking (consistent with current "no bounds
 /// checks" stance). Heap-allocates; never freed.
@@ -287,6 +325,9 @@ impl Codegen<JITModule> {
         builder.symbol("rune_str_eq", rune_runtime_str_eq as *const u8);
         builder.symbol("rune_str_concat", rune_runtime_str_concat as *const u8);
         builder.symbol("rune_str_slice", rune_runtime_str_slice as *const u8);
+        builder.symbol("rune_str_starts_with", rune_runtime_str_starts_with as *const u8);
+        builder.symbol("rune_str_ends_with", rune_runtime_str_ends_with as *const u8);
+        builder.symbol("rune_str_contains", rune_runtime_str_contains as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -550,6 +591,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             }
             HirExprKind::For { local, iter, body, elem_ty, length } => {
                 self.compile_for(*local, iter, body, elem_ty, *length)
+            }
+            HirExprKind::ForRange { local, start, end, inclusive, body } => {
+                self.compile_for_range(*local, start, end, *inclusive, body)
             }
             HirExprKind::Block(b) => self.compile_block(b),
             HirExprKind::If { cond, then_b, else_b } => {
@@ -946,9 +990,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let recv_val = self
             .compile_expr(receiver)?
             .ok_or_else(|| CodegenError("method receiver produced no value".into()))?;
+        // Compile args eagerly (preserves side effects in source order).
+        // Arms that don't use them still get the IR emitted.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
         for a in args {
-            // Compile args for side effects even if the method ignores them.
-            self.compile_expr(a)?;
+            let v = self
+                .compile_expr(a)?
+                .ok_or_else(|| CodegenError("method arg produced no value".into()))?;
+            arg_vals.push(v);
         }
         match (&receiver.ty, method) {
             (Ty::Str, "len") => {
@@ -974,6 +1023,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // constant.
                 let len = self.builder.ins().iconst(types::I64, *length as i64);
                 Ok(Some(len))
+            }
+            (Ty::Str, m) if matches!(m, "starts_with" | "ends_with" | "contains") => {
+                let runtime_key = match m {
+                    "starts_with" => "str_starts_with",
+                    "ends_with" => "str_ends_with",
+                    "contains" => "str_contains",
+                    _ => unreachable!(),
+                };
+                let func_id = self.ensure_runtime_func(runtime_key)?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
+                Ok(Some(self.builder.inst_results(inst)[0]))
             }
             (recv_ty, _) => Err(CodegenError(format!(
                 "method `.{}` on `{}` is not implemented",
@@ -1132,6 +1195,68 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         Ok(None)
     }
 
+    fn compile_for_range(
+        &mut self,
+        local: Option<SymbolId>,
+        start: &HirExpr,
+        end: &HirExpr,
+        inclusive: bool,
+        body: &HirBlock,
+    ) -> Result<Option<Value>, CodegenError> {
+        let start_v = self
+            .compile_expr(start)?
+            .ok_or_else(|| CodegenError("range start produced no value".into()))?;
+        let end_v_raw = self
+            .compile_expr(end)?
+            .ok_or_else(|| CodegenError("range end produced no value".into()))?;
+        // Inclusive: fold `end+1` so the loop body uses `i < end` throughout.
+        let end_v = if inclusive {
+            let one = self.builder.ins().iconst(types::I64, 1);
+            self.builder.ins().iadd(end_v_raw, one)
+        } else {
+            end_v_raw
+        };
+
+        // Counter holds the current iteration value; bind it to `local`
+        // so the body can read it as the loop variable.
+        let counter_var = self.alloc_var();
+        self.builder.declare_var(counter_var, types::I64);
+        self.builder.def_var(counter_var, start_v);
+        if let Some(sym) = local {
+            self.var_map.insert(sym, counter_var);
+        }
+
+        let header = self.builder.create_block();
+        let body_blk = self.builder.create_block();
+        let exit = self.builder.create_block();
+
+        self.builder.ins().jump(header, &[]);
+
+        self.builder.switch_to_block(header);
+        let counter = self.builder.use_var(counter_var);
+        let cond = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, counter, end_v);
+        self.builder.ins().brif(cond, body_blk, &[], exit, &[]);
+
+        self.builder.switch_to_block(body_blk);
+        self.builder.seal_block(body_blk);
+        self.compile_block(body)?;
+        if !self.is_filled() {
+            let counter = self.builder.use_var(counter_var);
+            let one = self.builder.ins().iconst(types::I64, 1);
+            let next = self.builder.ins().iadd(counter, one);
+            self.builder.def_var(counter_var, next);
+            self.builder.ins().jump(header, &[]);
+        }
+
+        self.builder.seal_block(header);
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+        Ok(None)
+    }
+
     fn compile_while(
         &mut self,
         cond: &HirExpr,
@@ -1250,6 +1375,28 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64)); // end (exclusive)
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_str_slice", sig)
+        }
+        // String predicates — all share the same ABI: (a, b) → i8 bool.
+        "str_starts_with" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_str_starts_with", sig)
+        }
+        "str_ends_with" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_str_ends_with", sig)
+        }
+        "str_contains" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_str_contains", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };
