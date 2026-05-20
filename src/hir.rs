@@ -106,6 +106,13 @@ pub enum HirExprKind {
         offset: u32,
         field_ty: Ty,
     },
+    /// `receiver.field = rhs` — stores at a known byte offset.
+    FieldAssign {
+        receiver: Box<HirExpr>,
+        offset: u32,
+        field_ty: Ty,
+        rhs: Box<HirExpr>,
+    },
     /// Stack-allocated array literal. Value type is a pointer to the
     /// first element; element type and length are tracked statically.
     Array { elems: Vec<HirExpr>, elem_ty: Ty },

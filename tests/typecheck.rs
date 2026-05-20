@@ -340,6 +340,58 @@ fn method_with_wrong_arg_count() {
     );
 }
 
+// ---- field assignment ----
+
+#[test]
+fn field_assignment_typechecks() {
+    check_ok(r#"
+        struct P { x: i64 }
+        fn main() {
+            let mut p = P { x: 1 };
+            p.x = 5;
+        }
+    "#);
+}
+
+#[test]
+fn field_assignment_on_immutable_is_error() {
+    check_has_error(
+        r#"
+        struct P { x: i64 }
+        fn main() {
+            let p = P { x: 1 };
+            p.x = 5;
+        }
+        "#,
+        "immutable",
+    );
+}
+
+#[test]
+fn field_assignment_on_param_is_error() {
+    check_has_error(
+        r#"
+        struct P { x: i64 }
+        fn touch(p: P) { p.x = 5; }
+        "#,
+        "parameter",
+    );
+}
+
+#[test]
+fn field_assignment_wrong_type_is_error() {
+    check_has_error(
+        r#"
+        struct P { x: i64 }
+        fn main() {
+            let mut p = P { x: 1 };
+            p.x = "oops";
+        }
+        "#,
+        "i64",
+    );
+}
+
 #[test]
 fn while_condition_must_be_bool() {
     check_has_error(

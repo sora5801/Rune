@@ -734,6 +734,51 @@ fn struct_passed_to_function() {
 }
 
 #[test]
+fn struct_field_assignment() {
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let mut p = Point { x: 1, y: 2 };
+            p.x = 10;
+            p.y = 20;
+            p.x + p.y
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn struct_field_assignment_through_alias() {
+    // Mutating through the same name multiple times stays consistent.
+    let src = r#"
+        struct Counter { value: i64 }
+        fn main() -> i64 {
+            let mut c = Counter { value: 0 };
+            c.value = c.value + 1;
+            c.value = c.value + 2;
+            c.value = c.value + 3;
+            c.value
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn struct_field_assignment_in_loop() {
+    let src = r#"
+        struct Acc { total: i64 }
+        fn main() -> i64 {
+            let mut a = Acc { total: 0 };
+            for i in 1..=5 {
+                a.total = a.total + i;
+            }
+            a.total
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
 fn struct_with_bool_field() {
     let src = r#"
         struct Flag { active: bool, count: i64 }

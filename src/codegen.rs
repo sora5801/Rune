@@ -225,6 +225,13 @@ extern "C" fn rune_runtime_str_slice(
     }
 }
 
+/// Aborts the running program with an index-out-of-range message.
+/// Used for runtime bounds checks on `arr[i]` and `s[i]`.
+extern "C" fn rune_runtime_panic_bounds(idx: i64, len: i64) -> ! {
+    eprintln!("rune: index {} out of range for length {}", idx, len);
+    std::process::exit(1);
+}
+
 /// Host implementation of string concatenation for JIT mode. Allocates a
 /// fresh descriptor + fresh byte buffer on the heap, never freed (leak by
 /// design — Rune v0.x is process-lifetime).
@@ -390,6 +397,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_vec_push", rune_runtime_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_runtime_vec_get as *const u8);
         builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
+        builder.symbol("rune_panic_bounds", rune_runtime_panic_bounds as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -646,6 +654,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             }
             HirExprKind::FieldAccess { receiver, offset, field_ty } => {
                 self.compile_field_access(receiver, *offset, field_ty)
+            }
+            HirExprKind::FieldAssign { receiver, offset, field_ty, rhs } => {
+                self.compile_field_assign(receiver, *offset, field_ty, rhs)
             }
             HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
             HirExprKind::Index { array, index, elem_ty } => {
@@ -1026,6 +1037,26 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         Ok(Some(val))
     }
 
+    fn compile_field_assign(
+        &mut self,
+        receiver: &HirExpr,
+        offset: u32,
+        field_ty: &Ty,
+        rhs: &HirExpr,
+    ) -> Result<Option<Value>, CodegenError> {
+        let recv = self
+            .compile_expr(receiver)?
+            .ok_or_else(|| CodegenError("field-assign receiver produced no value".into()))?;
+        let val = self
+            .compile_expr(rhs)?
+            .ok_or_else(|| CodegenError("field-assign rhs produced no value".into()))?;
+        let _ = cranelift_type(field_ty)?; // validates the type is codegen-able
+        self.builder
+            .ins()
+            .store(MemFlags::new(), val, recv, offset as i32);
+        Ok(None)
+    }
+
     fn compile_str_byte_index(
         &mut self,
         str_val: &HirExpr,
@@ -1042,6 +1073,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             .builder
             .ins()
             .load(types::I64, MemFlags::new(), recv, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::new(), recv, 8);
+        self.emit_bounds_check(i, length)?;
         let byte_addr = self.builder.ins().iadd(bytes_ptr, i);
         let byte = self
             .builder
@@ -1229,12 +1265,24 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         index: &HirExpr,
         elem_ty: &Ty,
     ) -> Result<Option<Value>, CodegenError> {
+        // Array length is statically encoded in the type.
+        let length = match &array.ty {
+            Ty::Array(_, n) => *n,
+            _ => {
+                return Err(CodegenError(format!(
+                    "indexing non-array type `{}`",
+                    array.ty.display()
+                )));
+            }
+        };
         let arr_addr = self
             .compile_expr(array)?
             .ok_or_else(|| CodegenError("array operand produced no value".into()))?;
         let idx = self
             .compile_expr(index)?
             .ok_or_else(|| CodegenError("index operand produced no value".into()))?;
+        let length_v = self.builder.ins().iconst(types::I64, length as i64);
+        self.emit_bounds_check(idx, length_v)?;
         let elem_cty = cranelift_type(elem_ty)?;
         let esize = elem_size(elem_ty)? as i64;
         let esize_const = self.builder.ins().iconst(types::I64, esize);
@@ -1242,6 +1290,48 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let elem_addr = self.builder.ins().iadd(arr_addr, offset);
         let val = self.builder.ins().load(elem_cty, MemFlags::new(), elem_addr, 0);
         Ok(Some(val))
+    }
+
+    /// Emits `if idx < 0 || idx >= length { rune_panic_bounds(idx, length); }`
+    /// inline before a load. After this returns, the builder is positioned in
+    /// the ok-block and ready for the actual access.
+    fn emit_bounds_check(
+        &mut self,
+        idx: Value,
+        length: Value,
+    ) -> Result<(), CodegenError> {
+        let panic_func_id = self.ensure_runtime_func("panic_bounds")?;
+        let local_panic = self
+            .module
+            .declare_func_in_func(panic_func_id, self.builder.func);
+
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let lo_ok = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, idx, zero);
+        let hi_ok = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, idx, length);
+        let in_bounds = self.builder.ins().band(lo_ok, hi_ok);
+
+        let ok_blk = self.builder.create_block();
+        let panic_blk = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(in_bounds, ok_blk, &[], panic_blk, &[]);
+
+        self.builder.switch_to_block(panic_blk);
+        self.builder.seal_block(panic_blk);
+        self.builder.ins().call(local_panic, &[idx, length]);
+        // The runtime calls exit() — but Cranelift doesn't know that, so
+        // the block needs a terminator. `trap` compiles to ud2 on x86_64.
+        self.builder.ins().trap(TrapCode::user(1).unwrap());
+
+        self.builder.switch_to_block(ok_blk);
+        self.builder.seal_block(ok_blk);
+        Ok(())
     }
 
     fn compile_for(
@@ -1546,6 +1636,13 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I8));
             ("rune_str_contains", sig)
+        }
+        // (idx, len) -> never. Used by the inline bounds-check pattern.
+        "panic_bounds" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_panic_bounds", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };

@@ -131,6 +131,12 @@ int64_t rune_vec_get(const struct rune_vec* v, int64_t i) {
 int64_t rune_vec_len(const struct rune_vec* v) {
     return v->len;
 }
+
+void rune_panic_bounds(int64_t idx, int64_t len) {
+    fprintf(stderr, "rune: index %lld out of range for length %lld\n",
+            (long long)idx, (long long)len);
+    exit(1);
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

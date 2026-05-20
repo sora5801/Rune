@@ -132,6 +132,18 @@ fn cross_function_calls() {
 
 // ---- print builtin ----
 
+fn build_and_capture_full(src: &str) -> (i32, String, String) {
+    let (obj, exe) = temp_paths();
+    build_exe(src, &obj, &exe).expect("build");
+    let out = Command::new(&exe).output().expect("run exe");
+    // Some panics use abort() and may not return a normal exit code on all
+    // platforms; fall back to -1 so the test can still assert.
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    (code, stdout, stderr)
+}
+
 fn build_and_capture(src: &str) -> (i32, String) {
     let (obj, exe) = temp_paths();
     build_exe(src, &obj, &exe).expect("build");
@@ -468,4 +480,73 @@ fn aot_concat_in_loop() {
     let (code, stdout) = build_and_capture(src);
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "abc");
+}
+
+// ---- bounds checks ----
+
+#[test]
+fn array_index_in_bounds_runs_normally() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            xs[2]
+        }
+    "#;
+    let (code, _stdout, _stderr) = build_and_capture_full(src);
+    assert_eq!(code, 30);
+}
+
+#[test]
+fn array_index_out_of_bounds_aborts() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            xs[5]
+        }
+    "#;
+    let (code, _stdout, stderr) = build_and_capture_full(src);
+    assert_ne!(code, 0, "expected non-zero exit on bounds violation");
+    assert!(
+        stderr.contains("out of range"),
+        "expected bounds message on stderr, got: {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn array_index_negative_aborts() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = [10, 20, 30];
+            xs[-1]
+        }
+    "#;
+    let (code, _stdout, stderr) = build_and_capture_full(src);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("out of range"));
+}
+
+#[test]
+fn string_byte_index_in_bounds_runs() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "abc";
+            s[1]
+        }
+    "#;
+    let (code, _stdout, _stderr) = build_and_capture_full(src);
+    assert_eq!(code, 98); // 'b' = 0x62 = 98
+}
+
+#[test]
+fn string_byte_index_out_of_bounds_aborts() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "abc";
+            s[10]
+        }
+    "#;
+    let (code, _stdout, stderr) = build_and_capture_full(src);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("out of range"));
 }

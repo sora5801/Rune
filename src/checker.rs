@@ -646,11 +646,48 @@ impl<'r> Checker<'r> {
                     }
                 }
             }
-            Expr::Index { .. } | Expr::Field { .. } => {
+            Expr::Field { receiver, .. } => {
+                // Field assignment is allowed iff the root receiver is
+                // a mutable local. Walk through nested `a.b.c` reads.
+                self.check_place_root_mutable(receiver, span);
+            }
+            Expr::Index { .. } => {
                 // Allowed; deeper check deferred.
             }
             _ => {
                 self.error(span, "invalid assignment target");
+            }
+        }
+    }
+
+    /// Walks a place expression (e.g. `a.b.c`) down to its root binding
+    /// and ensures that binding is mutable. Reports an error otherwise.
+    fn check_place_root_mutable(&mut self, e: &Expr, span: Span) {
+        match e {
+            Expr::Path(p) => {
+                let Some(&sym_id) = self.res.path_to_sym.get(&p.span) else {
+                    return;
+                };
+                let sym = self.res.symbol(sym_id);
+                let name = sym.name.clone();
+                match sym.kind {
+                    SymbolKind::Local { mutable: true } => {}
+                    SymbolKind::Local { mutable: false } => self.error(
+                        span,
+                        format!("cannot assign to field of immutable binding `{}`", name),
+                    ),
+                    SymbolKind::Param => self.error(
+                        span,
+                        format!("cannot assign to field of parameter `{}`", name),
+                    ),
+                    _ => self.error(span, format!("cannot assign to field of `{}`", name)),
+                }
+            }
+            Expr::Field { receiver, .. } => {
+                self.check_place_root_mutable(receiver, span);
+            }
+            _ => {
+                self.error(span, "field assignment target must reach a mutable binding");
             }
         }
     }

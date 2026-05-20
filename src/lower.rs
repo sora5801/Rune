@@ -139,10 +139,49 @@ impl<'a> Lowerer<'a> {
                     },
                 }
             }
-            ast::Expr::Assign { lhs, rhs, .. } => match self.path_symbol(lhs) {
-                Some(sym) => HirExprKind::Assign { lhs: sym, rhs: Box::new(self.lower_expr(rhs)) },
-                None => HirExprKind::Unsupported("assignment target other than a local binding".into()),
-            },
+            ast::Expr::Assign { lhs, rhs, .. } => {
+                // Field assignment: receiver.field = rhs
+                if let ast::Expr::Field { receiver, name, .. } = lhs.as_ref() {
+                    let recv = self.lower_expr(receiver);
+                    let (offset, field_ty) = match &recv.ty {
+                        Ty::Struct(sym_id) => match self
+                            .check
+                            .struct_layouts
+                            .get(sym_id)
+                            .and_then(|l| l.field(&name.name))
+                        {
+                            Some(f) => (f.offset, f.ty.clone()),
+                            None => {
+                                return HirExprKind::Unsupported(format!(
+                                    "no field `{}` on struct",
+                                    name.name
+                                ));
+                            }
+                        },
+                        _ => {
+                            return HirExprKind::Unsupported(
+                                "field assignment on non-struct".into(),
+                            );
+                        }
+                    };
+                    return HirExprKind::FieldAssign {
+                        receiver: Box::new(recv),
+                        offset,
+                        field_ty,
+                        rhs: Box::new(self.lower_expr(rhs)),
+                    };
+                }
+                // Plain local assignment.
+                match self.path_symbol(lhs) {
+                    Some(sym) => HirExprKind::Assign {
+                        lhs: sym,
+                        rhs: Box::new(self.lower_expr(rhs)),
+                    },
+                    None => HirExprKind::Unsupported(
+                        "assignment target other than a local binding or field".into(),
+                    ),
+                }
+            }
             ast::Expr::AssignOp { op, lhs, rhs, .. } => match self.path_symbol(lhs) {
                 Some(sym) => HirExprKind::AssignOp {
                     lhs: sym,
