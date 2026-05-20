@@ -335,57 +335,15 @@ impl<'r> Checker<'r> {
             // can fail), so they don't add to coverage sets and they
             // don't become catch-alls.
             let guarded = arm.guard.is_some();
-            match &arm.pat {
-                Pattern::Wildcard(s) | Pattern::Ident { span: s, .. } => {
-                    if !guarded {
-                        catchall_seen = Some(*s);
-                    }
-                }
-                Pattern::Literal { lit, span: s } => match lit {
-                    Lit::Bool(b) => {
-                        if !covered_bools.insert(*b) {
-                            self.error(
-                                *s,
-                                format!("unreachable arm — `{}` was already covered", b),
-                            );
-                        }
-                    }
-                    Lit::Int(v) => {
-                        if !covered_ints.insert(*v) {
-                            self.error(
-                                *s,
-                                format!("unreachable arm — `{}` was already covered", v),
-                            );
-                        }
-                    }
-                    Lit::Str(text) => {
-                        if !covered_strs.insert(text.clone()) {
-                            self.error(
-                                *s,
-                                format!(
-                                    "unreachable arm — `\"{}\"` was already covered",
-                                    text
-                                ),
-                            );
-                        }
-                    }
-                    _ => {}
-                },
-                Pattern::Path { path, span: s } => {
-                    if let Some(&sid) = self.res.path_to_sym.get(&path.span) {
-                        if let SymbolKind::EnumVariant { discriminant, .. } =
-                            self.res.symbol(sid).kind
-                        {
-                            if !covered_variants.insert(discriminant) {
-                                self.error(
-                                    *s,
-                                    "unreachable arm — this variant was already covered",
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.cover_pattern(
+                &arm.pat,
+                guarded,
+                &mut catchall_seen,
+                &mut covered_bools,
+                &mut covered_variants,
+                &mut covered_ints,
+                &mut covered_strs,
+            );
         }
 
         if catchall_seen.is_some() {
@@ -451,6 +409,94 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Recursive helper for exhaustiveness. Walks a single arm's pattern
+    /// (possibly an Or) and updates the coverage sets.
+    ///
+    /// Coverage rules:
+    /// - Unguarded patterns check membership + insert. Duplicate insert
+    ///   is an unreachable error.
+    /// - Guarded patterns are skipped — they neither check nor insert.
+    ///   `match s { Ok if cond => ..., Ok => ... }` is valid because
+    ///   the second arm is reachable when the guard fails.
+    fn cover_pattern(
+        &mut self,
+        pat: &Pattern,
+        guarded: bool,
+        catchall_seen: &mut Option<Span>,
+        covered_bools: &mut std::collections::HashSet<bool>,
+        covered_variants: &mut std::collections::HashSet<u32>,
+        covered_ints: &mut std::collections::HashSet<i64>,
+        covered_strs: &mut std::collections::HashSet<String>,
+    ) {
+        if guarded {
+            // Guarded arms can fail at runtime; they don't contribute
+            // to coverage and don't conflict with later arms.
+            return;
+        }
+        match pat {
+            Pattern::Wildcard(s) | Pattern::Ident { span: s, .. } => {
+                *catchall_seen = Some(*s);
+            }
+            Pattern::Literal { lit, span: s } => match lit {
+                Lit::Bool(b) => {
+                    if !covered_bools.insert(*b) {
+                        self.error(
+                            *s,
+                            format!("unreachable arm — `{}` was already covered", b),
+                        );
+                    }
+                }
+                Lit::Int(v) => {
+                    if !covered_ints.insert(*v) {
+                        self.error(
+                            *s,
+                            format!("unreachable arm — `{}` was already covered", v),
+                        );
+                    }
+                }
+                Lit::Str(text) => {
+                    if !covered_strs.insert(text.clone()) {
+                        self.error(
+                            *s,
+                            format!(
+                                "unreachable arm — `\"{}\"` was already covered",
+                                text
+                            ),
+                        );
+                    }
+                }
+                _ => {}
+            },
+            Pattern::Path { path, span: s } => {
+                if let Some(&sid) = self.res.path_to_sym.get(&path.span) {
+                    if let SymbolKind::EnumVariant { discriminant, .. } =
+                        self.res.symbol(sid).kind
+                    {
+                        if !covered_variants.insert(discriminant) {
+                            self.error(
+                                *s,
+                                "unreachable arm — this variant was already covered",
+                            );
+                        }
+                    }
+                }
+            }
+            Pattern::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.cover_pattern(
+                        sub,
+                        guarded,
+                        catchall_seen,
+                        covered_bools,
+                        covered_variants,
+                        covered_ints,
+                        covered_strs,
+                    );
+                }
+            }
+        }
+    }
+
     /// Validates that a pattern is compatible with a scrutinee type.
     /// Wildcard and Ident patterns always match. Literal patterns must
     /// have the right type. Path patterns must resolve to a variant of
@@ -500,6 +546,24 @@ impl<'r> Checker<'r> {
                     }
                 }
             }
+            Pattern::Or { patterns, span } => {
+                // Reject Bind patterns inside an Or — alternatives would
+                // create multiple distinct symbols with the same name and
+                // codegen can't pick one.
+                for sub in patterns {
+                    if let Pattern::Ident { name, .. } = sub {
+                        self.error(
+                            *span,
+                            format!(
+                                "or-pattern can't contain a binding (`{}`); \
+                                 alternatives can only be `_`, literals, or enum variants",
+                                name.name
+                            ),
+                        );
+                    }
+                    self.check_pattern_matches(sub, scrutinee_ty);
+                }
+            }
         }
     }
 
@@ -514,6 +578,11 @@ impl<'r> Checker<'r> {
                 // Path patterns don't bind. The match/let context is
                 // responsible for validating the variant against the
                 // scrutinee type.
+            }
+            Pattern::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.bind_pattern(sub, ty);
+                }
             }
         }
     }

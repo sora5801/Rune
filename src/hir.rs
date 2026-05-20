@@ -181,7 +181,12 @@ pub enum HirLit {
 
 #[derive(Debug, Clone)]
 pub struct HirMatchArm {
-    pub pattern: HirPattern,
+    /// One or more alternative patterns. With or-patterns the arm fires
+    /// on the first match; without, the Vec has exactly one entry.
+    pub patterns: Vec<HirPattern>,
+    /// Optional guard `if cond` — checked after pattern match succeeds.
+    /// Guarded arms don't count as catch-alls for exhaustiveness.
+    pub guard: Option<HirExpr>,
     pub body: HirExpr,
 }
 

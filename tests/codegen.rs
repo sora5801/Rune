@@ -1412,3 +1412,168 @@ fn match_in_expression_position() {
     "#;
     assert_eq!(run_main(src), 42);
 }
+
+// ---- match guards ----
+
+#[test]
+fn match_guard_int_positive() {
+    let src = r#"
+        fn classify(n: i64) -> i64 {
+            match n {
+                0 => 0,
+                x if x > 0 => 1,
+                _ => -1,
+            }
+        }
+        fn main() -> i64 {
+            classify(5) + classify(0) + classify(-3)
+        }
+    "#;
+    assert_eq!(run_main(src), 0); // 1 + 0 + -1
+}
+
+#[test]
+fn match_guard_fails_falls_through() {
+    let src = r#"
+        fn classify(n: i64) -> i64 {
+            match n {
+                x if x > 100 => 1,
+                x if x > 10 => 2,
+                _ => 3,
+            }
+        }
+        fn main() -> i64 {
+            classify(50)
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn match_guard_uses_binding() {
+    let src = r#"
+        fn even_or_zero(n: i64) -> i64 {
+            match n {
+                0 => 0,
+                x if x % 2 == 0 => x,
+                _ => -1,
+            }
+        }
+        fn main() -> i64 {
+            even_or_zero(8) + even_or_zero(7) + even_or_zero(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 7); // 8 + -1 + 0
+}
+
+#[test]
+fn match_enum_with_guard() {
+    let src = r#"
+        enum Status { Ok, Err }
+        fn pick(s: Status, n: i64) -> i64 {
+            match s {
+                Status::Ok if n > 0 => n,
+                Status::Ok => 0,
+                Status::Err => -1,
+            }
+        }
+        fn main() -> i64 {
+            pick(Status::Ok, 5) + pick(Status::Ok, -3) + pick(Status::Err, 0)
+        }
+    "#;
+    assert_eq!(run_main(src), 4); // 5 + 0 + -1
+}
+
+// ---- or-patterns ----
+
+#[test]
+fn or_pattern_int() {
+    let src = r#"
+        fn small(n: i64) -> bool {
+            match n {
+                1 | 2 | 3 => true,
+                _ => false,
+            }
+        }
+        fn main() -> i64 {
+            if small(2) {
+                if small(5) { 0 } else { 42 }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn or_pattern_enum() {
+    let src = r#"
+        enum Mode { On, Off, Idle, Error }
+        fn is_active(m: Mode) -> bool {
+            match m {
+                Mode::On | Mode::Idle => true,
+                _ => false,
+            }
+        }
+        fn main() -> i64 {
+            if is_active(Mode::On) {
+                if is_active(Mode::Idle) {
+                    if is_active(Mode::Off) { 0 }
+                    else { 42 }
+                } else { 0 }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn or_pattern_exhaustive_without_wildcard() {
+    let src = r#"
+        enum E { A, B, C }
+        fn label(e: E) -> i64 {
+            match e {
+                E::A | E::B => 1,
+                E::C => 2,
+            }
+        }
+        fn main() -> i64 {
+            label(E::A) + label(E::B) + label(E::C)
+        }
+    "#;
+    assert_eq!(run_main(src), 4); // 1 + 1 + 2
+}
+
+#[test]
+fn or_pattern_with_guard() {
+    let src = r#"
+        fn pick(n: i64) -> i64 {
+            match n {
+                1 | 2 | 3 if n != 2 => n * 10,
+                _ => -1,
+            }
+        }
+        fn main() -> i64 {
+            pick(1) + pick(2) + pick(3) + pick(4)
+        }
+    "#;
+    assert_eq!(run_main(src), 38); // 10 + -1 + 30 + -1
+}
+
+#[test]
+fn or_pattern_bool_exhaustive() {
+    let src = r#"
+        fn flip(b: bool) -> bool {
+            match b {
+                true | false => !b,
+            }
+        }
+        fn main() -> i64 {
+            let a: bool = flip(false);
+            let b: bool = flip(true);
+            if a {
+                if b { 0 } else { 1 }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}

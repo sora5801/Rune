@@ -335,6 +335,28 @@ impl Parser {
     // ---- patterns ----
 
     fn parse_pattern(&mut self) -> ParseResult<Pattern> {
+        let first = self.parse_pattern_atom()?;
+        if !self.check(&TokenKind::Pipe) {
+            return Ok(first);
+        }
+        // Or-pattern: `pat | pat | pat`. Flatten nested Ors as we go.
+        let mut patterns = match first {
+            Pattern::Or { patterns: ps, .. } => ps,
+            other => vec![other],
+        };
+        let start = patterns[0].span().start;
+        while self.eat(&TokenKind::Pipe) {
+            let next = self.parse_pattern_atom()?;
+            match next {
+                Pattern::Or { patterns: more, .. } => patterns.extend(more),
+                other => patterns.push(other),
+            }
+        }
+        let end = patterns.last().unwrap().span().end;
+        Ok(Pattern::Or { patterns, span: Span::new(start, end) })
+    }
+
+    fn parse_pattern_atom(&mut self) -> ParseResult<Pattern> {
         let span = self.peek_span();
         match self.peek() {
             TokenKind::Ident(name) if name == "_" => {

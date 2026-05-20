@@ -762,3 +762,120 @@ fn match_arm_after_binding_catchall_is_unreachable() {
         "unreachable",
     );
 }
+
+// ---- match guards ----
+
+#[test]
+fn match_guard_typechecks() {
+    check_ok(r#"
+        fn main() -> i64 {
+            match 5 {
+                x if x > 0 => 1,
+                _ => 0,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn match_guard_must_be_bool() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                x if x => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "guard must be `bool`",
+    );
+}
+
+#[test]
+fn guarded_arm_does_not_make_exhaustive() {
+    // A guarded wildcard can fail; bool match still needs full coverage.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match true {
+                true => 1,
+                _ if false => 2,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+// ---- or-patterns ----
+
+#[test]
+fn or_pattern_int_exhaustive_with_wildcard() {
+    check_ok(r#"
+        fn main() -> i64 {
+            match 5 {
+                1 | 2 | 3 => 1,
+                _ => 0,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn or_pattern_enum_exhaustive_without_wildcard() {
+    check_ok(r#"
+        enum E { A, B, C }
+        fn label(e: E) -> i64 {
+            match e {
+                E::A | E::B => 1,
+                E::C => 2,
+            }
+        }
+    "#);
+}
+
+#[test]
+fn or_pattern_missing_variant_errors() {
+    check_has_error(
+        r#"
+        enum E { A, B, C }
+        fn label(e: E) -> i64 {
+            match e {
+                E::A | E::B => 1,
+            }
+        }
+        "#,
+        "non-exhaustive",
+    );
+}
+
+#[test]
+fn or_pattern_duplicate_within_arm_is_unreachable() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                1 | 2 | 1 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "unreachable",
+    );
+}
+
+#[test]
+fn or_pattern_with_binding_rejected() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                1 | x => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "or-pattern can't contain a binding",
+    );
+}

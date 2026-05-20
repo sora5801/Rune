@@ -159,6 +159,9 @@ pub enum Pattern {
     /// Multi-segment path used as a pattern — today's only shape is
     /// `EnumName::Variant`, matched against the scrutinee's discriminant.
     Path { path: Path, span: Span },
+    /// `pat | pat | pat` — matches if any alternative matches. Nested Or
+    /// is flattened by the parser; the inner Vec never contains another Or.
+    Or { patterns: Vec<Pattern>, span: Span },
 }
 
 impl Pattern {
@@ -168,6 +171,7 @@ impl Pattern {
             Pattern::Ident { span, .. } => *span,
             Pattern::Literal { span, .. } => *span,
             Pattern::Path { span, .. } => *span,
+            Pattern::Or { span, .. } => *span,
         }
     }
 }

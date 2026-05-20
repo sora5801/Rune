@@ -57,10 +57,11 @@ rune: linked with clang -> primes.exe
   (call/method/field/index/`?`/`as`), block expressions, `if`/`else if`/`else`,
   `while`, `for ... in ...`, `match` with arms and guards, `return`,
   `break`, `continue`, array literals
-- Patterns: wildcard, identifier (with `mut`), literal
+- Patterns: wildcard, identifier (with `mut`), literal, path
+  (`EnumName::Variant`), and or-patterns (`a | b | c`)
 - Types: paths only
 - Error recovery at item-starting keywords
-- 37 integration tests
+- 40 integration tests
 
 ### Resolver — done
 
@@ -79,7 +80,11 @@ rune: linked with clang -> primes.exe
 - `if`/`else` branches unify; `while`/`if`-without-else require unit body.
 - Function calls check arity and argument types.
 - `as` casts allowed between numeric / bool / char / integer pairs.
-- 40 integration tests.
+- **Match**: per-arm pattern type checking, compile-time exhaustiveness
+  for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
+  arm detection across arms and within or-patterns. Guards must be `bool`
+  and don't contribute to exhaustiveness coverage.
+- 86 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -131,8 +136,18 @@ rune: linked with clang -> primes.exe
   - **`Vec`** as a concrete heap-allocated growable list of i64:
     `vec_new()`, `.push(x)`, `.get(i)`, `.len()`. Element type
     generalizes to `Vec<T>` once generics arrive.
+  - **Enums** (unit variants only) with `EnumName::Variant` path
+    syntax, `==`/`!=` dispatch via discriminant compare, and full
+    **`match`** support: literal/path/wildcard/ident patterns,
+    **or-patterns** (`A | B | C => ...`), and **guards**
+    (`pat if cond => body`). Non-exhaustive matches and unreachable
+    arms are compile-time errors; a runtime `rune_panic_no_match`
+    backstop stays wired as defense in depth.
+  - Manual reclamation: **`free(x)`** polymorphic builtin dispatches
+    to `free_vec` / `free_str`. Step 1 of the reclamation ladder
+    (ARC is step 2).
 - ABI: target-native (effectively `extern "C"`).
-- 33 JIT tests + 14 AOT tests.
+- 118 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -149,20 +164,19 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** strings, struct/enum values, method/field access,
-`?`, `as` casts, `match`, returning/passing arrays across function
-boundaries. All emit `Unsupported(msg)` at lowering with a clear error
-if reached.
+**Not yet codegen'd:** `?` (try), payload-bearing enum variants and
+their destructuring, range patterns (`1..=10 =>`), returning/passing
+arrays across function boundaries, generics. All emit `Unsupported(msg)`
+at lowering with a clear error if reached.
 
 ## Roadmap
 
-1. Field assignment (`p.x = 5`)
-2. Generics so `Vec<T>` (and `print<T>`) become first-class
-3. Enum variant construction + `match` codegen
-4. Bounds checks on array indexing (panics or Result wrapping)
-5. Reclamation for heap allocations (ARC, arenas, or GC)
-6. Traits / interfaces
-7. Self-hosted bootstrap (long-term)
+1. Range patterns (`1..=10 => ...`) and parser precedence fix for `!f(x)`
+2. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
+3. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
+4. ARC for heap allocations (step 2 of the reclamation ladder)
+5. Traits / interfaces
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -437,6 +437,11 @@ impl Resolver {
                 // lowerer can look up what variant it refers to.
                 self.resolve_path(path);
             }
+            Pattern::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.declare_pattern(sub, mutable_let);
+                }
+            }
         }
     }
 

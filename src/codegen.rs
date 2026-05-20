@@ -1494,28 +1494,59 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         for (i, arm) in arms.iter().enumerate() {
             let check_blk = next_blks[i];
-            let next_blk = next_blks[i + 1];
+            let next_arm_blk = next_blks[i + 1];
             let body_blk = self.builder.create_block();
 
             self.builder.switch_to_block(check_blk);
             self.builder.seal_block(check_blk);
-            self.compile_pattern_check(
-                &arm.pattern,
-                scrutinee_val,
-                &scrutinee.ty,
-                body_blk,
-                next_blk,
-            )?;
+
+            // Or-pattern: try each alternative. First match jumps to body.
+            // The last alternative's no-match falls through to next_arm_blk.
+            let last_idx = arm.patterns.len() - 1;
+            for (p_idx, pattern) in arm.patterns.iter().enumerate() {
+                let on_no_match = if p_idx == last_idx {
+                    next_arm_blk
+                } else {
+                    self.builder.create_block()
+                };
+                self.compile_pattern_check(
+                    pattern,
+                    scrutinee_val,
+                    &scrutinee.ty,
+                    body_blk,
+                    on_no_match,
+                )?;
+                if p_idx != last_idx {
+                    self.builder.switch_to_block(on_no_match);
+                    self.builder.seal_block(on_no_match);
+                }
+            }
 
             // Body
             self.builder.switch_to_block(body_blk);
             self.builder.seal_block(body_blk);
-            if let HirPattern::Bind(sym) = &arm.pattern {
-                let var = self.alloc_var();
-                let cty = cranelift_type(&scrutinee.ty)?;
-                self.builder.declare_var(var, cty);
-                self.builder.def_var(var, scrutinee_val);
-                self.var_map.insert(*sym, var);
+            // Bind only applies when the arm has exactly one Bind pattern
+            // (the checker rejects Bind inside or-patterns).
+            if arm.patterns.len() == 1 {
+                if let HirPattern::Bind(sym) = &arm.patterns[0] {
+                    let var = self.alloc_var();
+                    let cty = cranelift_type(&scrutinee.ty)?;
+                    self.builder.declare_var(var, cty);
+                    self.builder.def_var(var, scrutinee_val);
+                    self.var_map.insert(*sym, var);
+                }
+            }
+            // Optional guard — failing the guard falls through to next arm.
+            if let Some(guard) = &arm.guard {
+                let guard_val = self
+                    .compile_expr(guard)?
+                    .ok_or_else(|| CodegenError("match guard produced no value".into()))?;
+                let guarded_body = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(guard_val, guarded_body, &[], next_arm_blk, &[]);
+                self.builder.switch_to_block(guarded_body);
+                self.builder.seal_block(guarded_body);
             }
             let body_val = self.compile_expr(&arm.body)?;
             if !self.is_filled() {
