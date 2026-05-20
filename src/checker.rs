@@ -481,6 +481,13 @@ impl<'r> Checker<'r> {
                     }
                 }
             }
+            Pattern::Range { .. } => {
+                // Ranges cover a subset of an infinite domain; we don't
+                // track partial coverage. They neither contribute to
+                // exhaustiveness nor cause duplicate-arm errors against
+                // literals or other ranges. A standalone `0..=10 => ...`
+                // still needs a `_` arm to be exhaustive.
+            }
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.cover_pattern(
@@ -546,6 +553,9 @@ impl<'r> Checker<'r> {
                     }
                 }
             }
+            Pattern::Range { lo, hi, inclusive, span } => {
+                self.check_range_pattern(lo, hi, *inclusive, *span, scrutinee_ty);
+            }
             Pattern::Or { patterns, span } => {
                 // Reject Bind patterns inside an Or — alternatives would
                 // create multiple distinct symbols with the same name and
@@ -567,6 +577,67 @@ impl<'r> Checker<'r> {
         }
     }
 
+    fn check_range_pattern(
+        &mut self,
+        lo: &Lit,
+        hi: &Lit,
+        inclusive: bool,
+        span: Span,
+        scrutinee_ty: &Ty,
+    ) {
+        let (lo_v, hi_v) = match (lo, hi) {
+            (Lit::Int(a), Lit::Int(b)) => {
+                if !scrutinee_ty.is_error() && !scrutinee_ty.is_integer() {
+                    self.error(
+                        span,
+                        format!(
+                            "range pattern with integer bounds doesn't match \
+                             scrutinee type `{}`",
+                            scrutinee_ty.display()
+                        ),
+                    );
+                    return;
+                }
+                (*a, *b)
+            }
+            (Lit::Char(a), Lit::Char(b)) => {
+                if !scrutinee_ty.is_error() && *scrutinee_ty != Ty::Char {
+                    self.error(
+                        span,
+                        format!(
+                            "range pattern with char bounds doesn't match \
+                             scrutinee type `{}`",
+                            scrutinee_ty.display()
+                        ),
+                    );
+                    return;
+                }
+                (*a as i64, *b as i64)
+            }
+            _ => {
+                self.error(
+                    span,
+                    "range pattern bounds must be two integers or two chars"
+                        .to_string(),
+                );
+                return;
+            }
+        };
+        let valid = if inclusive { lo_v <= hi_v } else { lo_v < hi_v };
+        if !valid {
+            self.error(
+                span,
+                format!(
+                    "range pattern `{}{}{}` is empty (lo must be {} hi)",
+                    lo_v,
+                    if inclusive { "..=" } else { ".." },
+                    hi_v,
+                    if inclusive { "<=" } else { "<" },
+                ),
+            );
+        }
+    }
+
     fn bind_pattern(&mut self, p: &Pattern, ty: &Ty) {
         match p {
             Pattern::Wildcard(_) => {}
@@ -574,6 +645,9 @@ impl<'r> Checker<'r> {
                 self.local_types.insert(name.span, ty.clone());
             }
             Pattern::Literal { .. } => {}
+            Pattern::Range { .. } => {
+                // Range patterns don't bind.
+            }
             Pattern::Path { .. } => {
                 // Path patterns don't bind. The match/let context is
                 // responsible for validating the variant against the

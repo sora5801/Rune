@@ -1627,6 +1627,35 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let eq = self.builder.ins().icmp(IntCC::Equal, scrutinee, disc);
                 self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
             }
+            HirPattern::IntRange { lo, hi, inclusive } => {
+                // Lower as: lo <= scrut && scrut [<|<=] hi.
+                // Signed vs unsigned icmp follows the scrutinee's type.
+                // Char is treated as signed-OK because all valid Unicode
+                // scalars fit in the non-negative half of i32.
+                let cty = cranelift_type(scrutinee_ty)?;
+                let signed = matches!(
+                    scrutinee_ty,
+                    Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::ISize)
+                        | Ty::Char
+                );
+                let (le_cc, lt_cc) = if signed {
+                    (IntCC::SignedLessThanOrEqual, IntCC::SignedLessThan)
+                } else {
+                    (IntCC::UnsignedLessThanOrEqual, IntCC::UnsignedLessThan)
+                };
+                let lo_v = self.builder.ins().iconst(cty, *lo);
+                let hi_v = self.builder.ins().iconst(cty, *hi);
+                let lo_ok = self.builder.ins().icmp(le_cc, lo_v, scrutinee);
+                let hi_cc = if *inclusive { le_cc } else { lt_cc };
+                let check_hi = self.builder.create_block();
+                self.builder
+                    .ins()
+                    .brif(lo_ok, check_hi, &[], on_no_match, &[]);
+                self.builder.switch_to_block(check_hi);
+                self.builder.seal_block(check_hi);
+                let hi_ok = self.builder.ins().icmp(hi_cc, scrutinee, hi_v);
+                self.builder.ins().brif(hi_ok, on_match, &[], on_no_match, &[]);
+            }
         }
         Ok(())
     }

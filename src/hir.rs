@@ -201,6 +201,10 @@ pub enum HirPattern {
     BoolLit(bool),
     StrLit(String),
     EnumVariant { discriminant: u32 },
+    /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). For integer and
+    /// char scrutinees; chars are pre-converted to their codepoint by
+    /// the lowerer so codegen only sees i64 bounds.
+    IntRange { lo: i64, hi: i64, inclusive: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

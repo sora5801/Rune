@@ -392,14 +392,65 @@ impl Parser {
             | TokenKind::Str(_)
             | TokenKind::Char(_)
             | TokenKind::True
-            | TokenKind::False => {
-                let (lit, s) = self.parse_literal()?;
+            | TokenKind::False
+            | TokenKind::Minus => {
+                let (lit, s) = self.parse_pattern_lit()?;
+                // After a literal, check for a range pattern `..` / `..=`.
+                if let Some(inclusive) = self.peek_range_op() {
+                    self.bump(); // consume .. or ..=
+                    let (hi, hi_span) = self.parse_pattern_lit()?;
+                    return Ok(Pattern::Range {
+                        lo: lit,
+                        hi,
+                        inclusive,
+                        span: Span::new(s.start, hi_span.end),
+                    });
+                }
                 Ok(Pattern::Literal { lit, span: s })
             }
             _ => Err(ParseError {
                 message: format!("expected pattern, found {}", describe_kind(self.peek())),
                 span,
             }),
+        }
+    }
+
+    /// Parses a single literal usable as a pattern or range bound,
+    /// allowing an optional leading `-` on numeric literals.
+    /// Negation on non-numeric literals is rejected with an error.
+    fn parse_pattern_lit(&mut self) -> ParseResult<(Lit, Span)> {
+        let start_span = self.peek_span();
+        let negate = self.eat(&TokenKind::Minus);
+        let (lit, lit_span) = self.parse_literal()?;
+        let lit = if negate {
+            match lit {
+                Lit::Int(v) => Lit::Int(-v),
+                Lit::Float(v) => Lit::Float(-v),
+                _ => {
+                    return Err(ParseError {
+                        message: "unary `-` is only valid on numeric literals in patterns"
+                            .into(),
+                        span: start_span,
+                    });
+                }
+            }
+        } else {
+            lit
+        };
+        let span = if negate {
+            Span::new(start_span.start, lit_span.end)
+        } else {
+            lit_span
+        };
+        Ok((lit, span))
+    }
+
+    /// Returns `Some(inclusive)` if the current token is `..` or `..=`.
+    fn peek_range_op(&self) -> Option<bool> {
+        match self.peek() {
+            TokenKind::DotDot => Some(false),
+            TokenKind::DotDotEq => Some(true),
+            _ => None,
         }
     }
 

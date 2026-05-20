@@ -97,10 +97,11 @@ impl<'a> Lowerer<'a> {
             }
             ast::Pattern::Literal { .. }
             | ast::Pattern::Path { .. }
+            | ast::Pattern::Range { .. }
             | ast::Pattern::Or { .. } => {
-                // `let` doesn't currently use path/literal/or patterns —
-                // the resolver and checker either accept them as no-ops
-                // or reject them. No binding here.
+                // `let` doesn't currently use path/literal/range/or
+                // patterns — the resolver and checker either accept them
+                // as no-ops or reject them. No binding here.
                 (None, l.mutable)
             }
         };
@@ -460,6 +461,17 @@ impl<'a> Lowerer<'a> {
                     _ => return Err("match path didn't resolve to an enum variant".into()),
                 }
             }
+            ast::Pattern::Range { lo, hi, inclusive, .. } => {
+                let lo_v = lit_to_int_bound(lo)
+                    .ok_or_else(|| "range pattern bound must be int or char".to_string())?;
+                let hi_v = lit_to_int_bound(hi)
+                    .ok_or_else(|| "range pattern bound must be int or char".to_string())?;
+                out.push(HirPattern::IntRange {
+                    lo: lo_v,
+                    hi: hi_v,
+                    inclusive: *inclusive,
+                });
+            }
             ast::Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.collect_arm_patterns(sub, out)?;
@@ -480,6 +492,7 @@ impl<'a> Lowerer<'a> {
             ast::Pattern::Ident { name, .. } => self.res.decl_to_sym.get(&name.span).copied(),
             ast::Pattern::Literal { .. }
             | ast::Pattern::Path { .. }
+            | ast::Pattern::Range { .. }
             | ast::Pattern::Or { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),
@@ -575,6 +588,14 @@ impl<'a> Lowerer<'a> {
             name: dispatched.to_string(),
             args: lowered_args,
         }
+    }
+}
+
+fn lit_to_int_bound(lit: &ast::Lit) -> Option<i64> {
+    match lit {
+        ast::Lit::Int(v) => Some(*v),
+        ast::Lit::Char(c) => Some(*c as i64),
+        _ => None,
     }
 }
 

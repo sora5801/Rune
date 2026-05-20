@@ -57,8 +57,9 @@ rune: linked with clang -> primes.exe
   (call/method/field/index/`?`/`as`), block expressions, `if`/`else if`/`else`,
   `while`, `for ... in ...`, `match` with arms and guards, `return`,
   `break`, `continue`, array literals
-- Patterns: wildcard, identifier (with `mut`), literal, path
-  (`EnumName::Variant`), and or-patterns (`a | b | c`)
+- Patterns: wildcard, identifier (with `mut`), literal (with optional
+  unary `-` on numeric literals), path (`EnumName::Variant`),
+  or-patterns (`a | b | c`), and ranges (`lo..hi`, `lo..=hi`)
 - Types: paths only
 - Error recovery at item-starting keywords
 - 40 integration tests
@@ -84,7 +85,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 86 integration tests.
+- 95 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -139,15 +140,17 @@ rune: linked with clang -> primes.exe
   - **Enums** (unit variants only) with `EnumName::Variant` path
     syntax, `==`/`!=` dispatch via discriminant compare, and full
     **`match`** support: literal/path/wildcard/ident patterns,
-    **or-patterns** (`A | B | C => ...`), and **guards**
-    (`pat if cond => body`). Non-exhaustive matches and unreachable
-    arms are compile-time errors; a runtime `rune_panic_no_match`
-    backstop stays wired as defense in depth.
+    **or-patterns** (`A | B | C => ...`), **range patterns**
+    (`lo..hi` / `lo..=hi` on integer or char scrutinees, including
+    negative literal bounds), and **guards** (`pat if cond => body`).
+    Non-exhaustive matches and unreachable arms are compile-time
+    errors; a runtime `rune_panic_no_match` backstop stays wired as
+    defense in depth.
   - Manual reclamation: **`free(x)`** polymorphic builtin dispatches
     to `free_vec` / `free_str`. Step 1 of the reclamation ladder
     (ARC is step 2).
 - ABI: target-native (effectively `extern "C"`).
-- 118 JIT codegen tests + 34 AOT tests.
+- 123 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -171,7 +174,8 @@ at lowering with a clear error if reached.
 
 ## Roadmap
 
-1. Range patterns (`1..=10 => ...`) and parser precedence fix for `!f(x)`
+1. Char literal codegen + `as` cast codegen + parser precedence fix
+   for `!f(x)`
 2. Payload-bearing enum variants + destructuring (`Some(x) => ...`)
 3. Generics so `Vec<T>`, `Option<T>`, `Result<T, E>` become first-class
 4. ARC for heap allocations (step 2 of the reclamation ladder)

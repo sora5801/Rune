@@ -879,3 +879,135 @@ fn or_pattern_with_binding_rejected() {
         "or-pattern can't contain a binding",
     );
 }
+
+#[test]
+fn range_pattern_int_typechecks() {
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                0..=9 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn range_pattern_char_typechecks() {
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            match 'a' {
+                'a'..='z' => 1,
+                _ => 0,
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn range_pattern_mismatched_to_bool_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match true {
+                0..=9 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "range pattern with integer bounds doesn't match scrutinee type `bool`",
+    );
+}
+
+#[test]
+fn range_pattern_mismatched_char_on_int_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                'a'..='z' => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "range pattern with char bounds doesn't match scrutinee type",
+    );
+}
+
+#[test]
+fn range_pattern_mixed_bounds_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                0..='z' => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "range pattern bounds must be two integers or two chars",
+    );
+}
+
+#[test]
+fn range_pattern_inclusive_empty_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                10..=0 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "range pattern `10..=0` is empty",
+    );
+}
+
+#[test]
+fn range_pattern_exclusive_empty_errors() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                5..5 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+        "range pattern `5..5` is empty",
+    );
+}
+
+#[test]
+fn range_pattern_without_catchall_errors() {
+    // A range covers part of i64 but not all — still needs a `_` arm.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                0..=100 => 1,
+            }
+        }
+        "#,
+        "non-exhaustive `match` on `i64`",
+    );
+}
+
+#[test]
+fn range_pattern_in_or_typechecks() {
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            match 5 {
+                1..=3 | 7..=9 => 1,
+                _ => 0,
+            }
+        }
+        "#,
+    );
+}

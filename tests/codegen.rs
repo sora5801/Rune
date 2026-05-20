@@ -1577,3 +1577,97 @@ fn or_pattern_bool_exhaustive() {
     "#;
     assert_eq!(run_main(src), 1);
 }
+
+#[test]
+fn range_pattern_inclusive_in_middle() {
+    let src = r#"
+        fn bucket(n: i64) -> i64 {
+            match n {
+                0..=9 => 1,
+                10..=99 => 2,
+                100..=999 => 3,
+                _ => 4,
+            }
+        }
+        fn main() -> i64 {
+            bucket(0) + bucket(9) + bucket(10) + bucket(99)
+                + bucket(100) + bucket(999) + bucket(1000) + bucket(-1)
+        }
+    "#;
+    // 1+1+2+2+3+3+4+4 = 20
+    assert_eq!(run_main(src), 20);
+}
+
+#[test]
+fn range_pattern_exclusive_excludes_upper() {
+    let src = r#"
+        fn pick(n: i64) -> i64 {
+            match n {
+                0..10 => 100,
+                _ => 200,
+            }
+        }
+        fn main() -> i64 {
+            pick(0) + pick(5) + pick(9) + pick(10) + pick(11)
+        }
+    "#;
+    // 100+100+100 + 200+200 = 700
+    assert_eq!(run_main(src), 700);
+}
+
+#[test]
+fn range_pattern_negative_bounds() {
+    let src = r#"
+        fn sign(n: i64) -> i64 {
+            match n {
+                -100..=-1 => -1,
+                0 => 0,
+                1..=100 => 1,
+                _ => 2,
+            }
+        }
+        fn main() -> i64 {
+            // -1 + -1 + 0 + 1 + 1 + 2 = 2
+            sign(-100) + sign(-1) + sign(0) + sign(1) + sign(100) + sign(101)
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn range_pattern_in_or_pattern() {
+    let src = r#"
+        fn label(n: i64) -> i64 {
+            match n {
+                1..=3 | 7..=9 => 1,
+                _ => 0,
+            }
+        }
+        fn main() -> i64 {
+            // hits at 1,2,3,7,8,9 => 6, others 0
+            label(0) + label(1) + label(2) + label(3) + label(4)
+                + label(5) + label(6) + label(7) + label(8) + label(9)
+                + label(10)
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn range_pattern_with_guard() {
+    let src = r#"
+        fn pick(n: i64) -> i64 {
+            match n {
+                0..=10 if n == 5 => 100,
+                0..=10 => 1,
+                _ => 0,
+            }
+        }
+        fn main() -> i64 {
+            pick(0) + pick(5) + pick(10) + pick(11)
+        }
+    "#;
+    // 1 + 100 + 1 + 0 = 102
+    assert_eq!(run_main(src), 102);
+}
+
