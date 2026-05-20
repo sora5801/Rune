@@ -54,6 +54,29 @@ struct rune_str* rune_str_concat(const struct rune_str* a, const struct rune_str
     result->len = total_len;
     return result;
 }
+
+static int64_t clamp_i64(int64_t v, int64_t lo, int64_t hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+struct rune_str* rune_str_slice(const struct rune_str* s, int64_t start, int64_t end) {
+    start = clamp_i64(start, 0, s->len);
+    end   = clamp_i64(end,   start, s->len);
+    int64_t new_len = end - start;
+    struct rune_str* result = (struct rune_str*)malloc(sizeof(struct rune_str));
+    if (new_len == 0) {
+        result->ptr = (const char*)0;
+        result->len = 0;
+        return result;
+    }
+    char* bytes = (char*)malloc((size_t)new_len);
+    memcpy(bytes, s->ptr + start, (size_t)new_len);
+    result->ptr = bytes;
+    result->len = new_len;
+    return result;
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

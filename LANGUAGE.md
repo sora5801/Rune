@@ -186,21 +186,36 @@ Both compile to inline IR — `s.len()` is a `load.i64` from the
 descriptor's `len` field at offset 8; `s.is_empty()` does the load
 followed by `icmp eq, 0`. No runtime call.
 
+**Indexing and slicing**
+
+- `s[i]` — reads one byte and zero-extends to `i64`. Byte-indexed (not
+  char-indexed; for an ASCII-only program this is the obvious thing,
+  for UTF-8 programs the byte may be a mid-codepoint continuation).
+  No bounds checks today; reading past the end is undefined behavior.
+- `s[a..b]` (exclusive) and `s[a..=b]` (inclusive) — heap-allocate a
+  fresh substring descriptor + fresh byte buffer (consistent with
+  `+`'s leak-heap model). Out-of-range bounds are **clamped** by the
+  runtime: `start < 0` becomes 0, `end > s.len()` becomes `s.len()`,
+  `end < start` becomes `start`. No panic.
+- Only `a..b` / `a..=b` are parsed today. Prefix (`..b`), postfix
+  (`a..`), and bare `..` are deferred. So `s[..5]` is currently a
+  parse error; users write `s[0..5]`.
+- Range expressions outside a slice index are explicitly rejected.
+  `for i in 0..n { }` doesn't work yet — needs an iterator protocol.
+
 **Not yet:**
 
 - Owned/borrowed split (`String` vs `&str`). May never split if a single
   immutable type is good enough.
-- `.bytes()`, indexing (`s[i]`), slicing (`s[a..b]`), iteration over
-  chars.
+- `.bytes()`, iteration over chars, char-aware indexing.
 - Raw string literals (`r"..."`), triple-quoted multi-line strings,
   interpolation (`"\(expr)"` or `f"{expr}"`).
 - **Returning literal strings from functions** is unsound — the
   descriptor lives on the callee's stack frame. Returning concat
-  results or passed-in parameters is safe (concat is heap-allocated,
-  parameters live in the caller).
-
-Indexing semantics, once added, will be **byte-indexed**. Slicing on a
-non-char-boundary is a runtime panic (or a checked error — TBD).
+  results, slice results, or passed-in parameters is safe (the former
+  two are heap-allocated, parameters live in the caller).
+- Bounds-checking on byte indexing. Slicing clamps; byte indexing
+  trusts.
 
 ## Type system
 
@@ -327,3 +342,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | String concatenation | `+` and `+=` work on `str` operands. Codegen routes through a runtime `rune_str_concat` that mallocs a fresh descriptor + fresh byte buffer (process-lifetime leak; no free yet). Memory model gains "process-lifetime leak heap" for runtime-allocated strings. Concat results can be returned from functions, stored in mutable bindings, accumulated in loops. `examples/greet.rn` demonstrates `fn greet(name) -> str { "Hello, " + name + "!" }`. |
 | 2026-05-19 | Polymorphic `print` | New `SymbolKind::PolyBuiltinFn` variant. `print(x)` accepts both `i64` (any int variant) and `str`; the lowerer dispatches to `print_i64` or `print_str` based on argument type. Type checker special-cases the call. The explicit-typed builtins `print_i64` and `print_str` remain available for direct use. Intentionally narrow (just `print` is poly today); revisits once generics or traits exist. |
 | 2026-05-19 | Method calls + first methods | New `HirExprKind::MethodCall` variant. Type checker resolves methods via a hardcoded `resolve_method(recv_ty, name)` table. Codegen dispatches by `(recv_ty, name)` and mostly emits inline IR. Three methods land: `str.len()`, `str.is_empty()`, `arr.len()`. Mechanism extends to future methods (trivial: inline; non-trivial: route to runtime). |
+| 2026-05-19 | String indexing + slicing | New `ast::Expr::Range` (and parser support for `a..b` / `a..=b` as infix at precedence (3,4), below comparison). New `HirExprKind::StrByteIndex` (inline `load.i8` + `uextend.i64`) and `HirExprKind::StrSlice` (calls runtime `rune_str_slice` — mallocs new descriptor + bytes; clamps out-of-range indices). Range expressions outside a slice-index context are an explicit type-check error. Standalone ranges and partial forms (`..b`, `a..`, `..`) are deferred. |

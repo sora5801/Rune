@@ -96,6 +96,15 @@ pub enum HirExprKind {
     Array { elems: Vec<HirExpr>, elem_ty: Ty },
     /// `array[index]`. Loads the element at the computed offset.
     Index { array: Box<HirExpr>, index: Box<HirExpr>, elem_ty: Ty },
+    /// `str[i]` — reads a single byte from the string and zero-extends to i64.
+    StrByteIndex { str_val: Box<HirExpr>, index: Box<HirExpr> },
+    /// `str[a..b]` or `str[a..=b]` — heap-allocates a fresh substring.
+    StrSlice {
+        str_val: Box<HirExpr>,
+        start: Box<HirExpr>,
+        end: Box<HirExpr>,
+        inclusive: bool,
+    },
     Block(HirBlock),
     If {
         cond: Box<HirExpr>,

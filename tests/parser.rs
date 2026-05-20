@@ -202,6 +202,29 @@ fn index_access() {
 }
 
 #[test]
+fn exclusive_range() {
+    let e = parse_expr_in_block("1..10");
+    let Expr::Range { inclusive: false, start: Some(_), end: Some(_), .. } = e else {
+        panic!("expected exclusive range");
+    };
+}
+
+#[test]
+fn inclusive_range() {
+    let e = parse_expr_in_block("1..=10");
+    let Expr::Range { inclusive: true, start: Some(_), end: Some(_), .. } = e else {
+        panic!("expected inclusive range");
+    };
+}
+
+#[test]
+fn slice_index() {
+    let e = parse_expr_in_block("s[0..5]");
+    let Expr::Index { index, .. } = e else { panic!() };
+    assert!(matches!(*index, Expr::Range { .. }));
+}
+
+#[test]
 fn try_operator() {
     let e = parse_expr_in_block("foo()?");
     assert!(matches!(e, Expr::Try { .. }));

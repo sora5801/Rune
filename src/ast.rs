@@ -182,6 +182,12 @@ pub enum Expr {
     While { cond: Box<Expr>, body: Block, span: Span },
     For { pat: Pattern, iter: Box<Expr>, body: Block, span: Span },
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm>, span: Span },
+    Range {
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
+        span: Span,
+    },
     Return { value: Option<Box<Expr>>, span: Span },
     Break(Span),
     Continue(Span),
@@ -206,6 +212,7 @@ impl Expr {
             | Expr::While { span, .. }
             | Expr::For { span, .. }
             | Expr::Match { span, .. }
+            | Expr::Range { span, .. }
             | Expr::Return { span, .. } => *span,
             Expr::Path(p) => p.span,
             Expr::Block(b) => b.span,

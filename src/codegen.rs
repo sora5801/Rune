@@ -97,6 +97,38 @@ extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
     }
 }
 
+/// Host implementation of `s[a..b]` for JIT mode. Clamps out-of-range
+/// indices instead of panicking (consistent with current "no bounds
+/// checks" stance). Heap-allocates; never freed.
+extern "C" fn rune_runtime_str_slice(
+    s: *const RuneStr,
+    start: i64,
+    end: i64,
+) -> *mut RuneStr {
+    use std::alloc::{alloc, Layout};
+    unsafe {
+        let s = &*s;
+        let start = start.max(0).min(s.len);
+        let end = end.max(start).min(s.len);
+        let new_len = end - start;
+        let desc = alloc(Layout::new::<RuneStr>()) as *mut RuneStr;
+        if new_len == 0 {
+            (*desc).ptr = std::ptr::null();
+            (*desc).len = 0;
+            return desc;
+        }
+        let bytes = alloc(Layout::from_size_align(new_len as usize, 1).unwrap());
+        std::ptr::copy_nonoverlapping(
+            s.ptr.add(start as usize),
+            bytes,
+            new_len as usize,
+        );
+        (*desc).ptr = bytes;
+        (*desc).len = new_len;
+        desc
+    }
+}
+
 /// Host implementation of string concatenation for JIT mode. Allocates a
 /// fresh descriptor + fresh byte buffer on the heap, never freed (leak by
 /// design — Rune v0.x is process-lifetime).
@@ -254,6 +286,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_print_str", rune_runtime_print_str as *const u8);
         builder.symbol("rune_str_eq", rune_runtime_str_eq as *const u8);
         builder.symbol("rune_str_concat", rune_runtime_str_concat as *const u8);
+        builder.symbol("rune_str_slice", rune_runtime_str_slice as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -508,6 +541,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
             HirExprKind::Index { array, index, elem_ty } => {
                 self.compile_index(array, index, elem_ty)
+            }
+            HirExprKind::StrByteIndex { str_val, index } => {
+                self.compile_str_byte_index(str_val, index)
+            }
+            HirExprKind::StrSlice { str_val, start, end, inclusive } => {
+                self.compile_str_slice(str_val, start, end, *inclusive)
             }
             HirExprKind::For { local, iter, body, elem_ty, length } => {
                 self.compile_for(*local, iter, body, elem_ty, *length)
@@ -839,6 +878,64 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
     }
 
+    fn compile_str_byte_index(
+        &mut self,
+        str_val: &HirExpr,
+        index: &HirExpr,
+    ) -> Result<Option<Value>, CodegenError> {
+        let recv = self
+            .compile_expr(str_val)?
+            .ok_or_else(|| CodegenError("str receiver produced no value".into()))?;
+        let i = self
+            .compile_expr(index)?
+            .ok_or_else(|| CodegenError("str index produced no value".into()))?;
+        // descriptor layout: { ptr @ 0, len @ 8 }
+        let bytes_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::new(), recv, 0);
+        let byte_addr = self.builder.ins().iadd(bytes_ptr, i);
+        let byte = self
+            .builder
+            .ins()
+            .load(types::I8, MemFlags::new(), byte_addr, 0);
+        // Zero-extend to i64 — bytes are unsigned 0..=255.
+        let widened = self.builder.ins().uextend(types::I64, byte);
+        Ok(Some(widened))
+    }
+
+    fn compile_str_slice(
+        &mut self,
+        str_val: &HirExpr,
+        start: &HirExpr,
+        end: &HirExpr,
+        inclusive: bool,
+    ) -> Result<Option<Value>, CodegenError> {
+        let recv = self
+            .compile_expr(str_val)?
+            .ok_or_else(|| CodegenError("str receiver produced no value".into()))?;
+        let start_v = self
+            .compile_expr(start)?
+            .ok_or_else(|| CodegenError("slice start produced no value".into()))?;
+        let end_v = self
+            .compile_expr(end)?
+            .ok_or_else(|| CodegenError("slice end produced no value".into()))?;
+        // `s[a..=b]` becomes `s[a..(b+1)]` so the runtime can stay
+        // ignorant of inclusivity.
+        let end_v = if inclusive {
+            let one = self.builder.ins().iconst(types::I64, 1);
+            self.builder.ins().iadd(end_v, one)
+        } else {
+            end_v
+        };
+        let func_id = self.ensure_runtime_func("str_slice")?;
+        let local_func = self
+            .module
+            .declare_func_in_func(func_id, self.builder.func);
+        let inst = self.builder.ins().call(local_func, &[recv, start_v, end_v]);
+        Ok(Some(self.builder.inst_results(inst)[0]))
+    }
+
     fn compile_method_call(
         &mut self,
         receiver: &HirExpr,
@@ -1143,6 +1240,16 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_str_concat", sig)
+        }
+        // Internal-only: codegen calls this for `s[a..b]` slicing.
+        // (s, start, end) → heap-allocated substring descriptor.
+        "str_slice" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // s
+            sig.params.push(AbiParam::new(types::I64)); // start
+            sig.params.push(AbiParam::new(types::I64)); // end (exclusive)
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_str_slice", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };

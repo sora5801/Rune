@@ -296,6 +296,19 @@ impl<'r> Checker<'r> {
             }
             Expr::For { pat, iter, body, .. } => self.check_for(pat, iter, body),
             Expr::Match { scrutinee, arms, span } => self.check_match(scrutinee, arms, *span),
+            Expr::Range { start, end, span, .. } => {
+                // Range expressions are currently only legal inside a slice
+                // index (`s[a..b]`). Outside that context, we still want to
+                // surface a useful error rather than a stray "unsupported".
+                if let Some(s) = start.as_deref() { self.check_expr(s); }
+                if let Some(e) = end.as_deref() { self.check_expr(e); }
+                self.error(
+                    *span,
+                    "range expressions are only allowed as a slice index (e.g. `s[a..b]`) — \
+                     `for i in 0..n` and bare ranges aren't supported yet",
+                );
+                Ty::Error
+            }
             Expr::Return { value, span } => self.check_return(value.as_deref(), *span),
             Expr::Break(_) | Expr::Continue(_) => Ty::Never,
         }
@@ -718,6 +731,39 @@ impl<'r> Checker<'r> {
 
     fn check_index(&mut self, receiver: &Expr, index: &Expr, span: Span) -> Ty {
         let rt = self.check_expr(receiver);
+        // Range index: only `str[a..b]` for now — slicing.
+        if let Expr::Range { start, end, .. } = index {
+            if let Some(s) = start.as_deref() {
+                let st = self.check_expr(s);
+                if !st.is_integer() && !st.is_error() {
+                    self.error(
+                        s.span(),
+                        format!("slice start must be integer, found `{}`", st.display()),
+                    );
+                }
+            }
+            if let Some(e) = end.as_deref() {
+                let et = self.check_expr(e);
+                if !et.is_integer() && !et.is_error() {
+                    self.error(
+                        e.span(),
+                        format!("slice end must be integer, found `{}`", et.display()),
+                    );
+                }
+            }
+            return match rt {
+                Ty::Str => Ty::Str,
+                Ty::Error => Ty::Error,
+                other => {
+                    self.error(
+                        span,
+                        format!("cannot slice value of type `{}`", other.display()),
+                    );
+                    Ty::Error
+                }
+            };
+        }
+        // Non-range index.
         let it = self.check_expr(index);
         if !it.is_integer() && !it.is_error() {
             self.error(
@@ -727,6 +773,8 @@ impl<'r> Checker<'r> {
         }
         match rt {
             Ty::Array(elem, _) => *elem,
+            // `str[i]` reads one byte and widens to i64.
+            Ty::Str => Ty::Int(crate::ty::IntTy::I64),
             Ty::Error => Ty::Error,
             other => {
                 self.error(span, format!("cannot index value of type `{}`", other.display()));

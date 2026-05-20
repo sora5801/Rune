@@ -635,6 +635,104 @@ fn str_len_of_var() {
     assert_eq!(run_main(src), 4);
 }
 
+// ---- string indexing and slicing ----
+
+#[test]
+fn str_byte_index_first() {
+    // ASCII 'h' = 104
+    assert_eq!(
+        run_main(r#"fn main() -> i64 { "hello"[0] }"#),
+        104
+    );
+}
+
+#[test]
+fn str_byte_index_last() {
+    // ASCII 'o' = 111
+    assert_eq!(
+        run_main(r#"fn main() -> i64 { "hello"[4] }"#),
+        111
+    );
+}
+
+#[test]
+fn str_byte_index_via_var() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "abc";
+            let i = 1;
+            s[i]
+        }
+    "#;
+    // ASCII 'b' = 98
+    assert_eq!(run_main(src), 98);
+}
+
+#[test]
+fn str_slice_basic() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello"[0..3];
+            if s == "hel" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_slice_inclusive() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello"[2..=4];
+            if s == "llo" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_slice_empty_when_equal_bounds() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "hello"[2..2];
+            if s.is_empty() { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_slice_clamps_out_of_range() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "abc"[0..100];
+            if s == "abc" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_slice_len_matches_bounds() {
+    let src = r#"
+        fn main() -> i64 {
+            "hello, world"[7..12].len()
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn slice_of_concat() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = ("foo" + "bar")[1..5];
+            if s == "ooba" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
 // ---- array methods ----
 
 #[test]

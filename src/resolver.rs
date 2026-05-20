@@ -406,6 +406,14 @@ impl Resolver {
                     self.exit_scope();
                 }
             }
+            Expr::Range { start, end, .. } => {
+                if let Some(s) = start.as_deref() {
+                    self.resolve_expr(s);
+                }
+                if let Some(e) = end.as_deref() {
+                    self.resolve_expr(e);
+                }
+            }
             Expr::Return { value, .. } => {
                 if let Some(v) = value {
                     self.resolve_expr(v);

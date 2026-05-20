@@ -411,6 +411,19 @@ fn aot_print_str_len() {
 }
 
 #[test]
+fn aot_print_slice() {
+    let src = r#"
+        fn main() -> i64 {
+            print("Hello, world!"[7..12]);
+            0
+        }
+    "#;
+    let (code, stdout) = build_and_capture(src);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "world");
+}
+
+#[test]
 fn aot_array_len_in_loop_bound() {
     let src = r#"
         fn main() -> i64 {

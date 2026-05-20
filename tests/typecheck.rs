@@ -290,6 +290,39 @@ fn array_len_typechecks() {
     check_ok("fn main() -> i64 { [1, 2, 3].len() }");
 }
 
+// ---- string indexing and slicing ----
+
+#[test]
+fn str_index_byte_is_integer() {
+    check_ok(r#"fn main() -> i64 { "hello"[0] }"#);
+}
+
+#[test]
+fn str_slice_is_str() {
+    check_ok(r#"fn main() -> i64 { "hello"[0..3].len() }"#);
+}
+
+#[test]
+fn inclusive_str_slice() {
+    check_ok(r#"fn main() -> i64 { "hello"[0..=2].len() }"#);
+}
+
+#[test]
+fn str_index_must_be_integer() {
+    check_has_error(
+        r#"fn main() -> i64 { "hi"[true] }"#,
+        "must be an integer",
+    );
+}
+
+#[test]
+fn standalone_range_is_error() {
+    check_has_error(
+        "fn main() -> i64 { let r = 0..10; 0 }",
+        "range expressions",
+    );
+}
+
 #[test]
 fn method_does_not_exist_on_type() {
     check_has_error(

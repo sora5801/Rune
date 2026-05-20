@@ -178,14 +178,45 @@ impl<'a> Lowerer<'a> {
             },
             ast::Expr::Field { .. } => HirExprKind::Unsupported("field access".into()),
             ast::Expr::Index { receiver, index, .. } => {
-                let arr = self.lower_expr(receiver);
+                let recv = self.lower_expr(receiver);
+                // String indexing dispatches on whether the index is a range.
+                if matches!(recv.ty, Ty::Str) {
+                    if let ast::Expr::Range { start, end, inclusive, .. } = index.as_ref() {
+                        // Only `a..b` / `a..=b` are parsed today; both sides
+                        // are always Some.
+                        let start_expr = start
+                            .as_deref()
+                            .map(|e| self.lower_expr(e))
+                            .unwrap_or_else(|| HirExpr {
+                                kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                                ty: Ty::Int(IntTy::I64),
+                            });
+                        let end_expr = end
+                            .as_deref()
+                            .map(|e| self.lower_expr(e))
+                            .unwrap_or_else(|| HirExpr {
+                                kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                                ty: Ty::Int(IntTy::I64),
+                            });
+                        return HirExprKind::StrSlice {
+                            str_val: Box::new(recv),
+                            start: Box::new(start_expr),
+                            end: Box::new(end_expr),
+                            inclusive: *inclusive,
+                        };
+                    }
+                    return HirExprKind::StrByteIndex {
+                        str_val: Box::new(recv),
+                        index: Box::new(self.lower_expr(index)),
+                    };
+                }
                 let idx = self.lower_expr(index);
-                let elem_ty = match &arr.ty {
+                let elem_ty = match &recv.ty {
                     Ty::Array(elem, _) => (**elem).clone(),
                     _ => Ty::Error,
                 };
                 HirExprKind::Index {
-                    array: Box::new(arr),
+                    array: Box::new(recv),
                     index: Box::new(idx),
                     elem_ty,
                 }
@@ -202,6 +233,10 @@ impl<'a> Lowerer<'a> {
             }
             ast::Expr::For { pat, iter, body, .. } => self.lower_for(pat, iter, body),
             ast::Expr::Match { .. } => HirExprKind::Unsupported("match expressions".into()),
+            ast::Expr::Range { .. } => HirExprKind::Unsupported(
+                "range expressions are only supported inside string slicing (e.g. `s[a..b]`)"
+                    .into(),
+            ),
         }
     }
 

@@ -427,6 +427,16 @@ impl Parser {
                     let span = Span::new(lhs.span().start, end);
                     lhs = Expr::Cast { expr: Box::new(lhs), ty, span };
                 }
+                InfixKind::Range(inclusive) => {
+                    let rhs = self.parse_expr_bp(rbp)?;
+                    let span = Span::new(lhs.span().start, rhs.span().end);
+                    lhs = Expr::Range {
+                        start: Some(Box::new(lhs)),
+                        end: Some(Box::new(rhs)),
+                        inclusive,
+                        span,
+                    };
+                }
             }
         }
         Ok(lhs)
@@ -721,6 +731,8 @@ enum InfixKind {
     Assign,
     AssignOp(BinOp),
     Cast,
+    /// `..` (false) or `..=` (true).
+    Range(bool),
 }
 
 fn infix_binding_power(tok: &TokenKind) -> Option<InfixOp> {
@@ -732,6 +744,9 @@ fn infix_binding_power(tok: &TokenKind) -> Option<InfixOp> {
         TokenKind::StarEq    => InfixOp { kind: InfixKind::AssignOp(BinOp::Mul), bp: (2, 1) },
         TokenKind::SlashEq   => InfixOp { kind: InfixKind::AssignOp(BinOp::Div), bp: (2, 1) },
         TokenKind::PercentEq => InfixOp { kind: InfixKind::AssignOp(BinOp::Mod), bp: (2, 1) },
+        // range — left-associative, lower precedence than logical operators
+        TokenKind::DotDot    => InfixOp { kind: InfixKind::Range(false),         bp: (3, 4) },
+        TokenKind::DotDotEq  => InfixOp { kind: InfixKind::Range(true),          bp: (3, 4) },
         // logical
         TokenKind::PipePipe  => InfixOp { kind: InfixKind::BinOp(BinOp::Or),     bp: (5, 6) },
         TokenKind::AmpAmp    => InfixOp { kind: InfixKind::BinOp(BinOp::And),    bp: (7, 8) },
