@@ -5,17 +5,43 @@ targeting native code via Cranelift.
 
 ## Status
 
-Very early. Currently just the lexer.
+**Pre-alpha — lexer only.** No parser, no type checker, no codegen yet.
+
+## Implementation state
+
+### Lexer — done
+
+- Keywords: `let`, `mut`, `fn`, `return`, `if`, `else`, `while`, `for`, `in`,
+  `break`, `continue`, `true`, `false`, `struct`, `enum`, `match`, `pub`,
+  `const`, `as`
+- Identifiers (ASCII)
+- Integer literals: decimal, hex (`0x`), binary (`0b`), octal (`0o`); `_`
+  digit separators
+- Float literals: fractional part with optional `e`/`E` exponent
+- String literals with `\n \t \r \\ \' \" \0` escapes
+- Char literals with the same escape set
+- All single- and multi-char operators: `+ - * / %`, `== != < > <= >=`,
+  `&& || !`, `& | ^ ~ << >>`, `-> => :: .. ..=`, `+= -= *= /= %=`, `? .`
+- Delimiters: `( ) { } [ ]`, `, ; :`
+- Line comments and **nested** block comments
+- UTF-8 source input
+- Byte-offset spans on every token
+- Error recovery (lexer accumulates errors instead of failing)
+- 21 integration tests, all green
+
+### Parser — not started
+### Type checker — not started
+### Code generation — not started
 
 ## Roadmap
 
-- [x] Lexer
-- [ ] Parser / AST
-- [ ] Type checker
-- [ ] HIR / lowering
-- [ ] Cranelift codegen
-- [ ] Minimal standard library
-- [ ] Self-hosted bootstrap (eventually)
+1. Parser (recursive descent + Pratt expression parser)
+2. Resolver / name resolution
+3. Type checker
+4. HIR + lowering
+5. Cranelift codegen (hello-world first)
+6. Minimal stdlib (print, arithmetic, basic collections)
+7. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 
@@ -44,6 +70,11 @@ cargo test
 ```
 rune tokens <file.rn>    # dump tokens from a source file
 ```
+
+## Documentation
+
+- [LANGUAGE.md](LANGUAGE.md) — language design decisions (living document)
+- [docs/sessions/](docs/sessions/) — per-session technical deep dives
 
 ## License
 
