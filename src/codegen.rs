@@ -50,9 +50,20 @@ pub struct Codegen<M: Module> {
     /// `compile_module` from the HirModule. Used by FnCodegen to emit
     /// per-field retain on struct construction / release on drop.
     struct_arc_fields: HashMap<SymbolId, Vec<(u32, Ty)>>,
+    /// Per-struct field-area size. Used for `struct_new(size)` and
+    /// `struct_dealloc(ptr, size)` calls.
+    struct_sizes: HashMap<SymbolId, u32>,
+    /// FuncId of the synthesized release function for each user
+    /// struct. Populated up front so per-struct release can call
+    /// other structs' release (for nested struct fields).
+    struct_release_funcs: HashMap<SymbolId, FuncId>,
     /// Enums whose values are heap-allocated `{ tag, payload, rc }`
     /// descriptors (i.e., the enum has at least one payload variant).
     enum_has_payload: std::collections::HashSet<SymbolId>,
+    /// Per-enum payload types per variant (indexed by discriminant).
+    enum_payload_tys: HashMap<SymbolId, Vec<Vec<Ty>>>,
+    /// FuncId of the synthesized release function per payload enum.
+    enum_release_funcs: HashMap<SymbolId, FuncId>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -313,18 +324,36 @@ struct RuneEnum {
     rc: i64,
 }
 
-/// Heap-allocate a Rune struct descriptor of `size` bytes. The bytes
-/// are uninitialized — the caller (`compile_struct_lit`) stores each
-/// field into its offset. v0.x: the descriptor leaks at end of scope;
-/// only the ARC-managed fields are released. A future session adds an
-/// rc + dealloc.
+/// Heap-allocate a Rune struct descriptor of `size` bytes + 8 bytes
+/// for the ARC refcount stored at offset `size`. Field bytes are
+/// uninitialized — the caller (`compile_struct_lit`) stores each
+/// field into its offset. The rc field starts at 1; release dec's it
+/// and `rune_struct_dealloc` reclaims memory when rc hits zero.
 extern "C" fn rune_runtime_struct_new(size: i64) -> *mut u8 {
     use std::alloc::{alloc, Layout};
     unsafe {
-        // 8-byte alignment is enough for any field layout we currently
-        // produce (8-byte padding per field).
-        let layout = Layout::from_size_align(size as usize, 8).unwrap();
-        alloc(layout)
+        let total = size as usize + 8;
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        let p = alloc(layout);
+        // Initialize rc=1 at offset `size`.
+        let rc_ptr = p.add(size as usize) as *mut i64;
+        *rc_ptr = 1;
+        p
+    }
+}
+
+/// Free a Rune struct descriptor previously allocated by
+/// `rune_struct_new`. `size` is the field area in bytes; the actual
+/// allocation is `size + 8` (rc at the end).
+extern "C" fn rune_runtime_struct_dealloc(p: *mut u8, size: i64) {
+    use std::alloc::{dealloc, Layout};
+    unsafe {
+        if p.is_null() {
+            return;
+        }
+        let total = size as usize + 8;
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        dealloc(p, layout);
     }
 }
 
@@ -336,6 +365,20 @@ extern "C" fn rune_runtime_enum_new(tag: i64, payload: i64) -> *mut RuneEnum {
         (*p).payload = payload;
         (*p).rc = 1;
         p
+    }
+}
+
+/// Free a payload-bearing enum descriptor previously allocated by
+/// `rune_enum_new`. Caller is responsible for releasing the payload
+/// first — this helper only frees the descriptor itself. Used by the
+/// per-enum synthesized release function.
+extern "C" fn rune_runtime_enum_dealloc(p: *mut RuneEnum) {
+    use std::alloc::{dealloc, Layout};
+    unsafe {
+        if p.is_null() {
+            return;
+        }
+        dealloc(p as *mut u8, Layout::new::<RuneEnum>());
     }
 }
 
@@ -451,7 +494,32 @@ impl<M: Module> Codegen<M> {
         // Capture the struct-ARC-field map up front so each FnCodegen can
         // reference it by `&'a HashMap<...>`.
         self.struct_arc_fields = hir.struct_arc_fields.clone();
+        self.struct_sizes = hir.struct_sizes.clone();
         self.enum_has_payload = hir.enum_has_payload.clone();
+        self.enum_payload_tys = hir.enum_payload_tys.clone();
+        // Pass 0: declare per-struct + per-enum release functions so
+        // they can call each other (e.g. a struct with a nested
+        // struct field, or an enum payload that's a struct).
+        for &sym in hir.struct_sizes.keys() {
+            let name = format!("__rune_release_struct${}", sym.0);
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.struct_release_funcs.insert(sym, id);
+        }
+        for &sym in &self.enum_has_payload.clone() {
+            let name = format!("__rune_release_enum${}", sym.0);
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.enum_release_funcs.insert(sym, id);
+        }
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
             let HirItem::Fn(f) = item;
@@ -468,7 +536,262 @@ impl<M: Module> Codegen<M> {
             let HirItem::Fn(f) = item;
             self.define_fn(f)?;
         }
+        // Pass 3: define synthesized struct + enum release functions.
+        for (&sym, &func_id) in &self.struct_release_funcs.clone() {
+            self.define_struct_release(sym, func_id)?;
+        }
+        for (&sym, &func_id) in &self.enum_release_funcs.clone() {
+            self.define_enum_release(sym, func_id)?;
+        }
         Ok(())
+    }
+
+    /// Build a payload enum's release function. Layout depends on
+    /// the enum's max variant arity: rc lives at `(8 + 8*max_arity)`.
+    ///   load rc; if -1 return; rc--; if rc>0 return
+    ///   load tag; per variant, release each ARC payload at its slot
+    ///   call rune_struct_dealloc(p, field_size)
+    fn define_enum_release(
+        &mut self,
+        enum_sym: SymbolId,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let payload_tys = self
+            .enum_payload_tys
+            .get(&enum_sym)
+            .cloned()
+            .unwrap_or_default();
+        let max_arity = enum_max_arity(enum_sym, &self.enum_payload_tys);
+        let field_size = 8 + 8 * max_arity as i32;
+        let rc_offset = field_size;
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let ptr = builder.block_params(entry)[0];
+
+        let rc = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), ptr, rc_offset);
+        let sentinel = builder.ins().iconst(types::I64, -1);
+        let is_sentinel = builder.ins().icmp(IntCC::Equal, rc, sentinel);
+        let do_dec = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(is_sentinel, done, &[], do_dec, &[]);
+
+        builder.switch_to_block(do_dec);
+        builder.seal_block(do_dec);
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_rc = builder.ins().isub(rc, one);
+        builder
+            .ins()
+            .store(MemFlags::new(), new_rc, ptr, rc_offset);
+        let zero = builder.ins().iconst(types::I64, 0);
+        let alive = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThan, new_rc, zero);
+        let do_free = builder.create_block();
+        builder.ins().brif(alive, done, &[], do_free, &[]);
+
+        builder.switch_to_block(do_free);
+        builder.seal_block(do_free);
+        let tag = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), ptr, 0);
+        let dealloc_blk = builder.create_block();
+        for (disc, payloads) in payload_tys.iter().enumerate() {
+            // Determine which payload fields of this variant are ARC.
+            let arc_positions: Vec<(usize, Ty)> = payloads
+                .iter()
+                .enumerate()
+                .filter(|(_, ty)| {
+                    is_arc_type(ty, &self.struct_arc_fields, &self.enum_has_payload)
+                })
+                .map(|(i, ty)| (i, ty.clone()))
+                .collect();
+            if arc_positions.is_empty() {
+                continue;
+            }
+            let disc_const = builder.ins().iconst(types::I64, disc as i64);
+            let is_this = builder.ins().icmp(IntCC::Equal, tag, disc_const);
+            let release_blk = builder.create_block();
+            let next_blk = builder.create_block();
+            builder
+                .ins()
+                .brif(is_this, release_blk, &[], next_blk, &[]);
+            builder.switch_to_block(release_blk);
+            builder.seal_block(release_blk);
+            for (i, payload_ty) in &arc_positions {
+                let raw = builder.ins().load(
+                    types::I64,
+                    MemFlags::new(),
+                    ptr,
+                    8 + 8 * (*i) as i32,
+                );
+                let pcty = cranelift_type(payload_ty)?;
+                let val = if pcty == types::I64 {
+                    raw
+                } else {
+                    builder.ins().ireduce(pcty, raw)
+                };
+                self.emit_release_field(&mut builder, payload_ty, val)?;
+            }
+            builder.ins().jump(dealloc_blk, &[]);
+            builder.switch_to_block(next_blk);
+            builder.seal_block(next_blk);
+        }
+        builder.ins().jump(dealloc_blk, &[]);
+
+        builder.switch_to_block(dealloc_blk);
+        builder.seal_block(dealloc_blk);
+        // Reuse the struct dealloc helper — it handles any
+        // `field_size+8` heap block. `enum_dealloc` is now redundant.
+        let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
+        let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
+        let size_const = builder.ins().iconst(types::I64, field_size as i64);
+        builder.ins().call(dealloc_local, &[ptr, size_const]);
+        builder.ins().jump(done, &[]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
+    /// Build a struct's synthesized release function. Layout:
+    ///   load rc at offset `size`
+    ///   if rc == -1: return            (sentinel — not yet used by structs)
+    ///   rc -= 1; store rc
+    ///   if rc > 0: return
+    ///   for each ARC field: load + emit_arc_call(release)
+    ///   call rune_struct_dealloc(ptr, size)
+    ///   return
+    fn define_struct_release(
+        &mut self,
+        struct_sym: SymbolId,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let size = *self.struct_sizes.get(&struct_sym).unwrap_or(&0);
+        let arc_fields = self
+            .struct_arc_fields
+            .get(&struct_sym)
+            .cloned()
+            .unwrap_or_default();
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let ptr = builder.block_params(entry)[0];
+        // Load rc and decrement.
+        let rc = builder.ins().load(types::I64, MemFlags::new(), ptr, size as i32);
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_rc = builder.ins().isub(rc, one);
+        builder
+            .ins()
+            .store(MemFlags::new(), new_rc, ptr, size as i32);
+        // if new_rc > 0 → just return.
+        let zero = builder.ins().iconst(types::I64, 0);
+        let alive = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThan, new_rc, zero);
+        let do_free = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(alive, done, &[], do_free, &[]);
+        // do_free: release ARC fields, then dealloc.
+        builder.switch_to_block(do_free);
+        builder.seal_block(do_free);
+        for (offset, ty) in &arc_fields {
+            let cty = cranelift_type(ty)?;
+            let field_val = builder
+                .ins()
+                .load(cty, MemFlags::new(), ptr, *offset as i32);
+            // Emit a release call for the field. For a Vec/Str/Enum
+            // it's a runtime call; for a nested Struct it's the
+            // synthesized release we declared up front.
+            self.emit_release_field(&mut builder, ty, field_val)?;
+        }
+        let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
+        let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
+        let size_const = builder.ins().iconst(types::I64, size as i64);
+        builder.ins().call(dealloc_local, &[ptr, size_const]);
+        builder.ins().jump(done, &[]);
+        // done: return.
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
+    /// Helper to emit a release call from inside a synthesized
+    /// struct-release function. Mirrors `FnCodegen::emit_arc_call`
+    /// but operates on a free-standing FunctionBuilder.
+    fn emit_release_field(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        ty: &Ty,
+        value: Value,
+    ) -> Result<(), CodegenError> {
+        // Nested struct or payload enum: call its synthesized release.
+        if let Ty::Struct(sym) = ty {
+            let func_id = *self
+                .struct_release_funcs
+                .get(sym)
+                .ok_or_else(|| CodegenError("nested struct missing release".into()))?;
+            let local = self.module.declare_func_in_func(func_id, builder.func);
+            builder.ins().call(local, &[value]);
+            return Ok(());
+        }
+        if let Ty::Enum(sym) = ty {
+            if let Some(&func_id) = self.enum_release_funcs.get(sym) {
+                let local = self.module.declare_func_in_func(func_id, builder.func);
+                builder.ins().call(local, &[value]);
+                return Ok(());
+            }
+            // Tag-only enum — value is just an i64 discriminant, no
+            // heap descriptor, nothing to release. (Shouldn't reach
+            // here in practice since is_arc_type returns false.)
+            return Ok(());
+        }
+        // Vec / Str: runtime helper.
+        let helper = arc_helper_name("release", ty)?;
+        let func_id = self.ensure_runtime_func(helper)?;
+        let local = self.module.declare_func_in_func(func_id, builder.func);
+        builder.ins().call(local, &[value]);
+        Ok(())
+    }
+
+    /// Codegen-level mirror of `FnCodegen::ensure_runtime_func` — used
+    /// when synthesizing helpers outside of a Rune-function context.
+    fn ensure_runtime_func(&mut self, name: &str) -> Result<FuncId, CodegenError> {
+        if let Some(&id) = self.builtin_funcs.get(name) {
+            return Ok(id);
+        }
+        let id = declare_builtin(&mut self.module, name)?;
+        self.builtin_funcs.insert(name.to_string(), id);
+        Ok(id)
     }
 
     pub fn func_id(&self, sym: SymbolId) -> Option<FuncId> {
@@ -507,7 +830,11 @@ impl<M: Module> Codegen<M> {
             builtin_funcs: &mut self.builtin_funcs,
             next_str_id: &mut self.next_str_id,
             struct_arc_fields: &self.struct_arc_fields,
+            struct_sizes: &self.struct_sizes,
+            struct_release_funcs: &self.struct_release_funcs,
             enum_has_payload: &self.enum_has_payload,
+            enum_release_funcs: &self.enum_release_funcs,
+            enum_payload_tys: &self.enum_payload_tys,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -593,7 +920,9 @@ impl Codegen<JITModule> {
         builder.symbol("rune_retain_vec", rune_runtime_retain_vec as *const u8);
         builder.symbol("rune_release_vec", rune_runtime_release_vec as *const u8);
         builder.symbol("rune_struct_new", rune_runtime_struct_new as *const u8);
+        builder.symbol("rune_struct_dealloc", rune_runtime_struct_dealloc as *const u8);
         builder.symbol("rune_enum_new", rune_runtime_enum_new as *const u8);
+        builder.symbol("rune_enum_dealloc", rune_runtime_enum_dealloc as *const u8);
         builder.symbol("rune_retain_enum", rune_runtime_retain_enum as *const u8);
         builder.symbol("rune_release_enum", rune_runtime_release_enum as *const u8);
         let module = JITModule::new(builder);
@@ -604,7 +933,11 @@ impl Codegen<JITModule> {
             builtin_funcs: HashMap::new(),
             next_str_id: 0,
             struct_arc_fields: HashMap::new(),
+            struct_sizes: HashMap::new(),
+            struct_release_funcs: HashMap::new(),
             enum_has_payload: std::collections::HashSet::new(),
+            enum_payload_tys: HashMap::new(),
+            enum_release_funcs: HashMap::new(),
         })
     }
 
@@ -654,7 +987,11 @@ impl Codegen<ObjectModule> {
             builtin_funcs: HashMap::new(),
             next_str_id: 0,
             struct_arc_fields: HashMap::new(),
+            struct_sizes: HashMap::new(),
+            struct_release_funcs: HashMap::new(),
             enum_has_payload: std::collections::HashSet::new(),
+            enum_payload_tys: HashMap::new(),
+            enum_release_funcs: HashMap::new(),
         })
     }
 
@@ -725,7 +1062,11 @@ struct FnCodegen<'a, M: Module> {
     builtin_funcs: &'a mut HashMap<String, FuncId>,
     next_str_id: &'a mut u32,
     struct_arc_fields: &'a HashMap<SymbolId, Vec<(u32, Ty)>>,
+    struct_sizes: &'a HashMap<SymbolId, u32>,
+    struct_release_funcs: &'a HashMap<SymbolId, FuncId>,
     enum_has_payload: &'a std::collections::HashSet<SymbolId>,
+    enum_release_funcs: &'a HashMap<SymbolId, FuncId>,
+    enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -810,26 +1151,91 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
-        // Struct values dispatch to per-field retain/release. `value` is
-        // the base address of the struct's storage; each ARC field gets
-        // loaded at its offset and forwarded.
+        // Struct values: inline retain (rc++) or call the synthesized
+        // per-struct release function (which does rc--, walks ARC
+        // fields, and dealloc's at zero).
         if let Ty::Struct(sym) = ty {
-            let fields: Vec<(u32, Ty)> = self
-                .struct_arc_fields
-                .get(sym)
-                .cloned()
-                .unwrap_or_default();
-            for (offset, field_ty) in fields {
-                let fcty = cranelift_type(&field_ty)?;
-                let field_val = self.builder.ins().load(
-                    fcty,
-                    MemFlags::new(),
-                    value,
-                    offset as i32,
-                );
-                self.emit_arc_call(action, &field_ty, field_val)?;
+            let size = *self.struct_sizes.get(sym).unwrap_or(&0);
+            match action {
+                "retain" => {
+                    let rc = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        value,
+                        size as i32,
+                    );
+                    let one = self.builder.ins().iconst(types::I64, 1);
+                    let new_rc = self.builder.ins().iadd(rc, one);
+                    self.builder.ins().store(
+                        MemFlags::new(),
+                        new_rc,
+                        value,
+                        size as i32,
+                    );
+                    return Ok(());
+                }
+                "release" => {
+                    let func_id = *self
+                        .struct_release_funcs
+                        .get(sym)
+                        .ok_or_else(|| {
+                            CodegenError("missing struct release fn".into())
+                        })?;
+                    let local = self
+                        .module
+                        .declare_func_in_func(func_id, self.builder.func);
+                    self.builder.ins().call(local, &[value]);
+                    return Ok(());
+                }
+                _ => {
+                    return Err(CodegenError(format!(
+                        "unknown ARC action `{}` on struct",
+                        action
+                    )));
+                }
             }
-            return Ok(());
+        }
+        // Payload enums: retain inline (rc++ at the per-enum rc
+        // offset); release dispatches to the synthesized per-enum
+        // function which walks the variant and dealloc's properly.
+        if let Ty::Enum(sym) = ty {
+            if self.enum_has_payload.contains(sym) {
+                let max_arity = enum_max_arity(*sym, self.enum_payload_tys);
+                let rc_offset = 8 + 8 * max_arity as i32;
+                match action {
+                    "retain" => {
+                        let rc = self.builder.ins().load(
+                            types::I64,
+                            MemFlags::new(),
+                            value,
+                            rc_offset,
+                        );
+                        let one = self.builder.ins().iconst(types::I64, 1);
+                        let new_rc = self.builder.ins().iadd(rc, one);
+                        self.builder.ins().store(
+                            MemFlags::new(),
+                            new_rc,
+                            value,
+                            rc_offset,
+                        );
+                        return Ok(());
+                    }
+                    "release" => {
+                        let func_id = *self
+                            .enum_release_funcs
+                            .get(sym)
+                            .ok_or_else(|| {
+                                CodegenError("missing enum release fn".into())
+                            })?;
+                        let local = self
+                            .module
+                            .declare_func_in_func(func_id, self.builder.func);
+                        self.builder.ins().call(local, &[value]);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
         }
         let helper = arc_helper_name(action, ty)?;
         let func_id = self.ensure_runtime_func(helper)?;
@@ -896,55 +1302,84 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             }
             HirExprKind::EnumVariant { discriminant } => {
                 // Unit variant. If the enum has any payload-bearing
-                // variant, all values use the heap `{ tag, payload, rc }`
-                // descriptor; allocate with payload=0. Otherwise the
-                // value is just the i64 discriminant.
-                let has_payload = matches!(&e.ty, Ty::Enum(sym) if self.enum_has_payload.contains(sym));
-                if has_payload {
-                    let tag = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, *discriminant as i64);
-                    let zero = self.builder.ins().iconst(types::I64, 0);
-                    let func_id = self.ensure_runtime_func("enum_new")?;
-                    let local_func = self
-                        .module
-                        .declare_func_in_func(func_id, self.builder.func);
-                    let inst = self.builder.ins().call(local_func, &[tag, zero]);
-                    Ok(Some(self.builder.inst_results(inst)[0]))
-                } else {
-                    let v = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, *discriminant as i64);
-                    Ok(Some(v))
+                // variant, allocate a per-enum-sized descriptor with
+                // tag and rc set; payload slots stay zero. Otherwise
+                // the value is just the i64 discriminant.
+                if let Ty::Enum(enum_sym) = &e.ty {
+                    if self.enum_has_payload.contains(enum_sym) {
+                        let max_arity = enum_max_arity(*enum_sym, self.enum_payload_tys);
+                        let field_size = 8 + 8 * max_arity as i64;
+                        let size_const =
+                            self.builder.ins().iconst(types::I64, field_size);
+                        let alloc_id = self.ensure_runtime_func("struct_new")?;
+                        let alloc_local = self
+                            .module
+                            .declare_func_in_func(alloc_id, self.builder.func);
+                        let inst =
+                            self.builder.ins().call(alloc_local, &[size_const]);
+                        let ptr = self.builder.inst_results(inst)[0];
+                        let tag = self
+                            .builder
+                            .ins()
+                            .iconst(types::I64, *discriminant as i64);
+                        self.builder.ins().store(MemFlags::new(), tag, ptr, 0);
+                        return Ok(Some(ptr));
+                    }
                 }
+                let v = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, *discriminant as i64);
+                Ok(Some(v))
             }
-            HirExprKind::EnumPayloadCtor { enum_sym: _, discriminant, payload } => {
+            HirExprKind::EnumPayloadCtor { enum_sym, discriminant, payloads } => {
+                let max_arity = enum_max_arity(*enum_sym, self.enum_payload_tys);
+                // Layout: tag@0, payload[i]@(8+i*8), rc@(8+max_arity*8).
+                // Use rune_struct_new which mallocs `size+8` and inits
+                // rc=1 at offset `size`.
+                let field_size = 8 + 8 * max_arity as i64;
+                let size_const = self.builder.ins().iconst(types::I64, field_size);
+                let alloc_id = self.ensure_runtime_func("struct_new")?;
+                let alloc_local = self
+                    .module
+                    .declare_func_in_func(alloc_id, self.builder.func);
+                let alloc_inst = self.builder.ins().call(alloc_local, &[size_const]);
+                let ptr = self.builder.inst_results(alloc_inst)[0];
+                // Tag at offset 0.
                 let tag = self
                     .builder
                     .ins()
                     .iconst(types::I64, *discriminant as i64);
-                let pay = self
-                    .compile_expr(payload)?
-                    .ok_or_else(|| CodegenError("variant payload produced no value".into()))?;
-                // Promote the payload to i64 so it fits the descriptor's
-                // slot. Smaller ints get zero/sign-extended; pointer-shaped
-                // values (Vec, Str, Struct, Enum) are already i64.
-                let pcty = cranelift_type(&payload.ty)?;
-                let pay_i64 = if pcty == types::I64 {
-                    pay
-                } else if matches!(payload.ty, Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::ISize)) {
-                    self.builder.ins().sextend(types::I64, pay)
-                } else {
-                    self.builder.ins().uextend(types::I64, pay)
-                };
-                let func_id = self.ensure_runtime_func("enum_new")?;
-                let local_func = self
-                    .module
-                    .declare_func_in_func(func_id, self.builder.func);
-                let inst = self.builder.ins().call(local_func, &[tag, pay_i64]);
-                Ok(Some(self.builder.inst_results(inst)[0]))
+                self.builder.ins().store(MemFlags::new(), tag, ptr, 0);
+                // Payloads at 8 + i*8, retained if borrowed.
+                for (i, p_expr) in payloads.iter().enumerate() {
+                    let pay = self
+                        .compile_expr(p_expr)?
+                        .ok_or_else(|| {
+                            CodegenError("variant payload produced no value".into())
+                        })?;
+                    if is_arc_type(&p_expr.ty, self.struct_arc_fields, self.enum_has_payload) {
+                        if let HirExprKind::Local(_) = &p_expr.kind {
+                            self.emit_arc_call("retain", &p_expr.ty, pay)?;
+                        }
+                    }
+                    let pcty = cranelift_type(&p_expr.ty)?;
+                    let pay_i64 = if pcty == types::I64 {
+                        pay
+                    } else if matches!(
+                        p_expr.ty,
+                        Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::ISize)
+                    ) {
+                        self.builder.ins().sextend(types::I64, pay)
+                    } else {
+                        self.builder.ins().uextend(types::I64, pay)
+                    };
+                    let offset = 8 + 8 * i as i32;
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), pay_i64, ptr, offset);
+                }
+                Ok(Some(ptr))
             }
             HirExprKind::Unary { op, expr } => self.compile_unary(*op, expr, &e.ty),
             HirExprKind::Cast { expr } => self.compile_cast(expr, &e.ty),
@@ -2089,18 +2524,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let eq = self.builder.ins().icmp(IntCC::Equal, tag, disc);
                 self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
             }
-            HirPattern::EnumPayload { discriminant, payload_ty, binding } => {
-                // Tag compare + branch. On match, the body block will
-                // need to extract the payload — we declare the binding
-                // in the body block by writing into `var_map`. Codegen
-                // for the body relies on `compile_pattern_check` having
-                // jumped to `on_match` by now; we extract the payload
-                // there at the start of the body, but the body block
-                // is set up by `compile_match`. To keep things
-                // self-contained, materialize the payload binding here
-                // before jumping: stash the loaded payload into a fresh
-                // Variable, register it in `var_map` if `binding` is
-                // Some, then jump to on_match.
+            HirPattern::EnumPayload { discriminant, bindings } => {
+                // Tag compare + branch. On match, materialize each
+                // payload binding by loading from offset (8 + i*8)
+                // and storing into a fresh Variable. Bindings of `_`
+                // skip the load entirely.
                 let tag = self
                     .builder
                     .ins()
@@ -2114,13 +2542,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 self.builder.ins().brif(eq, extract, &[], on_no_match, &[]);
                 self.builder.switch_to_block(extract);
                 self.builder.seal_block(extract);
-                if let Some(sym) = binding {
-                    // Load the payload (i64 slot) and narrow back to the
-                    // declared payload type if needed.
-                    let raw = self
-                        .builder
-                        .ins()
-                        .load(types::I64, MemFlags::new(), scrutinee, 8);
+                for (i, (payload_ty, binding)) in bindings.iter().enumerate() {
+                    let Some(sym) = binding else { continue };
+                    let raw = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        scrutinee,
+                        8 + 8 * i as i32,
+                    );
                     let pcty = cranelift_type(payload_ty)?;
                     let val = if pcty == types::I64 {
                         raw
@@ -2261,18 +2690,33 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 }
 
 /// Types whose values are reclaimed by ARC. Vec and Str are always
-/// ARC-managed (string literals use the rc=-1 sentinel). A struct is
-/// ARC-managed iff it has at least one ARC-managed field
-/// (transitively). An enum is ARC-managed iff it has at least one
-/// payload-bearing variant (`enum_has_payload`).
+/// ARC-managed (string literals use the rc=-1 sentinel). Every user-
+/// defined struct now carries an rc and participates in ARC (the
+/// `struct_arc_fields` map is still used for *field walks* during
+/// release, but is_arc_type returns true for any Ty::Struct). An
+/// enum is ARC-managed iff it has at least one payload-bearing
+/// variant (`enum_has_payload`).
+/// Max payload arity across an enum's variants. Used to size the
+/// heap descriptor `{ tag, payload[max_arity], rc }`. 0 for tag-only
+/// enums (which use the i64 representation instead).
+fn enum_max_arity(
+    sym: SymbolId,
+    enum_payload_tys: &HashMap<SymbolId, Vec<Vec<Ty>>>,
+) -> usize {
+    enum_payload_tys
+        .get(&sym)
+        .map(|v| v.iter().map(|ps| ps.len()).max().unwrap_or(0))
+        .unwrap_or(0)
+}
+
 fn is_arc_type(
     ty: &Ty,
-    struct_arc_fields: &HashMap<SymbolId, Vec<(u32, Ty)>>,
+    _struct_arc_fields: &HashMap<SymbolId, Vec<(u32, Ty)>>,
     enum_has_payload: &std::collections::HashSet<SymbolId>,
 ) -> bool {
     match ty {
         Ty::Vec | Ty::Str => true,
-        Ty::Struct(sym) => struct_arc_fields.contains_key(sym),
+        Ty::Struct(_) => true,
         Ty::Enum(sym) => enum_has_payload.contains(sym),
         _ => false,
     }
@@ -2469,6 +2913,12 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_struct_new", sig)
         }
+        "struct_dealloc" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ptr
+            sig.params.push(AbiParam::new(types::I64)); // size
+            ("rune_struct_dealloc", sig)
+        }
         "enum_new" => {
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // tag
@@ -2485,6 +2935,11 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             ("rune_release_enum", sig)
+        }
+        "enum_dealloc" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_enum_dealloc", sig)
         }
         "panic_no_match" => {
             // () -> never; same trap-after-call shape as panic_bounds.

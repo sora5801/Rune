@@ -8,7 +8,7 @@ use crate::ast;
 use crate::checker::CheckResults;
 use crate::hir::*;
 use crate::resolver::{Resolutions, SymbolKind};
-use crate::ty::{IntTy, Ty};
+use crate::ty::{IntTy, SymbolId, Ty};
 
 pub struct Lowerer<'a> {
     res: &'a Resolutions,
@@ -70,7 +70,69 @@ impl<'a> Lowerer<'a> {
             }
         }
         let enum_has_payload = self.res.enum_has_payload.clone();
-        HirModule { items, struct_arc_fields, enum_has_payload }
+        let struct_sizes: std::collections::HashMap<
+            crate::ty::SymbolId,
+            u32,
+        > = self
+            .check
+            .struct_layouts
+            .iter()
+            .map(|(s, l)| (*s, l.size))
+            .collect();
+        // Build the per-enum payload-type lists. Variant order = the
+        // resolver's declaration order; that matches discriminants
+        // since the resolver assigns 0, 1, ... in source order.
+        let mut enum_payload_tys: std::collections::HashMap<
+            crate::ty::SymbolId,
+            Vec<Vec<Ty>>,
+        > = std::collections::HashMap::new();
+        for &enum_sym in &enum_has_payload {
+            let Some(variant_map) = self.res.enum_variants.get(&enum_sym) else {
+                continue;
+            };
+            // Reconstruct discriminant ordering. The variant_sym's
+            // SymbolKind::EnumVariant carries the discriminant.
+            let mut ordered: Vec<(u32, SymbolId)> = variant_map
+                .values()
+                .map(|sid| {
+                    let SymbolKind::EnumVariant { discriminant, .. } =
+                        self.res.symbol(*sid).kind
+                    else {
+                        unreachable!()
+                    };
+                    (discriminant, *sid)
+                })
+                .collect();
+            ordered.sort_by_key(|(d, _)| *d);
+            let mut per_variant: Vec<Vec<Ty>> = Vec::with_capacity(ordered.len());
+            for (_, vsym) in ordered {
+                let payload_ast = self
+                    .res
+                    .enum_variant_payloads
+                    .get(&vsym)
+                    .cloned()
+                    .unwrap_or_default();
+                let payload_tys: Vec<Ty> = payload_ast
+                    .iter()
+                    .map(|t| {
+                        self.check
+                            .type_resolutions
+                            .get(&t.span())
+                            .cloned()
+                            .unwrap_or(Ty::Error)
+                    })
+                    .collect();
+                per_variant.push(payload_tys);
+            }
+            enum_payload_tys.insert(enum_sym, per_variant);
+        }
+        HirModule {
+            items,
+            struct_arc_fields,
+            struct_sizes,
+            enum_has_payload,
+            enum_payload_tys,
+        }
     }
 
     fn lower_fn(&self, f: &ast::FnDecl) -> HirFn {
@@ -249,16 +311,10 @@ impl<'a> Lowerer<'a> {
                 Some(sym) if self.is_poly_builtin_fn_symbol(sym) => self.lower_poly_call(sym, args),
                 Some(sym) => match self.res.symbol(sym).kind {
                     SymbolKind::EnumVariant { enum_sym, discriminant } => {
-                        if args.len() != 1 {
-                            return HirExprKind::Unsupported(
-                                "multi-field tuple-variant construction not supported"
-                                    .into(),
-                            );
-                        }
                         HirExprKind::EnumPayloadCtor {
                             enum_sym,
                             discriminant,
-                            payload: Box::new(self.lower_expr(&args[0])),
+                            payloads: args.iter().map(|a| self.lower_expr(a)).collect(),
                         }
                     }
                     _ => HirExprKind::Unsupported(
@@ -544,36 +600,44 @@ impl<'a> Lowerer<'a> {
                         "tuple-variant pattern path is not an enum variant".into(),
                     );
                 };
-                // v0.x: exactly one field per tuple variant.
-                if fields.len() != 1 {
-                    return Err(
-                        "multi-field tuple-variant destructuring not supported".into(),
-                    );
-                }
-                let binding = match &fields[0] {
-                    ast::Pattern::Wildcard(_) => None,
-                    ast::Pattern::Ident { name, .. } => {
-                        self.res.decl_to_sym.get(&name.span).copied()
-                    }
-                    _ => {
-                        return Err(
-                            "tuple-variant payload must be an identifier or `_`".into(),
-                        );
-                    }
-                };
-                let payload_ty = self
+                let payload_asts = self
                     .res
                     .enum_variant_payloads
                     .get(&sid)
-                    .and_then(|tys| tys.first())
-                    .map(|t| self.check.type_resolutions.get(&t.span()).cloned())
-                    .flatten()
-                    .unwrap_or(Ty::Error);
-                out.push(HirPattern::EnumPayload {
-                    discriminant,
-                    payload_ty,
-                    binding,
-                });
+                    .cloned()
+                    .unwrap_or_default();
+                if fields.len() != payload_asts.len() {
+                    return Err(format!(
+                        "variant takes {} payload{}, found {}",
+                        payload_asts.len(),
+                        if payload_asts.len() == 1 { "" } else { "s" },
+                        fields.len()
+                    ));
+                }
+                let mut bindings: Vec<(Ty, Option<SymbolId>)> =
+                    Vec::with_capacity(fields.len());
+                for (field, payload_ast) in fields.iter().zip(&payload_asts) {
+                    let payload_ty = self
+                        .check
+                        .type_resolutions
+                        .get(&payload_ast.span())
+                        .cloned()
+                        .unwrap_or(Ty::Error);
+                    let binding = match field {
+                        ast::Pattern::Wildcard(_) => None,
+                        ast::Pattern::Ident { name, .. } => {
+                            self.res.decl_to_sym.get(&name.span).copied()
+                        }
+                        _ => {
+                            return Err(
+                                "tuple-variant payload must be an identifier or `_`"
+                                    .into(),
+                            );
+                        }
+                    };
+                    bindings.push((payload_ty, binding));
+                }
+                out.push(HirPattern::EnumPayload { discriminant, bindings });
             }
             ast::Pattern::Or { patterns, .. } => {
                 for sub in patterns {

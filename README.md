@@ -134,9 +134,10 @@ rune: linked with clang -> primes.exe
     `s.contains(p)` via runtime calls.
   - **Structs** with field access: `struct Point { x: i64, y: i64 }`,
     constructed via `Point { x: 1, y: 2 }`, accessed via `p.x`,
-    **returned by value** from functions. 8-byte-per-field padding
-    (v0.x simplification); heap-allocated descriptor leaks today
-    (struct-level rc is a future cleanup).
+    **returned by value** from functions. Heap-allocated with a
+    refcount; per-struct synthesized release walks ARC fields and
+    dealloc's the descriptor. 8-byte-per-field padding (v0.x
+    simplification).
   - **`impl` blocks** for inherent methods on structs:
     `impl Point { fn magnitude_sq(self: Point) -> i64 { ... } }`.
     Methods dispatched at lowering time; `self` becomes the first
@@ -145,10 +146,13 @@ rune: linked with clang -> primes.exe
     `vec_new()`, `.push(x)`, `.get(i)`, `.len()`. Element type
     generalizes to `Vec<T>` once generics arrive.
   - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
-    represent as i64; **payload variants** (`Some(i64)`, `Err(str)`)
-    flip the whole enum to a heap-allocated 24-byte `{ tag, payload,
-    rc }` descriptor and participate in ARC. v0.x: single-value
-    tuple variants only.
+    represent as i64; **payload variants** (`Some(i64)`, `Err(str)`,
+    `Pair(i64, i64)`) flip the whole enum to a heap-allocated
+    `{ tag, payload[max_arity], rc }` descriptor sized to its max
+    variant arity. ARC-managed: per-enum synthesized release walks
+    the active variant's ARC payloads on drop. Multi-field tuple
+    variants work; named-field variants
+    (`Ok { value: T }`) are still parser-only.
     Full **`match`** support: literal/path/wildcard/ident patterns,
     **tuple-variant destructure** (`Some(x) => ...`),
     **or-patterns** (`A | B | C => ...`), **range patterns**
@@ -170,7 +174,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 154 JIT codegen tests + 34 AOT tests.
+- 159 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -188,21 +192,20 @@ rune: linked with clang -> primes.exe
   `-o <path>` overrides.
 
 **Not yet codegen'd:** `?` (try), calling generic functions (parser
-accepts the declaration but monomorphization is step 2), multi-field
-tuple variants and named-field enum variants, returning/passing
-arrays across function boundaries. Most emit `Unsupported(msg)` at
-lowering with a clear error if reached.
+accepts the declaration but monomorphization is step 2), named-field
+enum variants, returning/passing arrays across function boundaries.
+Most emit `Unsupported(msg)` at lowering with a clear error if
+reached.
 
 ## Roadmap
 
-1. Generics step 2 (monomorphization) so `Vec<T>`, `Option<T>`,
+1. Named-field enum variants (small extension to multi-field tuple
+   variant infra)
+2. Generics step 2 (monomorphization) so `Vec<T>`, `Option<T>`,
    `Result<T, E>` become first-class
-2. Struct descriptor rc + dealloc; payload-enum per-variant
-   destructor walks (close the v0.x leaks)
-3. `Weak<T>` for cycle breaking (blocked on step 1)
-4. Multi-field tuple variants and named-field enum variants
-5. Traits / interfaces
-6. Self-hosted bootstrap (long-term)
+3. `Weak<T>` for cycle breaking (blocked on step 2)
+4. Traits / interfaces
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -17,11 +17,20 @@ pub struct HirModule {
     /// Codegen uses this to emit per-field retain on construction
     /// and per-field release on scope drop.
     pub struct_arc_fields: HashMap<SymbolId, Vec<(u32, Ty)>>,
+    /// Per-struct field-area size in bytes. The actual heap
+    /// allocation is `size + 8` (rc at offset `size`). Populated for
+    /// every user-defined struct, ARC-managed or not.
+    pub struct_sizes: HashMap<SymbolId, u32>,
     /// Enums with at least one payload-bearing variant. Their values
     /// are heap-allocated `{ tag, payload, rc }` descriptors and
     /// participate in ARC; unit variants of the same enum allocate
     /// the same shape with payload=0.
     pub enum_has_payload: std::collections::HashSet<SymbolId>,
+    /// Per-enum payload types per variant, indexed by discriminant.
+    /// `Vec<Vec<Ty>>` lets a multi-field tuple variant carry several
+    /// types; for v0.x single-field, each inner Vec has 0 or 1
+    /// entries. Only populated for enums in `enum_has_payload`.
+    pub enum_payload_tys: HashMap<SymbolId, Vec<Vec<Ty>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,13 +93,14 @@ pub enum HirExprKind {
     /// `EnumName::Variant` — a unit-variant enum value, represented as
     /// the i64 discriminant at runtime.
     EnumVariant { discriminant: u32 },
-    /// Payload-bearing enum variant construction: `Some(5)`. Codegen
-    /// heap-allocates a `{ tag, payload, rc }` descriptor. v0.x: single
-    /// payload only.
+    /// Payload-bearing enum variant construction:
+    /// `Some(5)` or `Pair(1, 2)`. Codegen heap-allocates a
+    /// `{ tag, payload[N], rc }` descriptor sized to the enum's max
+    /// variant arity.
     EnumPayloadCtor {
         enum_sym: SymbolId,
         discriminant: u32,
-        payload: Box<HirExpr>,
+        payloads: Vec<HirExpr>,
     },
     Unary { op: HirUnOp, expr: Box<HirExpr> },
     /// `expr as Ty` — numeric / char / bool conversion. The `from` type
@@ -227,14 +237,13 @@ pub enum HirPattern {
     BoolLit(bool),
     StrLit(String),
     EnumVariant { discriminant: u32 },
-    /// Tuple-variant destructure pattern like `Some(x)`. Matches if the
-    /// scrutinee's tag equals `discriminant`; binds the payload to
-    /// `binding` (None for `_`). v0.x supports single-field tuple
-    /// variants only.
+    /// Tuple-variant destructure pattern like `Some(x)` or
+    /// `Pair(a, b)`. Matches if the scrutinee's tag equals
+    /// `discriminant`; binds each payload position to the
+    /// corresponding entry in `bindings` (None for `_`).
     EnumPayload {
         discriminant: u32,
-        payload_ty: Ty,
-        binding: Option<SymbolId>,
+        bindings: Vec<(Ty, Option<SymbolId>)>,
     },
     /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). For integer and
     /// char scrutinees; chars are pre-converted to their codepoint by

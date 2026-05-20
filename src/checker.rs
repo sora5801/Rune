@@ -765,14 +765,6 @@ impl<'r> Checker<'r> {
             );
             return;
         }
-        // v0.x supports single-field tuple variants only.
-        if payloads.len() > 1 {
-            self.error(
-                span,
-                "multi-field tuple-variant destructuring not yet supported",
-            );
-            return;
-        }
         for (sub, pty) in fields.iter().zip(payloads.iter()) {
             self.check_pattern_matches(sub, pty);
         }

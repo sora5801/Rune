@@ -2099,6 +2099,63 @@ fn enum_payload_in_loop_arc_reclaims_descriptor() {
 }
 
 #[test]
+fn enum_multi_field_tuple_variant() {
+    let src = r#"
+        enum Pair { Both(i64, i64), Just(i64), None }
+        fn sum(p: Pair) -> i64 {
+            match p {
+                Pair::Both(a, b) => a + b,
+                Pair::Just(a) => a,
+                Pair::None => 0,
+            }
+        }
+        fn main() -> i64 {
+            sum(Pair::Both(3, 4)) + sum(Pair::Just(7)) + sum(Pair::None)
+        }
+    "#;
+    assert_eq!(run_main(src), 14);
+}
+
+#[test]
+fn enum_three_field_variant() {
+    let src = r#"
+        enum Triple { T(i64, i64, i64), Empty }
+        fn third(t: Triple) -> i64 {
+            match t {
+                Triple::T(_, _, c) => c,
+                Triple::Empty => -1,
+            }
+        }
+        fn main() -> i64 {
+            third(Triple::T(1, 2, 3)) + third(Triple::Empty)
+        }
+    "#;
+    // 3 + (-1) = 2
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn enum_payload_vec_released_on_drop() {
+    // The Some descriptor holds a Vec. When the Some drops, the
+    // synthesized enum-release function releases the Vec too — no
+    // leak. 100k iterations stay RSS-flat.
+    let src = r#"
+        enum Opt { Some(Vec), None }
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let v = vec_new();
+                v.push(i);
+                let o = Opt::Some(v);
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
+}
+
+#[test]
 fn enum_exhaustive_with_payload_destructure() {
     let src = r#"
         enum Either { Left(i64), Right(i64) }
@@ -2153,6 +2210,25 @@ fn struct_returned_by_value_with_arc_field() {
     "#;
     // 10 + 11 + 10 = 31
     assert_eq!(run_main(src), 31);
+}
+
+#[test]
+fn struct_descriptor_arc_in_loop() {
+    // Verifies the struct's heap descriptor is dealloc'd at scope
+    // exit (rc hits 0). 100k iterations stay RSS-flat — previously
+    // each iteration leaked the descriptor bytes.
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let p = Point { x: i, y: i };
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
 }
 
 #[test]
