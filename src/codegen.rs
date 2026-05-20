@@ -1957,7 +1957,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let recv = self
             .compile_expr(receiver)?
             .ok_or_else(|| CodegenError("field-access receiver produced no value".into()))?;
-        let cty = cranelift_type(field_ty)?;
+        // Generic struct fields can have a TypeVar layout — the
+        // monomorphizer only specializes functions, not structs.
+        // Treat unresolved TypeVar fields as i64 since v0.x uses
+        // 8-byte-per-field padding and most concrete instantiations
+        // (Vec, Str, Struct, Enum pointers, i64) are i64-shaped.
+        let cty = match field_ty {
+            Ty::TypeVar(_) => types::I64,
+            _ => cranelift_type(field_ty)?,
+        };
         let val = self
             .builder
             .ins()
@@ -1978,7 +1986,10 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let val = self
             .compile_expr(rhs)?
             .ok_or_else(|| CodegenError("field-assign rhs produced no value".into()))?;
-        let fcty = cranelift_type(field_ty)?;
+        let fcty = match field_ty {
+            Ty::TypeVar(_) => types::I64,
+            _ => cranelift_type(field_ty)?,
+        };
         // ARC field assignment: release the old field value, retain the
         // new one if it's a borrowed Local read. Same retain rule as
         // let / Assign.

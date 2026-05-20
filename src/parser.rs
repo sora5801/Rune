@@ -446,6 +446,32 @@ impl Parser {
                         let s = Span::new(start, rp.span.end);
                         return Ok(Pattern::TupleVariant { path, fields, span: s });
                     }
+                    // Named-variant destructure: `Variant { name: pat, ... }`
+                    // or `Variant { name }` (shorthand binding).
+                    if self.eat(&TokenKind::LBrace) {
+                        let mut fields: Vec<(Ident, Pattern)> = Vec::new();
+                        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+                            let name = self.expect_ident()?;
+                            let pat = if self.eat(&TokenKind::Colon) {
+                                self.parse_pattern()?
+                            } else {
+                                // Shorthand: `Variant { x }` binds `x`.
+                                let s = name.span;
+                                Pattern::Ident {
+                                    name: name.clone(),
+                                    mutable: false,
+                                    span: s,
+                                }
+                            };
+                            fields.push((name, pat));
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        let rb = self.expect(&TokenKind::RBrace, "`}`")?;
+                        let s = Span::new(start, rb.span.end);
+                        return Ok(Pattern::NamedVariant { path, fields, span: s });
+                    }
                     Ok(Pattern::Path { path, span: path_span })
                 } else {
                     let s = first.span;

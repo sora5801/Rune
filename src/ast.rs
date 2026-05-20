@@ -170,10 +170,13 @@ pub enum Pattern {
     /// `EnumName::Variant`, matched against the scrutinee's discriminant.
     Path { path: Path, span: Span },
     /// `EnumName::Variant(sub_pat, ...)` — destructures a payload-
-    /// bearing enum variant. v0.x supports single-field destructuring
-    /// only; the parser still records the field list to keep room for
-    /// future multi-field support.
+    /// bearing tuple variant. Multi-field is supported.
     TupleVariant { path: Path, fields: Vec<Pattern>, span: Span },
+    /// `EnumName::Variant { name: pat, ... }` — destructures a named-
+    /// field enum variant. Fields may appear in any order; the
+    /// lowerer reorders them into declaration order before emitting
+    /// `HirPattern::EnumPayload`.
+    NamedVariant { path: Path, fields: Vec<(Ident, Pattern)>, span: Span },
     /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). Bounds are
     /// literals (integer or char) parsed as `Lit`; the checker rejects
     /// non-integer/char bounds and ranges where `lo > hi`.
@@ -191,6 +194,7 @@ impl Pattern {
             Pattern::Literal { span, .. } => *span,
             Pattern::Path { span, .. } => *span,
             Pattern::TupleVariant { span, .. } => *span,
+            Pattern::NamedVariant { span, .. } => *span,
             Pattern::Range { span, .. } => *span,
             Pattern::Or { span, .. } => *span,
         }

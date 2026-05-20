@@ -157,10 +157,16 @@ impl<'a> Lowerer<'a> {
             .and_then(|t| self.check.type_resolutions.get(&t.span()).cloned())
             .unwrap_or(Ty::Unit);
         let body = self.lower_block(&f.body);
-        // Use the resolver's symbol name — mangled for impl methods,
-        // unchanged for top-level fns. This is the Cranelift-visible name.
         let name = self.res.symbol(sym).name.clone();
-        HirFn { sym, name, params, ret_ty, body }
+        // Collect the function's generic-param symbols so the
+        // monomorphizer can detect "is this fn generic?" and identify
+        // which TypeVar(s) to substitute.
+        let generics: Vec<SymbolId> = f
+            .generics
+            .iter()
+            .filter_map(|g| self.res.decl_to_sym.get(&g.span).copied())
+            .collect();
+        HirFn { sym, name, generics, params, ret_ty, body }
     }
 
     fn lower_block(&self, b: &ast::Block) -> HirBlock {
@@ -197,6 +203,7 @@ impl<'a> Lowerer<'a> {
             | ast::Pattern::Path { .. }
             | ast::Pattern::Range { .. }
             | ast::Pattern::TupleVariant { .. }
+            | ast::Pattern::NamedVariant { .. }
             | ast::Pattern::Or { .. } => {
                 // `let` doesn't currently use any of these patterns;
                 // resolver / checker either accept them as no-ops or
@@ -474,6 +481,38 @@ impl<'a> Lowerer<'a> {
         let Some(&sym_id) = self.res.path_to_sym.get(&path.span) else {
             return HirExprKind::Unsupported("unresolved struct in literal".into());
         };
+        // Named-field enum variant construction: `Variant { name: val }`
+        // resolves to an EnumVariant symbol. Reorder the user-provided
+        // fields into declaration order and emit EnumPayloadCtor.
+        if let SymbolKind::EnumVariant { enum_sym, discriminant } =
+            self.res.symbol(sym_id).kind
+        {
+            let decl_names = self
+                .res
+                .enum_variant_field_names
+                .get(&sym_id)
+                .cloned()
+                .unwrap_or_default();
+            let mut payloads: Vec<HirExpr> = Vec::with_capacity(decl_names.len());
+            for decl_name in &decl_names {
+                if let Some(init) = fields.iter().find(|f| f.name.name == *decl_name) {
+                    payloads.push(self.lower_expr(&init.value));
+                } else {
+                    payloads.push(HirExpr {
+                        kind: HirExprKind::Unsupported(format!(
+                            "missing field `{}` (caught by checker)",
+                            decl_name
+                        )),
+                        ty: Ty::Error,
+                    });
+                }
+            }
+            return HirExprKind::EnumPayloadCtor {
+                enum_sym,
+                discriminant,
+                payloads,
+            };
+        }
         let Some(layout) = self.check.struct_layouts.get(&sym_id) else {
             return HirExprKind::Unsupported("struct without a layout".into());
         };
@@ -589,6 +628,55 @@ impl<'a> Lowerer<'a> {
                     inclusive: *inclusive,
                 });
             }
+            ast::Pattern::NamedVariant { path, fields, .. } => {
+                let Some(&sid) = self.res.path_to_sym.get(&path.span) else {
+                    return Err("named-variant pattern didn't resolve".into());
+                };
+                let SymbolKind::EnumVariant { discriminant, .. } =
+                    self.res.symbol(sid).kind
+                else {
+                    return Err(
+                        "named-variant pattern path is not an enum variant".into(),
+                    );
+                };
+                let decl_names = self
+                    .res
+                    .enum_variant_field_names
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default();
+                let payload_asts = self
+                    .res
+                    .enum_variant_payloads
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut bindings: Vec<(Ty, Option<SymbolId>)> =
+                    Vec::with_capacity(decl_names.len());
+                for (i, decl_name) in decl_names.iter().enumerate() {
+                    let payload_ty = self
+                        .check
+                        .type_resolutions
+                        .get(&payload_asts[i].span())
+                        .cloned()
+                        .unwrap_or(Ty::Error);
+                    let binding = match fields.iter().find(|(n, _)| &n.name == decl_name) {
+                        Some((_, ast::Pattern::Wildcard(_))) => None,
+                        Some((_, ast::Pattern::Ident { name, .. })) => {
+                            self.res.decl_to_sym.get(&name.span).copied()
+                        }
+                        Some(_) => {
+                            return Err(
+                                "named-variant payload must be an identifier or `_`"
+                                    .into(),
+                            );
+                        }
+                        None => None,
+                    };
+                    bindings.push((payload_ty, binding));
+                }
+                out.push(HirPattern::EnumPayload { discriminant, bindings });
+            }
             ast::Pattern::TupleVariant { path, fields, .. } => {
                 let Some(&sid) = self.res.path_to_sym.get(&path.span) else {
                     return Err("tuple-variant pattern didn't resolve".into());
@@ -661,6 +749,7 @@ impl<'a> Lowerer<'a> {
             | ast::Pattern::Path { .. }
             | ast::Pattern::Range { .. }
             | ast::Pattern::TupleVariant { .. }
+            | ast::Pattern::NamedVariant { .. }
             | ast::Pattern::Or { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),

@@ -42,6 +42,11 @@ pub enum HirItem {
 pub struct HirFn {
     pub sym: SymbolId,
     pub name: String,
+    /// Generic type parameters declared on this function. Empty for
+    /// non-generic and for specialized functions produced by
+    /// monomorphization. Their referent symbols are used as keys for
+    /// type substitution.
+    pub generics: Vec<SymbolId>,
     pub params: Vec<HirParam>,
     pub ret_ty: Ty,
     pub body: HirBlock,

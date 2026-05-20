@@ -63,9 +63,10 @@ rune: linked with clang -> primes.exe
   and ranges (`lo..hi`, `lo..=hi`)
 - Types: paths with optional generic args (`Vec<i64>`, `Result<i64,
   str>`)
-- Generic type parameters on `fn`/`struct`/`enum` items (declaration
-  only — calling a generic function requires monomorphization,
-  which is generics step 2)
+- Generic type parameters on `fn`/`struct`/`enum` items. Generic
+  functions are monomorphized per concrete instantiation
+  (`id$$i64`, `pair$$i64$$str`). Generic structs work for
+  i64-shaped fields; full generic struct types are still a follow-up.
 - Error recovery at item-starting keywords
 - 47 integration tests
 
@@ -151,8 +152,9 @@ rune: linked with clang -> primes.exe
     `{ tag, payload[max_arity], rc }` descriptor sized to its max
     variant arity. ARC-managed: per-enum synthesized release walks
     the active variant's ARC payloads on drop. Multi-field tuple
-    variants work; named-field variants
-    (`Ok { value: T }`) are still parser-only.
+    variants work; named-field variants (`Ok { value: T }`) work
+    with field-by-name construction (`Variant { name: val }`) and
+    destructure (`Variant { name }` / `Variant { name: pat }`).
     Full **`match`** support: literal/path/wildcard/ident patterns,
     **tuple-variant destructure** (`Some(x) => ...`),
     **or-patterns** (`A | B | C => ...`), **range patterns**
@@ -174,7 +176,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 159 JIT codegen tests + 34 AOT tests.
+- 167 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -191,21 +193,20 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** `?` (try), calling generic functions (parser
-accepts the declaration but monomorphization is step 2), named-field
-enum variants, returning/passing arrays across function boundaries.
-Most emit `Unsupported(msg)` at lowering with a clear error if
-reached.
+**Not yet codegen'd:** `?` (try), full generic struct types
+(passing `Box<i64>` to `unbox<T>` doesn't infer T yet),
+returning/passing arrays across function boundaries. Most emit
+`Unsupported(msg)` at lowering with a clear error if reached.
 
 ## Roadmap
 
-1. Named-field enum variants (small extension to multi-field tuple
-   variant infra)
-2. Generics step 2 (monomorphization) so `Vec<T>`, `Option<T>`,
-   `Result<T, E>` become first-class
-3. `Weak<T>` for cycle breaking (blocked on step 2)
-4. Traits / interfaces
-5. Self-hosted bootstrap (long-term)
+1. Full generic struct/enum types — embed type args in `Ty::Struct`
+   and `Ty::Enum` so generic struct fields and `Option<T>` /
+   `Result<T, E>` work end-to-end
+2. `Weak<T>` for cycle breaking (now unblocked once `Option<T>`
+   works)
+3. Traits / interfaces for bounded generics (`T: Display`)
+4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

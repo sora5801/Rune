@@ -144,7 +144,8 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
+    let mut hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
+    rune::monomorphize_module(&mut hir);
     let mut cg = match Codegen::new_jit() {
         Ok(c) => c,
         Err(e) => {
@@ -205,6 +206,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     }
 
     let mut hir = Lowerer::new(&resolutions, &check_results).lower_module(&module);
+    rune::monomorphize_module(&mut hir);
 
     let module_name = Path::new(&input_path)
         .file_stem()

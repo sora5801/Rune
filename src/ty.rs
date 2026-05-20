@@ -40,7 +40,7 @@ impl FloatTy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Bool,
     Char,
@@ -91,8 +91,17 @@ impl Ty {
 
     /// `self` can flow into a context expecting `other` (or vice versa).
     /// `Error` and `Never` are always compatible to suppress cascade errors.
+    /// `TypeVar` is opaque — it's compatible with anything, since the
+    /// monomorphizer will resolve it to a concrete type later. This is
+    /// a coarse rule but suffices for v0.x without trait constraints.
     pub fn compatible(&self, other: &Ty) -> bool {
-        self.is_error() || other.is_error() || self.is_never() || other.is_never() || self == other
+        self.is_error()
+            || other.is_error()
+            || self.is_never()
+            || other.is_never()
+            || matches!(self, Ty::TypeVar(_))
+            || matches!(other, Ty::TypeVar(_))
+            || self == other
     }
 
     /// Unify two branch types into one (used for `if`/`else`, `match` arms).

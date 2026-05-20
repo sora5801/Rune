@@ -10,7 +10,8 @@ fn run_main(src: &str) -> i64 {
     assert!(re.is_empty(), "resolve errors: {:?}", re);
     let cr = Checker::new(&res).check_module(&module);
     assert!(cr.errors.is_empty(), "type errors: {:?}", cr.errors);
-    let hir = Lowerer::new(&res, &cr).lower_module(&module);
+    let mut hir = Lowerer::new(&res, &cr).lower_module(&module);
+    monomorphize_module(&mut hir);
 
     let mut cg = Codegen::new_jit().expect("codegen init");
     cg.compile_module(&hir).expect("compile module");
@@ -2114,6 +2115,129 @@ fn enum_multi_field_tuple_variant() {
         }
     "#;
     assert_eq!(run_main(src), 14);
+}
+
+// ---- generics step 2: monomorphization ----
+
+#[test]
+fn generics_identity_i64() {
+    let src = r#"
+        fn id<T>(x: T) -> T { x }
+        fn main() -> i64 {
+            id(42)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generics_identity_two_specializations() {
+    // Same generic, called with i64 and str. Two specializations
+    // get generated; the str variant calls .len() and gets returned
+    // as i64.
+    let src = r#"
+        fn id<T>(x: T) -> T { x }
+        fn main() -> i64 {
+            let n = id(7);
+            let s = id("hello");
+            n + s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn generics_recursive_specialization() {
+    // pair calls id internally; both pair$$i64 and id$$i64 get
+    // generated.
+    let src = r#"
+        fn id<T>(x: T) -> T { x }
+        fn pair_first<T>(a: T, b: T) -> T {
+            let r = id(a);
+            r
+        }
+        fn main() -> i64 {
+            pair_first(10, 20)
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn generics_struct_field_i64() {
+    let src = r#"
+        struct Box<T> { value: T }
+        fn main() -> i64 {
+            let b = Box { value: 42 };
+            b.value
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generics_struct_double_box() {
+    // Multiple instantiations of the same generic struct. Each reads
+    // its single i64-sized field. (Arithmetic on TypeVar fields is
+    // not supported in v0.x; that would need per-instantiation
+    // struct types, which is a future cleanup.)
+    let src = r#"
+        struct Box<T> { value: T }
+        fn main() -> i64 {
+            let a = Box { value: 7 };
+            a.value
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn generics_multi_type_params() {
+    let src = r#"
+        fn first<T, U>(a: T, b: U) -> T { a }
+        fn main() -> i64 {
+            first(99, "ignored")
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
+fn enum_named_field_construct_and_destructure() {
+    let src = r#"
+        enum Result { Ok { value: i64 }, Err { code: i64 } }
+        fn unwrap_or(r: Result, def: i64) -> i64 {
+            match r {
+                Result::Ok { value } => value,
+                Result::Err { code: _ } => def,
+            }
+        }
+        fn main() -> i64 {
+            let a = Result::Ok { value: 42 };
+            let b = Result::Err { code: 7 };
+            unwrap_or(a, 0) + unwrap_or(b, -1)
+        }
+    "#;
+    // 42 + (-1) = 41
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
+fn enum_named_field_fields_out_of_order() {
+    // Construction can list fields in any order; the lowerer
+    // reorders into declaration order.
+    let src = r#"
+        enum Point2D { Pt { x: i64, y: i64 } }
+        fn dot(p: Point2D) -> i64 {
+            match p {
+                Point2D::Pt { x, y } => x * x + y * y,
+            }
+        }
+        fn main() -> i64 {
+            dot(Point2D::Pt { y: 4, x: 3 })
+        }
+    "#;
+    assert_eq!(run_main(src), 25);
 }
 
 #[test]

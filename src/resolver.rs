@@ -75,9 +75,15 @@ pub struct Resolutions {
     pub enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
     /// Payload types per variant (variant_sym → AST Types). Empty for
     /// unit variants. For tuple variants the payloads appear in
-    /// declaration order; named-field variants aren't supported yet
-    /// (parser accepts them but the resolver fails the codegen path).
+    /// declaration order; for named-field variants the types appear
+    /// in declaration order too, with names tracked separately in
+    /// `enum_variant_field_names`.
     pub enum_variant_payloads: HashMap<SymbolId, Vec<crate::ast::Type>>,
+    /// Field names per **named** variant, in declaration order.
+    /// Tuple and unit variants don't appear in this map. Used to
+    /// validate `Variant { name: val }` construction and
+    /// destructure patterns.
+    pub enum_variant_field_names: HashMap<SymbolId, Vec<String>>,
     /// Enums that have at least one payload-bearing variant. These use
     /// a heap-allocated `{ tag, payload, rc }` descriptor at runtime
     /// instead of the plain i64 discriminant used by tag-only enums.
@@ -116,6 +122,7 @@ pub struct Resolver {
     impl_methods: HashMap<(SymbolId, String), SymbolId>,
     enum_variants: HashMap<SymbolId, HashMap<String, SymbolId>>,
     enum_variant_payloads: HashMap<SymbolId, Vec<crate::ast::Type>>,
+    enum_variant_field_names: HashMap<SymbolId, Vec<String>>,
     enum_has_payload: std::collections::HashSet<SymbolId>,
     errors: Vec<ResolveError>,
 }
@@ -134,6 +141,7 @@ impl Resolver {
             impl_methods: HashMap::new(),
             enum_variants: HashMap::new(),
             enum_variant_payloads: HashMap::new(),
+            enum_variant_field_names: HashMap::new(),
             enum_has_payload: std::collections::HashSet::new(),
             errors: Vec::new(),
         };
@@ -165,6 +173,7 @@ impl Resolver {
                 impl_methods: self.impl_methods,
                 enum_variants: self.enum_variants,
                 enum_variant_payloads: self.enum_variant_payloads,
+                enum_variant_field_names: self.enum_variant_field_names,
                 enum_has_payload: self.enum_has_payload,
             },
             self.errors,
@@ -350,10 +359,19 @@ impl Resolver {
                         any_payload = any_payload || !tys.is_empty();
                         tys.clone()
                     }
-                    // Named-field variants aren't supported yet; record
-                    // empty so downstream sees them as Unit. The codegen
-                    // will fail with an Unsupported message if reached.
-                    crate::ast::VariantFields::Named(_) => Vec::new(),
+                    crate::ast::VariantFields::Named(fields) => {
+                        any_payload = any_payload || !fields.is_empty();
+                        // Track names in declaration order so the
+                        // checker / lowerer can reorder `Variant
+                        // { name: val, ... }` into positional form.
+                        let names: Vec<String> = fields
+                            .iter()
+                            .map(|f| f.name.name.clone())
+                            .collect();
+                        self.enum_variant_field_names
+                            .insert(variant_id, names);
+                        fields.iter().map(|f| f.ty.clone()).collect()
+                    }
                 };
                 self.enum_variant_payloads.insert(variant_id, payload_tys);
             }
@@ -493,6 +511,12 @@ impl Resolver {
                 // matches the variant's payload type.
                 self.resolve_path(path);
                 for sub in fields {
+                    self.declare_pattern(sub, mutable_let);
+                }
+            }
+            Pattern::NamedVariant { path, fields, .. } => {
+                self.resolve_path(path);
+                for (_, sub) in fields {
                     self.declare_pattern(sub, mutable_let);
                 }
             }

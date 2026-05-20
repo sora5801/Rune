@@ -492,10 +492,11 @@ impl<'r> Checker<'r> {
                 // literals or other ranges. A standalone `0..=10 => ...`
                 // still needs a `_` arm to be exhaustive.
             }
-            Pattern::TupleVariant { path, span: s, .. } => {
-                // A tuple-variant pattern covers exactly the same
-                // discriminant as the bare `EnumName::Variant` path —
-                // bindings inside don't change coverage.
+            Pattern::TupleVariant { path, span: s, .. }
+            | Pattern::NamedVariant { path, span: s, .. } => {
+                // A tuple/named-variant pattern covers exactly the
+                // same discriminant as the bare `EnumName::Variant`
+                // path — bindings inside don't change coverage.
                 if let Some(&sid) = self.res.path_to_sym.get(&path.span) {
                     if let SymbolKind::EnumVariant { discriminant, .. } =
                         self.res.symbol(sid).kind
@@ -579,6 +580,9 @@ impl<'r> Checker<'r> {
             }
             Pattern::TupleVariant { path, fields, span } => {
                 self.check_tuple_variant_pattern(path, fields, *span, scrutinee_ty);
+            }
+            Pattern::NamedVariant { path, fields, span } => {
+                self.check_named_variant_pattern(path, fields, *span, scrutinee_ty);
             }
             Pattern::Or { patterns, span } => {
                 // Reject Bind patterns inside an Or — alternatives would
@@ -697,10 +701,127 @@ impl<'r> Checker<'r> {
                     }
                 }
             }
+            Pattern::NamedVariant { path, fields, .. } => {
+                if let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) {
+                    let decl_names = self
+                        .res
+                        .enum_variant_field_names
+                        .get(&variant_sym)
+                        .cloned()
+                        .unwrap_or_default();
+                    let payloads: Vec<Ty> = self
+                        .res
+                        .enum_variant_payloads
+                        .get(&variant_sym)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|t| self.resolve_type(t))
+                        .collect();
+                    for (name, sub) in fields {
+                        if let Some(idx) =
+                            decl_names.iter().position(|n| n == &name.name)
+                        {
+                            if let Some(pty) = payloads.get(idx) {
+                                self.bind_pattern(sub, pty);
+                            }
+                        }
+                    }
+                }
+            }
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.bind_pattern(sub, ty);
                 }
+            }
+        }
+    }
+
+    fn check_named_variant_pattern(
+        &mut self,
+        path: &Path,
+        fields: &[(Ident, Pattern)],
+        span: Span,
+        scrutinee_ty: &Ty,
+    ) {
+        let Some(&variant_sym) = self.res.path_to_sym.get(&path.span) else {
+            return;
+        };
+        let SymbolKind::EnumVariant { enum_sym, .. } =
+            self.res.symbol(variant_sym).kind.clone()
+        else {
+            self.error(span, "named-variant pattern path is not an enum variant");
+            return;
+        };
+        let enum_ty = Ty::Enum(enum_sym);
+        if !scrutinee_ty.is_error() && !enum_ty.compatible(scrutinee_ty) {
+            self.error(
+                span,
+                format!(
+                    "pattern matches `{}` but scrutinee is `{}`",
+                    enum_ty.display(),
+                    scrutinee_ty.display()
+                ),
+            );
+            return;
+        }
+        let Some(decl_names) = self
+            .res
+            .enum_variant_field_names
+            .get(&variant_sym)
+            .cloned()
+        else {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` is not a struct-style variant",
+                    self.res.symbol(variant_sym).name
+                ),
+            );
+            return;
+        };
+        let decl_tys: Vec<Ty> = self
+            .res
+            .enum_variant_payloads
+            .get(&variant_sym)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|t| self.resolve_type(t))
+            .collect();
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for (name, sub) in fields {
+            if !seen.insert(&name.name) {
+                self.error(
+                    name.span,
+                    format!("duplicate field `{}` in pattern", name.name),
+                );
+                continue;
+            }
+            let Some(idx) = decl_names.iter().position(|n| n == &name.name) else {
+                self.error(
+                    name.span,
+                    format!(
+                        "no field `{}` on variant `{}`",
+                        name.name,
+                        self.res.symbol(variant_sym).name
+                    ),
+                );
+                continue;
+            };
+            self.check_pattern_matches(sub, &decl_tys[idx]);
+        }
+        for decl in &decl_names {
+            if !seen.contains(decl.as_str()) {
+                self.error(
+                    span,
+                    format!(
+                        "missing field `{}` in pattern for variant `{}`",
+                        decl,
+                        self.res.symbol(variant_sym).name
+                    ),
+                );
             }
         }
     }
@@ -1197,7 +1318,15 @@ impl<'r> Checker<'r> {
                     );
                     return *ret;
                 }
+                // Build a substitution from any TypeVar params to the
+                // concrete arg types so the call's apparent return type
+                // is the substituted one. This lets the lowerer see
+                // concrete types at the call site; the monomorphizer
+                // does the same inference to find the specialization.
+                let mut subst: std::collections::HashMap<SymbolId, Ty> =
+                    std::collections::HashMap::new();
                 for (i, (param_ty, arg_ty)) in params.iter().zip(&arg_tys).enumerate() {
+                    unify_typevars(param_ty, arg_ty, &mut subst);
                     if !arg_ty.compatible(param_ty) {
                         self.error(
                             args[i].span(),
@@ -1210,7 +1339,7 @@ impl<'r> Checker<'r> {
                         );
                     }
                 }
-                *ret
+                apply_subst(&ret, &subst)
             }
             Ty::Error => Ty::Error,
             other => {
@@ -1279,6 +1408,108 @@ impl<'r> Checker<'r> {
         Ty::Enum(enum_sym)
     }
 
+    fn check_named_variant_lit(
+        &mut self,
+        variant_sym: SymbolId,
+        enum_sym: SymbolId,
+        path: &Path,
+        fields: &[FieldInit],
+        span: Span,
+    ) -> Ty {
+        let Some(decl_names) = self
+            .res
+            .enum_variant_field_names
+            .get(&variant_sym)
+            .cloned()
+        else {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` is not a struct-style variant — use `{}(...)` instead",
+                    self.res.symbol(variant_sym).name,
+                    self.res.symbol(variant_sym).name,
+                ),
+            );
+            return Ty::Enum(enum_sym);
+        };
+        let decl_tys: Vec<Ty> = self
+            .res
+            .enum_variant_payloads
+            .get(&variant_sym)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|t| self.resolve_type(t))
+            .collect();
+        if fields.len() != decl_names.len() {
+            self.error(
+                span,
+                format!(
+                    "variant `{}` has {} field{}, found {}",
+                    self.res.symbol(variant_sym).name,
+                    decl_names.len(),
+                    if decl_names.len() == 1 { "" } else { "s" },
+                    fields.len()
+                ),
+            );
+        }
+        // Each value's type must match the declared field's type by
+        // matching on name. Unknown names → error. Missing/duplicate
+        // names → error.
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for fi in fields {
+            let name = &fi.name.name;
+            if !seen.insert(name) {
+                self.error(
+                    fi.name.span,
+                    format!("duplicate field `{}` in variant initializer", name),
+                );
+                self.check_expr(&fi.value);
+                continue;
+            }
+            let Some(idx) = decl_names.iter().position(|n| n == name) else {
+                self.error(
+                    fi.name.span,
+                    format!(
+                        "no field `{}` on variant `{}`",
+                        name,
+                        self.res.symbol(variant_sym).name
+                    ),
+                );
+                self.check_expr(&fi.value);
+                continue;
+            };
+            let expected = &decl_tys[idx];
+            let actual = self.check_expr(&fi.value);
+            if !actual.compatible(expected) {
+                self.error(
+                    fi.value.span(),
+                    format!(
+                        "field `{}` has type `{}`, expected `{}`",
+                        name,
+                        actual.display(),
+                        expected.display()
+                    ),
+                );
+            }
+        }
+        // Missing fields.
+        for decl in &decl_names {
+            if !seen.contains(decl.as_str()) {
+                self.error(
+                    path.span,
+                    format!(
+                        "missing field `{}` for variant `{}`",
+                        decl,
+                        self.res.symbol(variant_sym).name
+                    ),
+                );
+            }
+        }
+        Ty::Enum(enum_sym)
+    }
+
     /// Look up a method declared in an `impl` block on a struct type.
     /// Returns the method's externally-visible signature (without the
     /// `self` parameter).
@@ -1302,6 +1533,13 @@ impl<'r> Checker<'r> {
         };
         let sym_kind = self.res.symbol(sym_id).kind.clone();
         let sym_name = self.res.symbol(sym_id).name.clone();
+        // Dispatch named-field enum variant construction here too:
+        // `Variant { name: val, ... }` parses as Expr::StructLit and
+        // resolves to a variant symbol. Reuse the variant-call path
+        // for type checking.
+        if let SymbolKind::EnumVariant { enum_sym, .. } = sym_kind {
+            return self.check_named_variant_lit(sym_id, enum_sym, path, fields, span);
+        }
         if !matches!(sym_kind, SymbolKind::Struct) {
             self.error(
                 path.span,
@@ -1722,6 +1960,37 @@ impl<'r> Checker<'r> {
 }
 
 /// Types that `print` (the polymorphic builtin) currently supports.
+/// Minimal positional unification: every `TypeVar(t)` on the param
+/// side binds `t` to the corresponding concrete arg type. The
+/// substitution is shared across param positions so a `T` used twice
+/// must bind to the same concrete (the second occurrence overwrites,
+/// but the call site's compatibility check has already rejected
+/// mismatches).
+fn unify_typevars(
+    param: &Ty,
+    arg: &Ty,
+    subst: &mut std::collections::HashMap<SymbolId, Ty>,
+) {
+    match (param, arg) {
+        (Ty::TypeVar(t), concrete) => {
+            subst.insert(*t, concrete.clone());
+        }
+        _ => {}
+    }
+}
+
+fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
+    match ty {
+        Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Array(elem, n) => Ty::Array(Box::new(apply_subst(elem, subst)), *n),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params.iter().map(|t| apply_subst(t, subst)).collect(),
+            ret: Box::new(apply_subst(ret, subst)),
+        },
+        _ => ty.clone(),
+    }
+}
+
 fn is_printable(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Str)
 }
