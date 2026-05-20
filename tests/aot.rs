@@ -550,3 +550,21 @@ fn string_byte_index_out_of_bounds_aborts() {
     assert_ne!(code, 0);
     assert!(stderr.contains("out of range"));
 }
+
+// ---- match codegen ----
+
+#[test]
+fn aot_match_falls_through_to_panic() {
+    // No arm catches `n == 99` and there's no wildcard — should abort.
+    let src = r#"
+        fn main() -> i64 {
+            match 99 {
+                1 => 10,
+                2 => 20,
+            }
+        }
+    "#;
+    let (code, _stdout, stderr) = build_and_capture_full(src);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("no match"));
+}

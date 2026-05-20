@@ -156,6 +156,9 @@ pub enum Pattern {
     Wildcard(Span),
     Ident { name: Ident, mutable: bool, span: Span },
     Literal { lit: Lit, span: Span },
+    /// Multi-segment path used as a pattern — today's only shape is
+    /// `EnumName::Variant`, matched against the scrutinee's discriminant.
+    Path { path: Path, span: Span },
 }
 
 impl Pattern {
@@ -164,6 +167,7 @@ impl Pattern {
             Pattern::Wildcard(s) => *s,
             Pattern::Ident { span, .. } => *span,
             Pattern::Literal { span, .. } => *span,
+            Pattern::Path { span, .. } => *span,
         }
     }
 }

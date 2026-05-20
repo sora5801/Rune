@@ -1263,3 +1263,152 @@ fn free_in_loop_reclaims_steadily() {
     "#;
     assert_eq!(run_main(src), 1000);
 }
+
+// ---- match codegen ----
+
+#[test]
+fn match_int_literal() {
+    let src = r#"
+        fn label(n: i64) -> i64 {
+            match n {
+                1 => 10,
+                2 => 20,
+                3 => 30,
+                _ => 99,
+            }
+        }
+        fn main() -> i64 {
+            label(2)
+        }
+    "#;
+    assert_eq!(run_main(src), 20);
+}
+
+#[test]
+fn match_wildcard_catches_fallthrough() {
+    let src = r#"
+        fn label(n: i64) -> i64 {
+            match n {
+                0 => 100,
+                _ => 999,
+            }
+        }
+        fn main() -> i64 { label(42) }
+    "#;
+    assert_eq!(run_main(src), 999);
+}
+
+#[test]
+fn match_binding_pattern() {
+    let src = r#"
+        fn doubled(n: i64) -> i64 {
+            match n {
+                0 => 0,
+                x => x * 2,
+            }
+        }
+        fn main() -> i64 { doubled(21) }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn match_on_enum_variants() {
+    let src = r#"
+        enum Color { Red, Green, Blue }
+        fn label(c: Color) -> i64 {
+            match c {
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Blue => 3,
+            }
+        }
+        fn main() -> i64 {
+            label(Color::Green)
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn match_enum_with_wildcard() {
+    let src = r#"
+        enum Mode { On, Off, Idle }
+        fn is_active(m: Mode) -> bool {
+            match m {
+                Mode::On => true,
+                _ => false,
+            }
+        }
+        fn main() -> i64 {
+            if is_active(Mode::On) { 1 }
+            else if is_active(Mode::Off) { 2 }
+            else if is_active(Mode::Idle) { 3 }
+            else { 4 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn match_on_bool() {
+    let src = r#"
+        fn label(b: bool) -> i64 {
+            match b {
+                true => 1,
+                false => 0,
+            }
+        }
+        fn main() -> i64 { label(true) + label(false) }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn match_on_str() {
+    let src = r#"
+        fn classify(s: str) -> i64 {
+            match s {
+                "yes" => 1,
+                "no" => 0,
+                _ => -1,
+            }
+        }
+        fn main() -> i64 {
+            classify("yes") + classify("no") + classify("maybe")
+        }
+    "#;
+    assert_eq!(run_main(src), 0); // 1 + 0 + -1
+}
+
+#[test]
+fn match_as_statement_with_unit_arms() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut x = 0;
+            match 2 {
+                1 => { x = 1; }
+                2 => { x = 2; }
+                _ => { x = 99; }
+            }
+            x
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn match_in_expression_position() {
+    let src = r#"
+        fn main() -> i64 {
+            let n = 5;
+            let kind = match n {
+                0 => "zero",
+                1 => "one",
+                _ => "many",
+            };
+            if kind == "many" { 42 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}

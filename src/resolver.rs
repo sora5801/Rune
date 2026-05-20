@@ -432,6 +432,11 @@ impl Resolver {
                 self.decl_to_sym.insert(name.span, id);
             }
             Pattern::Literal { .. } => {}
+            Pattern::Path { path, .. } => {
+                // No binding — just resolve the path so the checker /
+                // lowerer can look up what variant it refers to.
+                self.resolve_path(path);
+            }
         }
     }
 

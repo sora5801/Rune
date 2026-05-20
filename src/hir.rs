@@ -156,6 +156,14 @@ pub enum HirExprKind {
         inclusive: bool,
         body: HirBlock,
     },
+    /// `match scrutinee { arm1, arm2, ..., _ => default }` — sequential
+    /// pattern-check chain. Any arm that ends a path without matching
+    /// jumps to a fallback that calls `rune_panic_no_match` (compile-time
+    /// exhaustiveness isn't checked yet).
+    Match {
+        scrutinee: Box<HirExpr>,
+        arms: Vec<HirMatchArm>,
+    },
     Return(Option<Box<HirExpr>>),
     /// Stub for features not yet handled in codegen. Lowering succeeds
     /// to allow inspection, codegen fails with the embedded message.
@@ -169,6 +177,25 @@ pub enum HirLit {
     Bool(bool),
     Str(String),
     Unit,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirMatchArm {
+    pub pattern: HirPattern,
+    pub body: HirExpr,
+}
+
+#[derive(Debug, Clone)]
+pub enum HirPattern {
+    /// `_` — always matches, no binding.
+    Wildcard,
+    /// Bare identifier — always matches; binds the scrutinee value to
+    /// the given symbol in the arm's body scope.
+    Bind(SymbolId),
+    IntLit(i64),
+    BoolLit(bool),
+    StrLit(String),
+    EnumVariant { discriminant: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

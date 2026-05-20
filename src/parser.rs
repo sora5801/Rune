@@ -348,9 +348,22 @@ impl Parser {
                 Ok(Pattern::Ident { name: id, mutable: true, span: full })
             }
             TokenKind::Ident(_) => {
-                let id = self.expect_ident()?;
-                let s = id.span;
-                Ok(Pattern::Ident { name: id, mutable: false, span: s })
+                let first = self.expect_ident()?;
+                if self.check(&TokenKind::ColonColon) {
+                    // Multi-segment path pattern, e.g. `Color::Red`.
+                    let start = first.span.start;
+                    let mut segments = vec![first];
+                    while self.eat(&TokenKind::ColonColon) {
+                        segments.push(self.expect_ident()?);
+                    }
+                    let end = segments.last().unwrap().span.end;
+                    let s = Span::new(start, end);
+                    let path = Path { segments, span: s };
+                    Ok(Pattern::Path { path, span: s })
+                } else {
+                    let s = first.span;
+                    Ok(Pattern::Ident { name: first, mutable: false, span: s })
+                }
             }
             TokenKind::Int(_)
             | TokenKind::Float(_)

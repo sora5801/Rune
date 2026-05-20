@@ -149,6 +149,11 @@ void rune_free_vec(struct rune_vec* v) {
     if (v->ptr != NULL) free(v->ptr);
     free(v);
 }
+
+void rune_panic_no_match(void) {
+    fprintf(stderr, "rune: no match arm matched\n");
+    exit(1);
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

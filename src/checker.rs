@@ -301,6 +301,58 @@ impl<'r> Checker<'r> {
         self.bind_pattern(&l.pat, &final_ty);
     }
 
+    /// Validates that a pattern is compatible with a scrutinee type.
+    /// Wildcard and Ident patterns always match. Literal patterns must
+    /// have the right type. Path patterns must resolve to a variant of
+    /// the scrutinee's enum.
+    fn check_pattern_matches(&mut self, pat: &Pattern, scrutinee_ty: &Ty) {
+        match pat {
+            Pattern::Wildcard(_) | Pattern::Ident { .. } => {}
+            Pattern::Literal { lit, span } => {
+                let pat_ty = self.lit_type(lit);
+                if !scrutinee_ty.is_error() && !pat_ty.compatible(scrutinee_ty) {
+                    self.error(
+                        *span,
+                        format!(
+                            "pattern type `{}` doesn't match scrutinee type `{}`",
+                            pat_ty.display(),
+                            scrutinee_ty.display()
+                        ),
+                    );
+                }
+            }
+            Pattern::Path { path, span } => {
+                let Some(&sym_id) = self.res.path_to_sym.get(&path.span) else {
+                    return; // resolver already complained
+                };
+                let kind = self.res.symbol(sym_id).kind.clone();
+                match kind {
+                    SymbolKind::EnumVariant { enum_sym, .. } => {
+                        let pat_ty = Ty::Enum(enum_sym);
+                        if !scrutinee_ty.is_error()
+                            && !pat_ty.compatible(scrutinee_ty)
+                        {
+                            self.error(
+                                *span,
+                                format!(
+                                    "pattern matches `{}` but scrutinee is `{}`",
+                                    pat_ty.display(),
+                                    scrutinee_ty.display()
+                                ),
+                            );
+                        }
+                    }
+                    _ => {
+                        self.error(
+                            *span,
+                            "pattern path must resolve to an enum variant".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn bind_pattern(&mut self, p: &Pattern, ty: &Ty) {
         match p {
             Pattern::Wildcard(_) => {}
@@ -308,6 +360,11 @@ impl<'r> Checker<'r> {
                 self.local_types.insert(name.span, ty.clone());
             }
             Pattern::Literal { .. } => {}
+            Pattern::Path { .. } => {
+                // Path patterns don't bind. The match/let context is
+                // responsible for validating the variant against the
+                // scrutinee type.
+            }
         }
     }
 
@@ -1160,6 +1217,7 @@ impl<'r> Checker<'r> {
         let st = self.check_expr(scrutinee);
         let mut result_ty: Option<Ty> = None;
         for arm in arms {
+            self.check_pattern_matches(&arm.pat, &st);
             self.bind_pattern(&arm.pat, &st);
             if let Some(g) = &arm.guard {
                 let gt = self.check_expr(g);

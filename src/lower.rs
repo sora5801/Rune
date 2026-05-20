@@ -95,7 +95,12 @@ impl<'a> Lowerer<'a> {
                 let s = self.res.decl_to_sym.get(&name.span).copied();
                 (s, l.mutable || *pat_mut)
             }
-            ast::Pattern::Literal { .. } => (None, l.mutable),
+            ast::Pattern::Literal { .. } | ast::Pattern::Path { .. } => {
+                // `let` doesn't currently use path/literal patterns — the
+                // resolver and checker either accept them as no-ops or
+                // reject them. No binding here.
+                (None, l.mutable)
+            }
         };
         let ty = sym
             .and_then(|s| self.check.local_types.get(&self.res.symbol(s).span).cloned())
@@ -301,7 +306,7 @@ impl<'a> Lowerer<'a> {
                 HirExprKind::Array { elems: lowered, elem_ty }
             }
             ast::Expr::For { pat, iter, body, .. } => self.lower_for(pat, iter, body),
-            ast::Expr::Match { .. } => HirExprKind::Unsupported("match expressions".into()),
+            ast::Expr::Match { scrutinee, arms, .. } => self.lower_match(scrutinee, arms),
             ast::Expr::Range { .. } => HirExprKind::Unsupported(
                 "range expressions are only supported inside string slicing (e.g. `s[a..b]`)"
                     .into(),
@@ -401,6 +406,65 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn lower_match(
+        &self,
+        scrutinee: &ast::Expr,
+        arms: &[ast::MatchArm],
+    ) -> HirExprKind {
+        let scrutinee_h = self.lower_expr(scrutinee);
+        let mut hir_arms: Vec<HirMatchArm> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            // Guards aren't supported yet.
+            if arm.guard.is_some() {
+                return HirExprKind::Unsupported("match arm guards".into());
+            }
+            let pattern = match &arm.pat {
+                ast::Pattern::Wildcard(_) => HirPattern::Wildcard,
+                ast::Pattern::Ident { name, .. } => {
+                    let Some(&sid) = self.res.decl_to_sym.get(&name.span) else {
+                        return HirExprKind::Unsupported(
+                            "match ident pattern lost its binding".into(),
+                        );
+                    };
+                    HirPattern::Bind(sid)
+                }
+                ast::Pattern::Literal { lit, .. } => match lit {
+                    ast::Lit::Int(v) => HirPattern::IntLit(*v),
+                    ast::Lit::Bool(b) => HirPattern::BoolLit(*b),
+                    ast::Lit::Str(s) => HirPattern::StrLit(s.clone()),
+                    _ => {
+                        return HirExprKind::Unsupported(
+                            "match on this literal kind".into(),
+                        );
+                    }
+                },
+                ast::Pattern::Path { path, .. } => {
+                    let Some(&sid) = self.res.path_to_sym.get(&path.span) else {
+                        return HirExprKind::Unsupported(
+                            "match path pattern didn't resolve".into(),
+                        );
+                    };
+                    match self.res.symbol(sid).kind {
+                        SymbolKind::EnumVariant { discriminant, .. } => {
+                            HirPattern::EnumVariant { discriminant }
+                        }
+                        _ => {
+                            return HirExprKind::Unsupported(
+                                "match path didn't resolve to an enum variant".into(),
+                            );
+                        }
+                    }
+                }
+            };
+            let body = self.lower_expr(&arm.body);
+            hir_arms.push(HirMatchArm { pattern, body });
+        }
+        HirExprKind::Match {
+            scrutinee: Box::new(scrutinee_h),
+            arms: hir_arms,
+        }
+    }
+
     fn lower_for(
         &self,
         pat: &ast::Pattern,
@@ -410,7 +474,7 @@ impl<'a> Lowerer<'a> {
         let local = match pat {
             ast::Pattern::Wildcard(_) => None,
             ast::Pattern::Ident { name, .. } => self.res.decl_to_sym.get(&name.span).copied(),
-            ast::Pattern::Literal { .. } => {
+            ast::Pattern::Literal { .. } | ast::Pattern::Path { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),
                 );

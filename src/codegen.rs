@@ -232,6 +232,14 @@ extern "C" fn rune_runtime_panic_bounds(idx: i64, len: i64) -> ! {
     std::process::exit(1);
 }
 
+/// Called when a `match` expression's sequential pattern check falls
+/// off the end without any arm matching. v0.x doesn't enforce
+/// exhaustiveness statically, so this is the runtime backstop.
+extern "C" fn rune_runtime_panic_no_match() -> ! {
+    eprintln!("rune: no match arm matched");
+    std::process::exit(1);
+}
+
 /// Reclaims a heap-allocated string descriptor + its bytes. Pairs with
 /// `rune_str_concat` and `rune_str_slice` — calling it on a literal
 /// string is undefined behavior (the bytes live in `.rodata`).
@@ -436,6 +444,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_vec_get", rune_runtime_vec_get as *const u8);
         builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
         builder.symbol("rune_panic_bounds", rune_runtime_panic_bounds as *const u8);
+        builder.symbol("rune_panic_no_match", rune_runtime_panic_no_match as *const u8);
         builder.symbol("rune_free_str", rune_runtime_free_str as *const u8);
         builder.symbol("rune_free_vec", rune_runtime_free_vec as *const u8);
         let module = JITModule::new(builder);
@@ -726,6 +735,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 self.compile_if(cond, then_b, else_b.as_deref(), &e.ty)
             }
             HirExprKind::While { cond, body } => self.compile_while(cond, body),
+            HirExprKind::Match { scrutinee, arms } => {
+                self.compile_match(scrutinee, arms, &e.ty)
+            }
             HirExprKind::Return(value) => {
                 let vals = if let Some(v) = value {
                     let val = self
@@ -1453,6 +1465,141 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         Ok(None)
     }
 
+    fn compile_match(
+        &mut self,
+        scrutinee: &HirExpr,
+        arms: &[HirMatchArm],
+        result_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let scrutinee_val = self
+            .compile_expr(scrutinee)?
+            .ok_or_else(|| CodegenError("match scrutinee produced no value".into()))?;
+
+        let merge_blk = self.builder.create_block();
+        let produces_value = !matches!(result_ty, Ty::Unit | Ty::Never);
+        if produces_value {
+            let cty = cranelift_type(result_ty)?;
+            self.builder.append_block_param(merge_blk, cty);
+        }
+
+        // Pre-create a "next check" block for each arm boundary, plus a
+        // fallback block past the last arm.
+        let mut next_blks: Vec<Block> = Vec::with_capacity(arms.len() + 1);
+        for _ in 0..=arms.len() {
+            next_blks.push(self.builder.create_block());
+        }
+
+        // The first check block is the current location — jump to it.
+        self.builder.ins().jump(next_blks[0], &[]);
+
+        for (i, arm) in arms.iter().enumerate() {
+            let check_blk = next_blks[i];
+            let next_blk = next_blks[i + 1];
+            let body_blk = self.builder.create_block();
+
+            self.builder.switch_to_block(check_blk);
+            self.builder.seal_block(check_blk);
+            self.compile_pattern_check(
+                &arm.pattern,
+                scrutinee_val,
+                &scrutinee.ty,
+                body_blk,
+                next_blk,
+            )?;
+
+            // Body
+            self.builder.switch_to_block(body_blk);
+            self.builder.seal_block(body_blk);
+            if let HirPattern::Bind(sym) = &arm.pattern {
+                let var = self.alloc_var();
+                let cty = cranelift_type(&scrutinee.ty)?;
+                self.builder.declare_var(var, cty);
+                self.builder.def_var(var, scrutinee_val);
+                self.var_map.insert(*sym, var);
+            }
+            let body_val = self.compile_expr(&arm.body)?;
+            if !self.is_filled() {
+                if produces_value {
+                    let v = body_val.ok_or_else(|| {
+                        CodegenError("match arm produced no value".into())
+                    })?;
+                    self.builder.ins().jump(merge_blk, &[v]);
+                } else {
+                    self.builder.ins().jump(merge_blk, &[]);
+                }
+            }
+        }
+
+        // Fallback: no arm matched. Call rune_panic_no_match and trap.
+        let fallback_blk = next_blks[arms.len()];
+        self.builder.switch_to_block(fallback_blk);
+        self.builder.seal_block(fallback_blk);
+        let panic_id = self.ensure_runtime_func("panic_no_match")?;
+        let local_panic = self
+            .module
+            .declare_func_in_func(panic_id, self.builder.func);
+        self.builder.ins().call(local_panic, &[]);
+        self.builder.ins().trap(TrapCode::user(2).unwrap());
+
+        self.builder.switch_to_block(merge_blk);
+        self.builder.seal_block(merge_blk);
+        if produces_value {
+            Ok(Some(self.builder.block_params(merge_blk)[0]))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn compile_pattern_check(
+        &mut self,
+        pattern: &HirPattern,
+        scrutinee: Value,
+        scrutinee_ty: &Ty,
+        on_match: Block,
+        on_no_match: Block,
+    ) -> Result<(), CodegenError> {
+        match pattern {
+            HirPattern::Wildcard | HirPattern::Bind(_) => {
+                self.builder.ins().jump(on_match, &[]);
+            }
+            HirPattern::IntLit(v) => {
+                let cty = cranelift_type(scrutinee_ty)?;
+                let lit = self.builder.ins().iconst(cty, *v);
+                let eq = self.builder.ins().icmp(IntCC::Equal, scrutinee, lit);
+                self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
+            }
+            HirPattern::BoolLit(b) => {
+                let lit = self
+                    .builder
+                    .ins()
+                    .iconst(types::I8, if *b { 1 } else { 0 });
+                let eq = self.builder.ins().icmp(IntCC::Equal, scrutinee, lit);
+                self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
+            }
+            HirPattern::StrLit(s) => {
+                let lit_val = self
+                    .compile_str_literal(s)?
+                    .ok_or_else(|| CodegenError("pattern str produced no value".into()))?;
+                let func_id = self.ensure_runtime_func("str_eq")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[scrutinee, lit_val]);
+                let eq = self.builder.inst_results(inst)[0];
+                self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
+            }
+            HirPattern::EnumVariant { discriminant } => {
+                let disc = self
+                    .builder
+                    .ins()
+                    .iconst(types::I64, *discriminant as i64);
+                let eq = self.builder.ins().icmp(IntCC::Equal, scrutinee, disc);
+                self.builder.ins().brif(eq, on_match, &[], on_no_match, &[]);
+            }
+        }
+        Ok(())
+    }
+
     fn compile_for_range(
         &mut self,
         local: Option<SymbolId>,
@@ -1702,6 +1849,11 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // *RuneVec
             ("rune_free_vec", sig)
+        }
+        "panic_no_match" => {
+            // () -> never; same trap-after-call shape as panic_bounds.
+            let sig = module.make_signature();
+            ("rune_panic_no_match", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };
