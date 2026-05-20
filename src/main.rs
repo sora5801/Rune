@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use rune::Lexer;
+use rune::{Lexer, Parser};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -12,6 +12,7 @@ fn main() -> ExitCode {
     };
     match cmd.as_str() {
         "tokens" => cmd_tokens(&args),
+        "ast" => cmd_ast(&args),
         "--help" | "-h" | "help" => {
             print_usage();
             ExitCode::SUCCESS
@@ -29,6 +30,14 @@ fn print_usage() {
     eprintln!();
     eprintln!("commands:");
     eprintln!("  tokens <file>    print tokens from a source file");
+    eprintln!("  ast <file>       parse and print the AST");
+}
+
+fn read_source(path: &str) -> Result<String, ExitCode> {
+    fs::read_to_string(path).map_err(|e| {
+        eprintln!("rune: error reading {}: {}", path, e);
+        ExitCode::FAILURE
+    })
 }
 
 fn cmd_tokens(args: &[String]) -> ExitCode {
@@ -36,12 +45,9 @@ fn cmd_tokens(args: &[String]) -> ExitCode {
         eprintln!("usage: rune tokens <file>");
         return ExitCode::from(2);
     };
-    let source = match fs::read_to_string(path) {
+    let source = match read_source(path) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("rune: error reading {}: {}", path, e);
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let (tokens, errors) = Lexer::new(&source).tokenize();
     for tok in &tokens {
@@ -55,4 +61,36 @@ fn cmd_tokens(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_ast(args: &[String]) -> ExitCode {
+    let Some(path) = args.get(1) else {
+        eprintln!("usage: rune ast <file>");
+        return ExitCode::from(2);
+    };
+    let source = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let (module, parse_errors) = Parser::new(tokens).parse_module();
+    println!("{:#?}", module);
+    let mut had_errors = false;
+    if !lex_errors.is_empty() {
+        eprintln!();
+        for err in &lex_errors {
+            eprintln!("{}", err);
+        }
+        had_errors = true;
+    }
+    if !parse_errors.is_empty() {
+        if lex_errors.is_empty() {
+            eprintln!();
+        }
+        for err in &parse_errors {
+            eprintln!("{}", err);
+        }
+        had_errors = true;
+    }
+    if had_errors { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
