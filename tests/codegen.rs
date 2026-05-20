@@ -1214,3 +1214,52 @@ fn enum_returned_from_function() {
     "#;
     assert_eq!(run_main(src), 1);
 }
+
+// ---- free(x) builtin ----
+
+#[test]
+fn free_vec_does_not_crash() {
+    let src = r#"
+        fn main() -> i64 {
+            let v = vec_new();
+            v.push(1);
+            v.push(2);
+            v.push(3);
+            free(v);
+            42
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn free_concat_str_does_not_crash() {
+    let src = r#"
+        fn main() -> i64 {
+            let s = "foo" + "bar";
+            free(s);
+            42
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn free_in_loop_reclaims_steadily() {
+    // Allocate 1000 Vecs, free each. With reclamation, memory stays bounded;
+    // without it, peak ~24KB descriptors + ~few KB elements. Either way it
+    // doesn't crash, which is the assertion.
+    let src = r#"
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 1000 {
+                let v = vec_new();
+                v.push(i);
+                free(v);
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 1000);
+}

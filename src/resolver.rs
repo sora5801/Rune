@@ -220,6 +220,13 @@ impl Resolver {
             zero,
             SymbolKind::PolyBuiltinFn("print"),
         );
+        // `free` is the step-1 manual reclaim builtin. Same dispatch
+        // mechanism as `print` — type-directed at lowering time.
+        self.intern(
+            "free".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("free"),
+        );
         // Explicit single-type variants stay available for users who want
         // them, and are the targets of `print`'s dispatch.
         let print_str = BuiltinFn {

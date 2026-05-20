@@ -137,6 +137,18 @@ void rune_panic_bounds(int64_t idx, int64_t len) {
             (long long)idx, (long long)len);
     exit(1);
 }
+
+void rune_free_str(struct rune_str* s) {
+    if (s == NULL) return;
+    if (s->ptr != NULL) free((void*)s->ptr);
+    free(s);
+}
+
+void rune_free_vec(struct rune_vec* v) {
+    if (v == NULL) return;
+    if (v->ptr != NULL) free(v->ptr);
+    free(v);
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

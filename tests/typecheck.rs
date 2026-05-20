@@ -540,3 +540,36 @@ fn hello_rn_typechecks() {
         }
     "#);
 }
+
+// ---- free(x) builtin ----
+
+#[test]
+fn free_accepts_vec() {
+    check_ok("fn main() { let v = vec_new(); free(v); }");
+}
+
+#[test]
+fn free_accepts_concat_str() {
+    check_ok(r#"fn main() { let s = "a" + "b"; free(s); }"#);
+}
+
+#[test]
+fn free_rejects_i64() {
+    check_has_error(
+        "fn main() { let x = 5; free(x); }",
+        "heap-allocated",
+    );
+}
+
+#[test]
+fn free_rejects_bool() {
+    check_has_error(
+        "fn main() { free(true); }",
+        "heap-allocated",
+    );
+}
+
+#[test]
+fn free_rejects_zero_args() {
+    check_has_error("fn main() { free(); }", "expects 1 argument");
+}

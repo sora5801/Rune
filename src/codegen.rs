@@ -232,6 +232,44 @@ extern "C" fn rune_runtime_panic_bounds(idx: i64, len: i64) -> ! {
     std::process::exit(1);
 }
 
+/// Reclaims a heap-allocated string descriptor + its bytes. Pairs with
+/// `rune_str_concat` and `rune_str_slice` — calling it on a literal
+/// string is undefined behavior (the bytes live in `.rodata`).
+extern "C" fn rune_runtime_free_str(s: *mut RuneStr) {
+    use std::alloc::{dealloc, Layout};
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+        let s_ref = &*s;
+        if s_ref.len > 0 && !s_ref.ptr.is_null() {
+            // Bytes were allocated with alignment 1 in str_concat / str_slice.
+            let bytes_layout =
+                Layout::from_size_align(s_ref.len as usize, 1).unwrap();
+            dealloc(s_ref.ptr as *mut u8, bytes_layout);
+        }
+        let desc_layout = Layout::new::<RuneStr>();
+        dealloc(s as *mut u8, desc_layout);
+    }
+}
+
+/// Reclaims a heap-allocated Vec descriptor + its element array.
+extern "C" fn rune_runtime_free_vec(v: *mut RuneVec) {
+    use std::alloc::{dealloc, Layout};
+    unsafe {
+        if v.is_null() {
+            return;
+        }
+        let v_ref = &*v;
+        if v_ref.cap > 0 && !v_ref.ptr.is_null() {
+            let elems_layout = Layout::array::<i64>(v_ref.cap as usize).unwrap();
+            dealloc(v_ref.ptr as *mut u8, elems_layout);
+        }
+        let desc_layout = Layout::new::<RuneVec>();
+        dealloc(v as *mut u8, desc_layout);
+    }
+}
+
 /// Host implementation of string concatenation for JIT mode. Allocates a
 /// fresh descriptor + fresh byte buffer on the heap, never freed (leak by
 /// design — Rune v0.x is process-lifetime).
@@ -398,6 +436,8 @@ impl Codegen<JITModule> {
         builder.symbol("rune_vec_get", rune_runtime_vec_get as *const u8);
         builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
         builder.symbol("rune_panic_bounds", rune_runtime_panic_bounds as *const u8);
+        builder.symbol("rune_free_str", rune_runtime_free_str as *const u8);
+        builder.symbol("rune_free_vec", rune_runtime_free_vec as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -1652,6 +1692,16 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.params.push(AbiParam::new(types::I64));
             ("rune_panic_bounds", sig)
+        }
+        "free_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *RuneStr
+            ("rune_free_str", sig)
+        }
+        "free_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *RuneVec
+            ("rune_free_vec", sig)
         }
         _ => return Err(CodegenError(format!("unknown builtin `{}`", name))),
     };

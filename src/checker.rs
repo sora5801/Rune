@@ -943,6 +943,30 @@ impl<'r> Checker<'r> {
                 }
                 Ty::Unit
             }
+            "free" => {
+                if arg_tys.len() != 1 {
+                    self.error(
+                        span,
+                        format!(
+                            "`free` expects 1 argument, found {}",
+                            arg_tys.len()
+                        ),
+                    );
+                    return Ty::Unit;
+                }
+                let t = &arg_tys[0];
+                if !t.is_error() && !matches!(t, Ty::Vec | Ty::Str) {
+                    self.error(
+                        args[0].span(),
+                        format!(
+                            "`free` only accepts heap-allocated values (Vec or str), \
+                             found `{}`",
+                            t.display()
+                        ),
+                    );
+                }
+                Ty::Unit
+            }
             _ => {
                 self.error(span, format!("unknown polymorphic builtin `{}`", name));
                 Ty::Error
