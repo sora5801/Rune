@@ -174,12 +174,27 @@ Defer concrete decisions until the parser is more than a toy.
 
 ## Compilation model
 
-**Status: Tentative.**
+**Status: Decided.**
 
-- Whole-program compilation initially; no incremental builds.
-- Single output: a native executable.
-- No separate `.o` linker invocations from user code.
-- FFI to C via `extern "C"` once we have functions working.
+- **Backend:** Cranelift, via `cranelift-jit` (in-memory codegen).
+  Programs JIT-compile and run from `rune run`. AOT to a `.o` file
+  via `cranelift-object` is a later session.
+- **ABI:** the target's default native calling convention — SystemV
+  on Linux, WindowsFastcall on Windows, AAPCS on ARM. Effectively
+  `extern "C"`. Trivial C interop later; a Rune-specific CC isn't
+  planned for v0.x.
+- **Entry point:** `fn main() -> i64`. The host calls main and prints
+  the returned i64. `fn main() -> ()` will become valid once a
+  `print` builtin lands.
+- **Pipeline:** AST → HIR → Cranelift IR → machine code. The HIR is
+  AST-shaped with types attached (not MIR-style basic blocks); features
+  we can't codegen yet (method calls, field access, arrays, match,
+  cast, try) are funneled into an `Unsupported` variant.
+- **Optimization:** Cranelift's `opt_level = "none"` for fast compile.
+  Switch to `speed` once correctness is settled.
+- Whole-module codegen, no incremental compilation.
+- No user-side FFI yet — will land alongside an `extern "C"` keyword
+  on function items.
 
 ## Concurrency
 
@@ -199,3 +214,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Initial draft | Syntax decided; numerics, mutability, error handling, strings, compilation model tentative; memory model, type system, modules, concurrency open |
 | 2026-05-19 | Parser implemented | Syntactic decisions pinned via implementation: Pratt precedence table, postfix `?` and `as`, `match` arm shape (`pat => expr,`), `else if` chains, expression-oriented blocks with optional trailing expression. Comparison operators currently left-associative (Rust treats them as non-associative — open). |
 | 2026-05-19 | Resolver + type checker | Three previously-tentative decisions pinned: default integer type → `i64` (was `i32` placeholder); mutability enforcement → strict (immutable bindings can't be reassigned); name resolution → lexical scoping with shadowing allowed. Bottom-up monomorphic type checker landed. |
+| 2026-05-19 | HIR + Cranelift codegen | Compilation model promoted to Decided. Cranelift JIT backend, target-native ABI (`extern "C"`), `fn main() -> i64` as entry. AST-shaped HIR with `Ty` on every node (over MIR/CFG). First runnable Rune: `rune run examples/fib.rn` prints `55`. |

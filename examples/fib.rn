@@ -1,0 +1,11 @@
+// fib.rn — first runnable Rune. Run with `rune run examples/fib.rn`.
+//
+// Expected output: 55  (the 10th Fibonacci number).
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() -> i64 {
+    fib(10)
+}

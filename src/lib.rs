@@ -1,6 +1,9 @@
 pub mod ast;
 pub mod checker;
+pub mod codegen;
+pub mod hir;
 pub mod lexer;
+pub mod lower;
 pub mod parser;
 pub mod resolver;
 pub mod token;
@@ -8,7 +11,10 @@ pub mod ty;
 
 pub use ast::*;
 pub use checker::{CheckResults, Checker, TypeError};
+pub use codegen::{Codegen, CodegenError};
+pub use hir::{HirModule, HirItem, HirFn};
 pub use lexer::{LexError, Lexer};
+pub use lower::Lowerer;
 pub use parser::{ParseError, Parser};
 pub use resolver::{ResolveError, Resolver, Resolutions, Symbol, SymbolKind};
 pub use token::{Span, Token, TokenKind};
