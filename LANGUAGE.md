@@ -223,9 +223,27 @@ followed by `icmp eq, 0`. No runtime call.
 
 - Static, nominal types.
 - Type inference for local bindings; explicit return types on functions.
-- User-defined `struct` and `enum` (tagged unions).
+- User-defined `struct` (with `impl` blocks for methods) and `enum`
+  (declarations parse, but enum codegen is deferred).
 - Generics (parametric polymorphism) — yes, but not in the first iteration.
 - Traits / protocols — desirable; deferred until after generics.
+
+**Structs (current state):**
+
+- Stack-allocated with 8-byte-per-field padding (v0.x simplification).
+- Constructed via struct literals: `Point { x: 1, y: 2 }`.
+- Field access via `s.field` reads at a statically-known offset.
+- Can be passed by pointer between functions in the same call chain;
+  cannot escape outwards (the descriptor is stack-allocated, same
+  caveat as literal strings).
+- No field assignment yet.
+
+**Vec (current state):**
+
+- Heap-allocated growable list with a `(ptr, len, cap)` descriptor.
+- `vec_new()` constructor, `.push(x)`, `.get(i)`, `.len()`.
+- Element type is **i64 only** for v0.x (no generics). Becomes
+  `Vec<T>` once parametric polymorphism arrives.
 
 **Open questions:**
 - Trait objects vs monomorphization. (Likely monomorphization first.)
@@ -275,10 +293,47 @@ inline (no runtime call).
 | --- | --- | --- | --- |
 | `str` | `len()` | `i64` | `load.i64` from descriptor offset 8 |
 | `str` | `is_empty()` | `bool` | `len + icmp eq, 0` |
+| `str` | `starts_with(prefix: str)` | `bool` | runtime `rune_str_starts_with` |
+| `str` | `ends_with(suffix: str)` | `bool` | runtime `rune_str_ends_with` |
+| `str` | `contains(needle: str)` | `bool` | runtime `rune_str_contains` |
 | `[T; N]` | `len()` | `i64` | static `iconst` of `N` |
+| `Vec` | `push(x: i64)` | `()` | runtime `rune_vec_push` (realloc if cap exceeded) |
+| `Vec` | `get(i: i64)` | `i64` | runtime `rune_vec_get` |
+| `Vec` | `len()` | `i64` | runtime `rune_vec_len` |
 
-When `impl` blocks for user-defined types land, this table extends to
-look in user-defined method namespaces too.
+### Methods on user-defined types — `impl` blocks
+
+```rune
+struct Point { x: i64, y: i64 }
+
+impl Point {
+    fn magnitude_sq(self: Point) -> i64 {
+        self.x * self.x + self.y * self.y
+    }
+}
+
+fn main() -> i64 {
+    let p = Point { x: 3, y: 4 };
+    p.magnitude_sq()  // 25
+}
+```
+
+- The `self` parameter is explicit and typed: `self: Point`. No
+  implicit `self` keyword (yet).
+- Inside the impl block, methods are regular `fn` declarations with
+  any number of additional parameters.
+- The resolver mangles method names (`Point__magnitude_sq` in
+  Cranelift symbols) so the user-visible names can collide across
+  types.
+- A `(struct_sym, method_name) → method_sym` table in `Resolutions`
+  drives method-call dispatch. The lowerer rewrites `p.magnitude_sq()`
+  into `Call(method_sym, [p])` — `self` becomes the first argument.
+
+Limitations:
+- Only inherent impls — no traits, no generics. `impl Point` only.
+- One impl block per type per program (a second redefinition errors).
+- Method names within a type must be unique.
+- No `pub` distinction (always public-within-the-module).
 
 ### Adding a builtin
 
@@ -343,3 +398,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-19 | Polymorphic `print` | New `SymbolKind::PolyBuiltinFn` variant. `print(x)` accepts both `i64` (any int variant) and `str`; the lowerer dispatches to `print_i64` or `print_str` based on argument type. Type checker special-cases the call. The explicit-typed builtins `print_i64` and `print_str` remain available for direct use. Intentionally narrow (just `print` is poly today); revisits once generics or traits exist. |
 | 2026-05-19 | Method calls + first methods | New `HirExprKind::MethodCall` variant. Type checker resolves methods via a hardcoded `resolve_method(recv_ty, name)` table. Codegen dispatches by `(recv_ty, name)` and mostly emits inline IR. Three methods land: `str.len()`, `str.is_empty()`, `arr.len()`. Mechanism extends to future methods (trivial: inline; non-trivial: route to runtime). |
 | 2026-05-19 | String indexing + slicing | New `ast::Expr::Range` (and parser support for `a..b` / `a..=b` as infix at precedence (3,4), below comparison). New `HirExprKind::StrByteIndex` (inline `load.i8` + `uextend.i64`) and `HirExprKind::StrSlice` (calls runtime `rune_str_slice` — mallocs new descriptor + bytes; clamps out-of-range indices). Range expressions outside a slice-index context are an explicit type-check error. Standalone ranges and partial forms (`..b`, `a..`, `..`) are deferred. |
+| 2026-05-19 | Range iter + str predicates + struct field access + Vec + impl blocks | Five features at once: (1) `for i in a..b { }` works via `HirExprKind::ForRange` — special-cased in the lowerer when the iter is a range. (2) Three new str methods via runtime calls: `starts_with`, `ends_with`, `contains`. (3) Struct field access end-to-end: new `Expr::StructLit`, parser support gated by `no_struct_lit` flag in condition position, `CheckResults::struct_layouts` with 8-byte-per-field padding, stack-slot codegen, field access via `load.<ty>` at offset. (4) `Vec` as a concrete builtin type — `vec_new()`, `.push`, `.get`, `.len`. Heap-allocated `{ptr, len, cap}` descriptor with realloc on grow. i64 elements only until generics. (5) `impl` blocks for inherent methods on structs — new `impl` keyword, `Item::Impl(ImplBlock)`, mangled method names (`Point__magnitude`), `Resolutions::impl_methods` table, lowerer rewrites `p.m()` to `Call(m_sym, [p])`. |

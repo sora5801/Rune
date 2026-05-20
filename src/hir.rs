@@ -91,6 +91,21 @@ pub enum HirExprKind {
         method: String,
         args: Vec<HirExpr>,
     },
+    /// Stack-allocated struct literal. Fields are stored at byte offsets
+    /// known statically from the struct layout. Value is a pointer to
+    /// the start of the stack slot.
+    StructLit {
+        sym: SymbolId,
+        /// (byte offset, value) pairs, in declaration order.
+        fields: Vec<(u32, HirExpr)>,
+        size: u32,
+    },
+    /// `receiver.field` — loads a field at a known byte offset.
+    FieldAccess {
+        receiver: Box<HirExpr>,
+        offset: u32,
+        field_ty: Ty,
+    },
     /// Stack-allocated array literal. Value type is a pointer to the
     /// first element; element type and length are tracked statically.
     Array { elems: Vec<HirExpr>, elem_ty: Ty },

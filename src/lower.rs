@@ -23,10 +23,16 @@ impl<'a> Lowerer<'a> {
     pub fn lower_module(&self, m: &ast::Module) -> HirModule {
         let mut items = Vec::new();
         for it in &m.items {
-            if let ast::Item::Fn(f) = it {
-                items.push(HirItem::Fn(self.lower_fn(f)));
+            match it {
+                ast::Item::Fn(f) => items.push(HirItem::Fn(self.lower_fn(f))),
+                ast::Item::Impl(i) => {
+                    for method in &i.methods {
+                        items.push(HirItem::Fn(self.lower_fn(method)));
+                    }
+                }
+                // Const, Struct, Enum dropped — codegen doesn't handle them yet.
+                _ => {}
             }
-            // Const, Struct, Enum dropped — codegen doesn't handle them yet.
         }
         HirModule { items }
     }
@@ -53,7 +59,10 @@ impl<'a> Lowerer<'a> {
             .and_then(|t| self.check.type_resolutions.get(&t.span()).cloned())
             .unwrap_or(Ty::Unit);
         let body = self.lower_block(&f.body);
-        HirFn { sym, name: f.name.name.clone(), params, ret_ty, body }
+        // Use the resolver's symbol name — mangled for impl methods,
+        // unchanged for top-level fns. This is the Cranelift-visible name.
+        let name = self.res.symbol(sym).name.clone();
+        HirFn { sym, name, params, ret_ty, body }
     }
 
     fn lower_block(&self, b: &ast::Block) -> HirBlock {
@@ -171,12 +180,33 @@ impl<'a> Lowerer<'a> {
             }
             ast::Expr::Break(_) => HirExprKind::Unsupported("break".into()),
             ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
-            ast::Expr::MethodCall { receiver, method, args, .. } => HirExprKind::MethodCall {
-                receiver: Box::new(self.lower_expr(receiver)),
-                method: method.name.clone(),
-                args: args.iter().map(|a| self.lower_expr(a)).collect(),
-            },
-            ast::Expr::Field { .. } => HirExprKind::Unsupported("field access".into()),
+            ast::Expr::MethodCall { receiver, method, args, .. } => {
+                let receiver_hir = self.lower_expr(receiver);
+                // User-defined methods on structs (via `impl`) are lowered
+                // to a regular Call with the receiver as the first
+                // argument. Builtin methods go through HirExprKind::MethodCall.
+                if let Ty::Struct(struct_sym) = &receiver_hir.ty {
+                    let key = (*struct_sym, method.name.clone());
+                    if let Some(&method_sym) = self.res.impl_methods.get(&key) {
+                        let mut call_args = Vec::with_capacity(args.len() + 1);
+                        call_args.push(receiver_hir);
+                        for a in args {
+                            call_args.push(self.lower_expr(a));
+                        }
+                        return HirExprKind::Call {
+                            callee: method_sym,
+                            args: call_args,
+                        };
+                    }
+                }
+                HirExprKind::MethodCall {
+                    receiver: Box::new(receiver_hir),
+                    method: method.name.clone(),
+                    args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                }
+            }
+            ast::Expr::StructLit { path, fields, .. } => self.lower_struct_lit(path, fields),
+            ast::Expr::Field { receiver, name, .. } => self.lower_field_access(receiver, name),
             ast::Expr::Index { receiver, index, .. } => {
                 let recv = self.lower_expr(receiver);
                 // String indexing dispatches on whether the index is a range.
@@ -274,6 +304,58 @@ impl<'a> Lowerer<'a> {
             }
             SymbolKind::Fn => HirExprKind::Fn(sym_id),
             _ => HirExprKind::Unsupported("type name used as value".into()),
+        }
+    }
+
+    fn lower_struct_lit(&self, path: &ast::Path, fields: &[ast::FieldInit]) -> HirExprKind {
+        let Some(&sym_id) = self.res.path_to_sym.get(&path.span) else {
+            return HirExprKind::Unsupported("unresolved struct in literal".into());
+        };
+        let Some(layout) = self.check.struct_layouts.get(&sym_id) else {
+            return HirExprKind::Unsupported("struct without a layout".into());
+        };
+        // Reorder user-provided fields into declaration order. Any missing
+        // fields are already flagged by the checker; we lower an Unsupported
+        // sentinel for them so codegen catches the discrepancy.
+        let mut lowered_fields: Vec<(u32, HirExpr)> = Vec::with_capacity(layout.fields.len());
+        for decl_field in &layout.fields {
+            let Some(init) = fields.iter().find(|f| f.name.name == decl_field.name) else {
+                lowered_fields.push((
+                    decl_field.offset,
+                    HirExpr {
+                        kind: HirExprKind::Unsupported(format!(
+                            "missing field `{}` (caught by checker)",
+                            decl_field.name
+                        )),
+                        ty: decl_field.ty.clone(),
+                    },
+                ));
+                continue;
+            };
+            lowered_fields.push((decl_field.offset, self.lower_expr(&init.value)));
+        }
+        HirExprKind::StructLit {
+            sym: sym_id,
+            fields: lowered_fields,
+            size: layout.size,
+        }
+    }
+
+    fn lower_field_access(&self, receiver: &ast::Expr, name: &ast::Ident) -> HirExprKind {
+        let recv_hir = self.lower_expr(receiver);
+        let Ty::Struct(sym_id) = &recv_hir.ty else {
+            return HirExprKind::Unsupported("field access on non-struct".into());
+        };
+        let Some(layout) = self.check.struct_layouts.get(sym_id) else {
+            return HirExprKind::Unsupported("struct without a layout".into());
+        };
+        let Some(field) = layout.field(&name.name) else {
+            return HirExprKind::Unsupported(format!("no field `{}`", name.name));
+        };
+        HirExprKind::FieldAccess {
+            receiver: Box::new(recv_hir),
+            offset: field.offset,
+            field_ty: field.ty.clone(),
         }
     }
 

@@ -117,8 +117,20 @@ rune: linked with clang -> primes.exe
   - **String indexing** (`s[i]`) reads one byte and zero-extends to
     `i64`. **String slicing** (`s[a..b]`, `s[a..=b]`) heap-allocates a
     fresh substring (clamps out-of-range bounds, never panics).
-    Range expressions outside a slice index are rejected (no
-    `for i in 0..n { }` yet — needs an iterator protocol).
+  - **Range iteration**: `for i in 0..n { }` and `for i in 1..=n { }`
+    work via a counter-based loop.
+  - **String predicates**: `s.starts_with(p)`, `s.ends_with(p)`,
+    `s.contains(p)` via runtime calls.
+  - **Structs** with field access: `struct Point { x: i64, y: i64 }`,
+    constructed via `Point { x: 1, y: 2 }`, accessed via `p.x`.
+    8-byte-per-field padding (v0.x simplification).
+  - **`impl` blocks** for inherent methods on structs:
+    `impl Point { fn magnitude_sq(self: Point) -> i64 { ... } }`.
+    Methods dispatched at lowering time; `self` becomes the first
+    argument of a regular Cranelift function with a mangled name.
+  - **`Vec`** as a concrete heap-allocated growable list of i64:
+    `vec_new()`, `.push(x)`, `.get(i)`, `.len()`. Element type
+    generalizes to `Vec<T>` once generics arrive.
 - ABI: target-native (effectively `extern "C"`).
 - 33 JIT tests + 14 AOT tests.
 
@@ -144,14 +156,13 @@ if reached.
 
 ## Roadmap
 
-1. Iterator protocol so `for i in 0..n { }` works
-2. Heap-allocated arrays / dynamic vectors
-3. Struct field access + field type-checking
-4. User-defined methods via `impl` blocks
-5. Bounds checks on array indexing (panics or Result wrapping)
-6. Reclamation for heap allocations (ARC, arenas, or GC)
-7. Generics (parametric polymorphism) — retires `PolyBuiltinFn`
-8. Self-hosted bootstrap (long-term)
+1. Field assignment (`p.x = 5`)
+2. Generics so `Vec<T>` (and `print<T>`) become first-class
+3. Enum variant construction + `match` codegen
+4. Bounds checks on array indexing (panics or Result wrapping)
+5. Reclamation for heap allocations (ARC, arenas, or GC)
+6. Traits / interfaces
+7. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

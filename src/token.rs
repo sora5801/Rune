@@ -42,6 +42,7 @@ pub enum TokenKind {
     True, False,
     Struct, Enum, Match,
     Pub, Const, As,
+    Impl,
 
     // Arithmetic
     Plus, Minus, Star, Slash, Percent,
@@ -99,6 +100,7 @@ impl TokenKind {
             "pub" => TokenKind::Pub,
             "const" => TokenKind::Const,
             "as" => TokenKind::As,
+            "impl" => TokenKind::Impl,
             _ => return None,
         })
     }

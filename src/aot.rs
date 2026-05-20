@@ -99,6 +99,38 @@ int8_t rune_str_contains(const struct rune_str* s, const struct rune_str* needle
     }
     return 0;
 }
+
+struct rune_vec {
+    int64_t* ptr;
+    int64_t  len;
+    int64_t  cap;
+};
+
+struct rune_vec* rune_vec_new(void) {
+    struct rune_vec* v = (struct rune_vec*)malloc(sizeof(struct rune_vec));
+    v->ptr = (int64_t*)0;
+    v->len = 0;
+    v->cap = 0;
+    return v;
+}
+
+void rune_vec_push(struct rune_vec* v, int64_t x) {
+    if (v->len == v->cap) {
+        int64_t new_cap = v->cap == 0 ? 4 : v->cap * 2;
+        v->ptr = (int64_t*)realloc(v->ptr, (size_t)(new_cap * (int64_t)sizeof(int64_t)));
+        v->cap = new_cap;
+    }
+    v->ptr[v->len++] = x;
+}
+
+int64_t rune_vec_get(const struct rune_vec* v, int64_t i) {
+    if (i < 0 || i >= v->len) return 0;
+    return v->ptr[i];
+}
+
+int64_t rune_vec_len(const struct rune_vec* v) {
+    return v->len;
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

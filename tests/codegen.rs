@@ -562,6 +562,189 @@ fn concat_with_var() {
     assert_eq!(run_main(src), 1);
 }
 
+// ---- impl blocks ----
+
+#[test]
+fn impl_method_with_self() {
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        impl Point {
+            fn magnitude_sq(self: Point) -> i64 {
+                self.x * self.x + self.y * self.y
+            }
+        }
+        fn main() -> i64 {
+            let p = Point { x: 3, y: 4 };
+            p.magnitude_sq()
+        }
+    "#;
+    assert_eq!(run_main(src), 25);
+}
+
+#[test]
+fn impl_method_with_args() {
+    let src = r#"
+        struct Pair { a: i64, b: i64 }
+        impl Pair {
+            fn weighted(self: Pair, w: i64) -> i64 {
+                self.a * w + self.b
+            }
+        }
+        fn main() -> i64 {
+            let p = Pair { a: 5, b: 7 };
+            p.weighted(3)
+        }
+    "#;
+    assert_eq!(run_main(src), 22); // 5*3 + 7
+}
+
+#[test]
+fn impl_multiple_methods() {
+    let src = r#"
+        struct Counter { count: i64 }
+        impl Counter {
+            fn doubled(self: Counter) -> i64 { self.count + self.count }
+            fn plus(self: Counter, n: i64) -> i64 { self.count + n }
+        }
+        fn main() -> i64 {
+            let c = Counter { count: 10 };
+            c.doubled() + c.plus(5)
+        }
+    "#;
+    assert_eq!(run_main(src), 35); // 20 + 15
+}
+
+#[test]
+fn impl_method_returns_concat() {
+    let src = r#"
+        struct Greeter { name: str }
+        impl Greeter {
+            fn greet(self: Greeter) -> str {
+                "Hello, " + self.name + "!"
+            }
+        }
+        fn main() -> i64 {
+            let g = Greeter { name: "Rune" };
+            if g.greet() == "Hello, Rune!" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+// ---- Vec ----
+
+#[test]
+fn vec_basic_push_get_len() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = vec_new();
+            xs.push(10);
+            xs.push(20);
+            xs.push(30);
+            xs.len() * 100 + xs.get(1)
+        }
+    "#;
+    assert_eq!(run_main(src), 320); // 3*100 + 20
+}
+
+#[test]
+fn vec_grows_past_initial_cap() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = vec_new();
+            for i in 0..100 {
+                xs.push(i);
+            }
+            xs.len() + xs.get(99)
+        }
+    "#;
+    assert_eq!(run_main(src), 100 + 99);
+}
+
+#[test]
+fn vec_empty_get_returns_zero() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs = vec_new();
+            xs.get(5)
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn vec_passed_to_function() {
+    let src = r#"
+        fn sum(xs: Vec) -> i64 {
+            let mut total = 0;
+            for i in 0..xs.len() {
+                total = total + xs.get(i);
+            }
+            total
+        }
+        fn main() -> i64 {
+            let xs = vec_new();
+            xs.push(1);
+            xs.push(2);
+            xs.push(3);
+            xs.push(4);
+            sum(xs)
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+// ---- structs ----
+
+#[test]
+fn struct_literal_and_field() {
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let p = Point { x: 3, y: 4 };
+            p.x + p.y
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn struct_with_mixed_field_order() {
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let p = Point { y: 10, x: 3 };
+            p.x + p.y
+        }
+    "#;
+    assert_eq!(run_main(src), 13);
+}
+
+#[test]
+fn struct_passed_to_function() {
+    let src = r#"
+        struct Pair { a: i64, b: i64 }
+        fn sum(p: Pair) -> i64 { p.a + p.b }
+        fn main() -> i64 {
+            let p = Pair { a: 7, b: 8 };
+            sum(p)
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn struct_with_bool_field() {
+    let src = r#"
+        struct Flag { active: bool, count: i64 }
+        fn main() -> i64 {
+            let f = Flag { active: true, count: 100 };
+            if f.active { f.count } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 100);
+}
+
 // ---- for over range ----
 
 #[test]

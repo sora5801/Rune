@@ -39,6 +39,10 @@ pub struct Parser {
     /// In condition position (if/while/for/match scrutinee), block expressions
     /// are not allowed as primaries — they're the loop/branch body.
     no_block_expr: bool,
+    /// In condition / scrutinee position, struct literals (`Path { .. }`)
+    /// are ambiguous with the start of the body block. Set when parsing
+    /// `if`/`while`/`for`/`match` heads, restored elsewhere.
+    no_struct_lit: bool,
     errors: Vec<ParseError>,
 }
 
@@ -47,7 +51,14 @@ type ParseResult<T> = Result<T, ParseError>;
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         let src_end = tokens.last().map(|t| t.span.end).unwrap_or(0);
-        Self { tokens, pos: 0, src_end, no_block_expr: false, errors: Vec::new() }
+        Self {
+            tokens,
+            pos: 0,
+            src_end,
+            no_block_expr: false,
+            no_struct_lit: false,
+            errors: Vec::new(),
+        }
     }
 
     pub fn parse_module(mut self) -> (Module, Vec<ParseError>) {
@@ -136,7 +147,8 @@ impl Parser {
                 | TokenKind::Struct
                 | TokenKind::Enum
                 | TokenKind::Const
-                | TokenKind::Pub => return,
+                | TokenKind::Pub
+                | TokenKind::Impl => return,
                 _ => {
                     self.bump();
                 }
@@ -158,6 +170,7 @@ impl Parser {
             TokenKind::Struct => Ok(Item::Struct(self.parse_struct(vis, start)?)),
             TokenKind::Enum => Ok(Item::Enum(self.parse_enum(vis, start)?)),
             TokenKind::Const => Ok(Item::Const(self.parse_const(vis, start)?)),
+            TokenKind::Impl => Ok(Item::Impl(self.parse_impl(start)?)),
             _ => {
                 let span = self.peek_span();
                 Err(ParseError {
@@ -269,6 +282,26 @@ impl Parser {
             (VariantFields::Unit, name.span.end)
         };
         Ok(Variant { name, fields, span: Span::new(start, end) })
+    }
+
+    fn parse_impl(&mut self, start: usize) -> ParseResult<ImplBlock> {
+        self.expect(&TokenKind::Impl, "`impl`")?;
+        let type_path = self.parse_path()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+            // No visibility on impl methods (`pub` ignored if present today).
+            let _ = self.eat(&TokenKind::Pub);
+            let fn_start = self.peek_span().start;
+            let method = self.parse_fn(Visibility::Private, fn_start)?;
+            methods.push(method);
+        }
+        let rb = self.expect(&TokenKind::RBrace, "`}`")?;
+        Ok(ImplBlock {
+            type_path,
+            methods,
+            span: Span::new(start, rb.span.end),
+        })
     }
 
     fn parse_const(&mut self, vis: Visibility, start: usize) -> ParseResult<ConstDecl> {
@@ -557,7 +590,15 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Lit { lit: Lit::Bool(false), span })
             }
-            TokenKind::Ident(_) => Ok(Expr::Path(self.parse_path()?)),
+            TokenKind::Ident(_) => {
+                let path = self.parse_path()?;
+                // Struct literal: `Path { field: expr, ... }`. Gated by
+                // `no_struct_lit` so it doesn't shadow `if cond { body }`.
+                if !self.no_struct_lit && matches!(self.peek(), TokenKind::LBrace) {
+                    return self.parse_struct_lit(path);
+                }
+                Ok(Expr::Path(path))
+            }
             TokenKind::LParen => {
                 self.bump();
                 let saved = self.no_block_expr;
@@ -616,6 +657,30 @@ impl Parser {
                 span,
             }),
         }
+    }
+
+    fn parse_struct_lit(&mut self, path: Path) -> ParseResult<Expr> {
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut fields = Vec::new();
+        let saved_block = self.no_block_expr;
+        let saved_struct = self.no_struct_lit;
+        // Inside the braces, normal expression rules apply.
+        self.no_block_expr = false;
+        self.no_struct_lit = false;
+        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+            let name = self.expect_ident()?;
+            self.expect(&TokenKind::Colon, "`:`")?;
+            let value = self.parse_expr()?;
+            fields.push(FieldInit { name, value });
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.no_block_expr = saved_block;
+        self.no_struct_lit = saved_struct;
+        let rb = self.expect(&TokenKind::RBrace, "`}`")?;
+        let span = Span::new(path.span.start, rb.span.end);
+        Ok(Expr::StructLit { path, fields, span })
     }
 
     fn parse_if(&mut self) -> ParseResult<Expr> {
@@ -692,10 +757,13 @@ impl Parser {
     }
 
     fn parse_cond_expr(&mut self) -> ParseResult<Expr> {
-        let saved = self.no_block_expr;
+        let saved_block = self.no_block_expr;
+        let saved_struct = self.no_struct_lit;
         self.no_block_expr = true;
+        self.no_struct_lit = true;
         let e = self.parse_expr();
-        self.no_block_expr = saved;
+        self.no_block_expr = saved_block;
+        self.no_struct_lit = saved_struct;
         e
     }
 

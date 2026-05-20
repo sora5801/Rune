@@ -1,0 +1,49 @@
+// methods.rn — structs, impl blocks, Vec, range iteration, polymorphic
+// print, and string methods all working together.
+
+struct Person { name: str, age: i64 }
+
+impl Person {
+    fn greeting(self: Person) -> str {
+        "Hello, my name is " + self.name + "!"
+    }
+
+    fn is_adult(self: Person) -> bool {
+        self.age >= 18
+    }
+}
+
+fn main() -> i64 {
+    let alice = Person { name: "Alice", age: 30 };
+    print(alice.greeting());
+    if alice.is_adult() {
+        print("...and she is an adult.");
+    }
+
+    // String methods over a concat result.
+    let line = ("greeting: " + alice.greeting()).contains("Alice");
+    if line { print("found Alice in the greeting") } else { print("not found") }
+
+    // Vec methods + range iteration.
+    let ages = vec_new();
+    ages.push(30);
+    ages.push(17);
+    ages.push(42);
+
+    let mut total = 0;
+    for i in 0..ages.len() {
+        total = total + ages.get(i);
+    }
+    print("sum of ages:");
+    print(total);
+
+    // Range iter directly.
+    let mut squares = 0;
+    for i in 1..=5 {
+        squares = squares + i * i;
+    }
+    print("sum of squares 1..=5:");
+    print(squares);
+
+    0
+}

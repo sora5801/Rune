@@ -28,6 +28,14 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Const(ConstDecl),
+    Impl(ImplBlock),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplBlock {
+    pub type_path: Path,
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +190,8 @@ pub enum Expr {
     While { cond: Box<Expr>, body: Block, span: Span },
     For { pat: Pattern, iter: Box<Expr>, body: Block, span: Span },
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm>, span: Span },
+    /// `Path { field1: expr1, field2: expr2 }` — struct literal.
+    StructLit { path: Path, fields: Vec<FieldInit>, span: Span },
     Range {
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,
@@ -212,6 +222,7 @@ impl Expr {
             | Expr::While { span, .. }
             | Expr::For { span, .. }
             | Expr::Match { span, .. }
+            | Expr::StructLit { span, .. }
             | Expr::Range { span, .. }
             | Expr::Return { span, .. } => *span,
             Expr::Path(p) => p.span,
@@ -219,6 +230,12 @@ impl Expr {
             Expr::Break(s) | Expr::Continue(s) => *s,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldInit {
+    pub name: Ident,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]

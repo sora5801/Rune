@@ -61,6 +61,62 @@ extern "C" fn rune_runtime_print_i64(x: i64) {
     println!("{}", x);
 }
 
+/// Vec descriptor: `{ ptr: *mut i64, len: i64, cap: i64 }` — 24 bytes.
+#[repr(C)]
+struct RuneVec {
+    ptr: *mut i64,
+    len: i64,
+    cap: i64,
+}
+
+extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
+    use std::alloc::{alloc, Layout};
+    unsafe {
+        let v = alloc(Layout::new::<RuneVec>()) as *mut RuneVec;
+        (*v).ptr = std::ptr::null_mut();
+        (*v).len = 0;
+        (*v).cap = 0;
+        v
+    }
+}
+
+extern "C" fn rune_runtime_vec_push(v: *mut RuneVec, x: i64) {
+    use std::alloc::{alloc, realloc, Layout};
+    unsafe {
+        let v = &mut *v;
+        if v.len == v.cap {
+            let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 };
+            let new_size = (new_cap as usize) * std::mem::size_of::<i64>();
+            let new_layout = Layout::from_size_align(new_size, 8).unwrap();
+            let new_ptr = if v.cap == 0 {
+                alloc(new_layout) as *mut i64
+            } else {
+                let old_size = (v.cap as usize) * std::mem::size_of::<i64>();
+                let old_layout = Layout::from_size_align(old_size, 8).unwrap();
+                realloc(v.ptr as *mut u8, old_layout, new_size) as *mut i64
+            };
+            v.ptr = new_ptr;
+            v.cap = new_cap;
+        }
+        *v.ptr.add(v.len as usize) = x;
+        v.len += 1;
+    }
+}
+
+extern "C" fn rune_runtime_vec_get(v: *const RuneVec, i: i64) -> i64 {
+    unsafe {
+        let v = &*v;
+        if i < 0 || i >= v.len {
+            return 0; // no panic — clamp-ish for v0.x
+        }
+        *v.ptr.add(i as usize)
+    }
+}
+
+extern "C" fn rune_runtime_vec_len(v: *const RuneVec) -> i64 {
+    unsafe { (*v).len }
+}
+
 /// Host implementation of `print_str(str)` for JIT mode.
 extern "C" fn rune_runtime_print_str(s: *const RuneStr) {
     unsafe {
@@ -99,9 +155,11 @@ extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
 
 unsafe fn rune_str_bytes<'a>(s: *const RuneStr) -> &'a [u8] {
     if s.is_null() { return &[]; }
-    let s = &*s;
-    if s.len <= 0 { return &[]; }
-    std::slice::from_raw_parts(s.ptr, s.len as usize)
+    unsafe {
+        let s = &*s;
+        if s.len <= 0 { return &[]; }
+        std::slice::from_raw_parts(s.ptr, s.len as usize)
+    }
 }
 
 extern "C" fn rune_runtime_str_starts_with(s: *const RuneStr, prefix: *const RuneStr) -> i8 {
@@ -328,6 +386,10 @@ impl Codegen<JITModule> {
         builder.symbol("rune_str_starts_with", rune_runtime_str_starts_with as *const u8);
         builder.symbol("rune_str_ends_with", rune_runtime_str_ends_with as *const u8);
         builder.symbol("rune_str_contains", rune_runtime_str_contains as *const u8);
+        builder.symbol("rune_vec_new", rune_runtime_vec_new as *const u8);
+        builder.symbol("rune_vec_push", rune_runtime_vec_push as *const u8);
+        builder.symbol("rune_vec_get", rune_runtime_vec_get as *const u8);
+        builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -578,6 +640,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
             HirExprKind::MethodCall { receiver, method, args } => {
                 self.compile_method_call(receiver, method, args, &e.ty)
+            }
+            HirExprKind::StructLit { sym: _, fields, size } => {
+                self.compile_struct_lit(fields, *size)
+            }
+            HirExprKind::FieldAccess { receiver, offset, field_ty } => {
+                self.compile_field_access(receiver, *offset, field_ty)
             }
             HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
             HirExprKind::Index { array, index, elem_ty } => {
@@ -922,6 +990,42 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
     }
 
+    fn compile_struct_lit(
+        &mut self,
+        fields: &[(u32, HirExpr)],
+        size: u32,
+    ) -> Result<Option<Value>, CodegenError> {
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size.max(8),
+            3,
+        ));
+        for (offset, value) in fields {
+            let v = self
+                .compile_expr(value)?
+                .ok_or_else(|| CodegenError("struct field produced no value".into()))?;
+            self.builder.ins().stack_store(v, slot, *offset as i32);
+        }
+        Ok(Some(self.builder.ins().stack_addr(types::I64, slot, 0)))
+    }
+
+    fn compile_field_access(
+        &mut self,
+        receiver: &HirExpr,
+        offset: u32,
+        field_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let recv = self
+            .compile_expr(receiver)?
+            .ok_or_else(|| CodegenError("field-access receiver produced no value".into()))?;
+        let cty = cranelift_type(field_ty)?;
+        let val = self
+            .builder
+            .ins()
+            .load(cty, MemFlags::new(), recv, offset as i32);
+        Ok(Some(val))
+    }
+
     fn compile_str_byte_index(
         &mut self,
         str_val: &HirExpr,
@@ -1037,6 +1141,23 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     .declare_func_in_func(func_id, self.builder.func);
                 let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
                 Ok(Some(self.builder.inst_results(inst)[0]))
+            }
+            (Ty::Vec, m) if matches!(m, "push" | "get" | "len") => {
+                let runtime_key = match m {
+                    "push" => "vec_push",
+                    "get" => "vec_get",
+                    "len" => "vec_len",
+                    _ => unreachable!(),
+                };
+                let func_id = self.ensure_runtime_func(runtime_key)?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let mut call_args = vec![recv_val];
+                call_args.extend(&arg_vals);
+                let inst = self.builder.ins().call(local_func, &call_args);
+                let results = self.builder.inst_results(inst);
+                if results.is_empty() { Ok(None) } else { Ok(Some(results[0])) }
             }
             (recv_ty, _) => Err(CodegenError(format!(
                 "method `.{}` on `{}` is not implemented",
@@ -1299,6 +1420,10 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Array(_, _) => types::I64,
         // Strings are represented as a pointer to a (ptr, len) descriptor.
         Ty::Str => types::I64,
+        // Structs are represented as a pointer to their stack-allocated body.
+        Ty::Struct(_) => types::I64,
+        // Vec is a pointer to a heap-allocated descriptor (`{ ptr, len, cap }`).
+        Ty::Vec => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -1326,7 +1451,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_) | Ty::Vec => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",
@@ -1342,6 +1467,30 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             ("rune_print_i64", sig)
+        }
+        "vec_new" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_vec_new", sig)
+        }
+        "vec_push" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *Vec
+            sig.params.push(AbiParam::new(types::I64)); // x
+            ("rune_vec_push", sig)
+        }
+        "vec_get" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_vec_get", sig)
+        }
+        "vec_len" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_vec_len", sig)
         }
         "print_str" => {
             let mut sig = module.make_signature();

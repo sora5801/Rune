@@ -49,6 +49,10 @@ pub enum Ty {
     Str,
     Unit,
     Array(Box<Ty>, usize),
+    /// Heap-allocated growable list of i64. v0.x has no generics, so this
+    /// is a single concrete type rather than `Vec<T>`. Becomes `Vec<T>`
+    /// once parametric polymorphism arrives.
+    Vec,
     Fn { params: Vec<Ty>, ret: Box<Ty> },
     Struct(SymbolId),
     Enum(SymbolId),
@@ -105,6 +109,7 @@ impl Ty {
             Ty::Str => "str".into(),
             Ty::Unit => "()".into(),
             Ty::Array(elem, n) => format!("[{}; {}]", elem.display(), n),
+            Ty::Vec => "Vec".into(),
             Ty::Fn { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|t| t.display()).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display())

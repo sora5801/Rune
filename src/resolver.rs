@@ -56,6 +56,10 @@ pub struct Resolutions {
     pub symbols: Vec<Symbol>,
     pub path_to_sym: HashMap<Span, SymbolId>,
     pub decl_to_sym: HashMap<Span, SymbolId>,
+    /// User-defined inherent methods: `(struct_sym, method_name) → method's Fn symbol`.
+    /// Populated from `impl` blocks. Builtin methods (`str.len()`, etc.) are
+    /// resolved via the checker's hardcoded table instead.
+    pub impl_methods: HashMap<(SymbolId, String), SymbolId>,
 }
 
 impl Resolutions {
@@ -87,6 +91,7 @@ pub struct Resolver {
     scopes: Vec<HashMap<String, SymbolId>>,
     path_to_sym: HashMap<Span, SymbolId>,
     decl_to_sym: HashMap<Span, SymbolId>,
+    impl_methods: HashMap<(SymbolId, String), SymbolId>,
     errors: Vec<ResolveError>,
 }
 
@@ -101,6 +106,7 @@ impl Resolver {
             scopes: vec![HashMap::new()],
             path_to_sym: HashMap::new(),
             decl_to_sym: HashMap::new(),
+            impl_methods: HashMap::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -108,9 +114,18 @@ impl Resolver {
     }
 
     pub fn resolve_module(mut self, m: &Module) -> (Resolutions, Vec<ResolveError>) {
+        // Pass 1: declare non-impl items so impl blocks can resolve their
+        // target type.
         for item in &m.items {
             self.declare_item(item);
         }
+        // Pass 1.5: declare impl methods.
+        for item in &m.items {
+            if let Item::Impl(i) = item {
+                self.declare_impl(i);
+            }
+        }
+        // Pass 2: resolve all bodies.
         for item in &m.items {
             self.resolve_item(item);
         }
@@ -119,9 +134,50 @@ impl Resolver {
                 symbols: self.symbols,
                 path_to_sym: self.path_to_sym,
                 decl_to_sym: self.decl_to_sym,
+                impl_methods: self.impl_methods,
             },
             self.errors,
         )
+    }
+
+    fn declare_impl(&mut self, i: &ImplBlock) {
+        self.resolve_path(&i.type_path);
+        let Some(&struct_sym) = self.path_to_sym.get(&i.type_path.span) else {
+            return;
+        };
+        if !matches!(self.symbols[struct_sym.0 as usize].kind, SymbolKind::Struct) {
+            let name = self.symbols[struct_sym.0 as usize].name.clone();
+            self.error(
+                format!(
+                    "`{}` is not a struct; `impl` can only be applied to structs (for now)",
+                    name
+                ),
+                i.type_path.span,
+            );
+            return;
+        }
+        let struct_name = self.symbols[struct_sym.0 as usize].name.clone();
+        for method in &i.methods {
+            let mangled = format!("{}__{}", struct_name, method.name.name);
+            let id = SymbolId(self.symbols.len() as u32);
+            self.symbols.push(Symbol {
+                name: mangled,
+                span: method.name.span,
+                kind: SymbolKind::Fn,
+            });
+            self.decl_to_sym.insert(method.name.span, id);
+            let key = (struct_sym, method.name.name.clone());
+            if self.impl_methods.contains_key(&key) {
+                self.error(
+                    format!(
+                        "method `{}` already defined on `{}`",
+                        method.name.name, struct_name
+                    ),
+                    method.name.span,
+                );
+            }
+            self.impl_methods.insert(key, id);
+        }
     }
 
     fn insert_builtins(&mut self) {
@@ -142,6 +198,7 @@ impl Resolver {
             ("usize", Ty::Int(IntTy::USize)),
             ("f32", Ty::Float(FloatTy::F32)),
             ("f64", Ty::Float(FloatTy::F64)),
+            ("Vec", Ty::Vec),
         ];
         for (name, ty) in builtins {
             self.intern(name.to_string(), zero, SymbolKind::BuiltinType(ty.clone()));
@@ -173,6 +230,16 @@ impl Resolver {
             print_i64.name.to_string(),
             zero,
             SymbolKind::BuiltinFn(print_i64),
+        );
+        let vec_new = BuiltinFn {
+            name: "vec_new",
+            params: vec![],
+            ret: Ty::Vec,
+        };
+        self.intern(
+            vec_new.name.to_string(),
+            zero,
+            SymbolKind::BuiltinFn(vec_new),
         );
     }
 
@@ -216,6 +283,10 @@ impl Resolver {
             Item::Struct(s) => (&s.name, SymbolKind::Struct),
             Item::Enum(e) => (&e.name, SymbolKind::Enum),
             Item::Const(c) => (&c.name, SymbolKind::Const),
+            // Impl blocks contribute methods, not a top-level name.
+            // Methods are declared by a separate pass after all structs
+            // are known. See `declare_impl`.
+            Item::Impl(_) => return,
         };
         let id = self.intern(name.name.clone(), name.span, kind);
         self.decl_to_sym.insert(name.span, id);
@@ -229,6 +300,11 @@ impl Resolver {
             Item::Struct(s) => self.resolve_struct(s),
             Item::Enum(e) => self.resolve_enum(e),
             Item::Const(c) => self.resolve_const(c),
+            Item::Impl(i) => {
+                for method in &i.methods {
+                    self.resolve_fn(method);
+                }
+            }
         }
     }
 
@@ -412,6 +488,12 @@ impl Resolver {
                 }
                 if let Some(e) = end.as_deref() {
                     self.resolve_expr(e);
+                }
+            }
+            Expr::StructLit { path, fields, .. } => {
+                self.resolve_path(path);
+                for f in fields {
+                    self.resolve_expr(&f.value);
                 }
             }
             Expr::Return { value, .. } => {

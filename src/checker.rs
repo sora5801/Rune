@@ -12,7 +12,7 @@ use std::fmt;
 use crate::ast::*;
 use crate::resolver::{Resolutions, SymbolKind};
 use crate::token::Span;
-use crate::ty::{Ty, DEFAULT_FLOAT, DEFAULT_INT};
+use crate::ty::{SymbolId, Ty, DEFAULT_FLOAT, DEFAULT_INT};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeError {
@@ -37,7 +37,28 @@ pub struct CheckResults {
     pub fn_signatures: HashMap<Span, Ty>,
     pub local_types: HashMap<Span, Ty>,
     pub type_resolutions: HashMap<Span, Ty>,
+    pub struct_layouts: HashMap<SymbolId, StructLayout>,
     pub errors: Vec<TypeError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    pub fields: Vec<StructLayoutField>,
+    /// Total size in bytes (with 8-byte-per-field padding for v0.x).
+    pub size: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructLayoutField {
+    pub name: String,
+    pub ty: Ty,
+    pub offset: u32,
+}
+
+impl StructLayout {
+    pub fn field(&self, name: &str) -> Option<&StructLayoutField> {
+        self.fields.iter().find(|f| f.name == name)
+    }
 }
 
 pub struct Checker<'r> {
@@ -46,6 +67,7 @@ pub struct Checker<'r> {
     fn_signatures: HashMap<Span, Ty>,
     local_types: HashMap<Span, Ty>,
     type_resolutions: HashMap<Span, Ty>,
+    struct_layouts: HashMap<SymbolId, StructLayout>,
     errors: Vec<TypeError>,
     current_return: Ty,
 }
@@ -58,22 +80,41 @@ impl<'r> Checker<'r> {
             fn_signatures: HashMap::new(),
             local_types: HashMap::new(),
             type_resolutions: HashMap::new(),
+            struct_layouts: HashMap::new(),
             errors: Vec::new(),
             current_return: Ty::Unit,
         }
     }
 
     pub fn check_module(mut self, m: &Module) -> CheckResults {
-        // Pass 1: function signatures — so cross-function and order-independent
-        // calls work without forward declaration.
+        // Pass 1a: struct layouts — needed before signatures so that
+        // function params/returns that mention struct types resolve.
         for item in &m.items {
-            if let Item::Fn(f) = item {
-                let sig = self.fn_signature(f);
-                self.fn_signatures.insert(f.name.span, sig);
+            if let Item::Struct(s) = item {
+                if let Some(&sym_id) = self.res.decl_to_sym.get(&s.name.span) {
+                    let layout = self.build_struct_layout(s);
+                    self.struct_layouts.insert(sym_id, layout);
+                }
             }
-            if let Item::Const(c) = item {
-                let ty = self.resolve_type(&c.ty);
-                self.local_types.insert(c.name.span, ty);
+        }
+        // Pass 1b: function signatures + const types + impl methods.
+        for item in &m.items {
+            match item {
+                Item::Fn(f) => {
+                    let sig = self.fn_signature(f);
+                    self.fn_signatures.insert(f.name.span, sig);
+                }
+                Item::Const(c) => {
+                    let ty = self.resolve_type(&c.ty);
+                    self.local_types.insert(c.name.span, ty);
+                }
+                Item::Impl(i) => {
+                    for method in &i.methods {
+                        let sig = self.fn_signature(method);
+                        self.fn_signatures.insert(method.name.span, sig);
+                    }
+                }
+                Item::Struct(_) | Item::Enum(_) => {}
             }
         }
 
@@ -87,8 +128,26 @@ impl<'r> Checker<'r> {
             fn_signatures: self.fn_signatures,
             local_types: self.local_types,
             type_resolutions: self.type_resolutions,
+            struct_layouts: self.struct_layouts,
             errors: self.errors,
         }
+    }
+
+    fn build_struct_layout(&mut self, s: &StructDecl) -> StructLayout {
+        let mut fields = Vec::with_capacity(s.fields.len());
+        let mut offset: u32 = 0;
+        for f in &s.fields {
+            let ty = self.resolve_type(&f.ty);
+            fields.push(StructLayoutField {
+                name: f.name.name.clone(),
+                ty,
+                offset,
+            });
+            // v0.x simplification: every field is padded to 8 bytes. Avoids
+            // dealing with field alignment until we have varied widths.
+            offset += 8;
+        }
+        StructLayout { fields, size: offset }
     }
 
     fn fn_signature(&mut self, f: &FnDecl) -> Ty {
@@ -128,6 +187,11 @@ impl<'r> Checker<'r> {
         match item {
             Item::Fn(f) => self.check_fn(f),
             Item::Const(c) => self.check_const(c),
+            Item::Impl(i) => {
+                for method in &i.methods {
+                    self.check_fn(method);
+                }
+            }
             Item::Struct(_) | Item::Enum(_) => {
                 // Field/variant types were resolved by the resolver and
                 // signatures aren't needed yet — nothing to check here.
@@ -266,10 +330,8 @@ impl<'r> Checker<'r> {
             Expr::MethodCall { receiver, method, args, span } => {
                 self.check_method_call(receiver, method, args, *span)
             }
-            Expr::Field { receiver, span, .. } => {
-                self.check_expr(receiver);
-                self.error(*span, "field access is not yet type-checked");
-                Ty::Error
+            Expr::Field { receiver, name, span } => {
+                self.check_field_access(receiver, name, *span)
             }
             Expr::Index { receiver, index, span } => self.check_index(receiver, index, *span),
             Expr::Try { expr, span } => {
@@ -296,6 +358,9 @@ impl<'r> Checker<'r> {
             }
             Expr::For { pat, iter, body, .. } => self.check_for(pat, iter, body),
             Expr::Match { scrutinee, arms, span } => self.check_match(scrutinee, arms, *span),
+            Expr::StructLit { path, fields, span } => {
+                self.check_struct_lit(path, fields, *span)
+            }
             Expr::Range { start, end, span, .. } => {
                 // Range expressions are currently only legal inside a slice
                 // index (`s[a..b]`). Outside that context, we still want to
@@ -639,6 +704,113 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Look up a method declared in an `impl` block on a struct type.
+    /// Returns the method's externally-visible signature (without the
+    /// `self` parameter).
+    fn user_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+        let Ty::Struct(sym_id) = recv else { return None };
+        let &method_sym = self.res.impl_methods.get(&(*sym_id, name.to_string()))?;
+        let method_span = self.res.symbol(method_sym).span;
+        let fn_ty = self.fn_signatures.get(&method_span)?;
+        let Ty::Fn { params, ret } = fn_ty else { return None };
+        // Drop the `self` parameter from the externally-visible sig.
+        let (_self_ty, rest) = params.split_first()?;
+        Some(MethodSig {
+            params: rest.to_vec(),
+            ret: (**ret).clone(),
+        })
+    }
+
+    fn check_struct_lit(&mut self, path: &Path, fields: &[FieldInit], span: Span) -> Ty {
+        let Some(&sym_id) = self.res.path_to_sym.get(&path.span) else {
+            return Ty::Error;
+        };
+        let sym_kind = self.res.symbol(sym_id).kind.clone();
+        let sym_name = self.res.symbol(sym_id).name.clone();
+        if !matches!(sym_kind, SymbolKind::Struct) {
+            self.error(
+                path.span,
+                format!("`{}` is not a struct", sym_name),
+            );
+            for f in fields {
+                self.check_expr(&f.value);
+            }
+            return Ty::Error;
+        }
+        let Some(layout) = self.struct_layouts.get(&sym_id).cloned() else {
+            self.error(path.span, format!("no layout for struct `{}`", sym_name));
+            return Ty::Error;
+        };
+
+        // Track which fields have been provided so we can flag missing/duplicates.
+        let mut provided = std::collections::HashSet::new();
+        for init in fields {
+            let value_ty = self.check_expr(&init.value);
+            let Some(decl_field) = layout.field(&init.name.name) else {
+                self.error(
+                    init.name.span,
+                    format!("`{}` has no field `{}`", sym_name, init.name.name),
+                );
+                continue;
+            };
+            if !value_ty.compatible(&decl_field.ty) {
+                self.error(
+                    init.value.span(),
+                    format!(
+                        "field `{}` declared `{}` but value has type `{}`",
+                        init.name.name,
+                        decl_field.ty.display(),
+                        value_ty.display()
+                    ),
+                );
+            }
+            if !provided.insert(init.name.name.clone()) {
+                self.error(
+                    init.name.span,
+                    format!("field `{}` set more than once", init.name.name),
+                );
+            }
+        }
+        for decl_field in &layout.fields {
+            if !provided.contains(&decl_field.name) {
+                self.error(
+                    span,
+                    format!("missing field `{}` for `{}`", decl_field.name, sym_name),
+                );
+            }
+        }
+        Ty::Struct(sym_id)
+    }
+
+    fn check_field_access(&mut self, receiver: &Expr, name: &Ident, span: Span) -> Ty {
+        let recv_ty = self.check_expr(receiver);
+        let Ty::Struct(sym_id) = recv_ty else {
+            if !recv_ty.is_error() {
+                self.error(
+                    span,
+                    format!(
+                        "cannot access field `{}` on type `{}`",
+                        name.name,
+                        recv_ty.display()
+                    ),
+                );
+            }
+            return Ty::Error;
+        };
+        let Some(layout) = self.struct_layouts.get(&sym_id) else {
+            return Ty::Error;
+        };
+        let Some(field) = layout.field(&name.name) else {
+            let struct_name = self.res.symbol(sym_id).name.clone();
+            self.error(
+                name.span,
+                format!("`{}` has no field `{}`", struct_name, name.name),
+            );
+            return Ty::Error;
+        };
+        field.ty.clone()
+    }
+
     fn check_method_call(
         &mut self,
         receiver: &Expr,
@@ -648,7 +820,9 @@ impl<'r> Checker<'r> {
     ) -> Ty {
         let recv_ty = self.check_expr(receiver);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
-        let Some(sig) = resolve_method(&recv_ty, &method.name) else {
+        let sig = resolve_method(&recv_ty, &method.name)
+            .or_else(|| self.user_method_sig(&recv_ty, &method.name));
+        let Some(sig) = sig else {
             if !recv_ty.is_error() {
                 self.error(
                     span,
@@ -1000,6 +1174,19 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
             ret: Ty::Bool,
         }),
         (Ty::Array(_, _), "len") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        // Vec methods. v0.x: element type is implicitly i64.
+        (Ty::Vec, "push") => Some(MethodSig {
+            params: vec![Ty::Int(IntTy::I64)],
+            ret: Ty::Unit,
+        }),
+        (Ty::Vec, "get") => Some(MethodSig {
+            params: vec![Ty::Int(IntTy::I64)],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        (Ty::Vec, "len") => Some(MethodSig {
             params: vec![],
             ret: Ty::Int(IntTy::I64),
         }),
