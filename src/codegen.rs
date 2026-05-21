@@ -1869,11 +1869,26 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 }
                 let inst = self.builder.ins().call(local_func, &arg_vals);
                 let results = self.builder.inst_results(inst);
-                if results.is_empty() {
-                    Ok(None)
+                let result = if results.is_empty() {
+                    None
                 } else {
-                    Ok(Some(results[0]))
+                    Some(results[0])
+                };
+                // Owned call arguments: a fresh ARC temporary passed
+                // as an argument — a struct literal, a call result, a
+                // `dyn` box, anything but a borrowed `Local` — owns a
+                // +1 that no binding will release. The callee only
+                // borrows it, so the caller reclaims it once the call
+                // returns. A `Local` argument stays owned by its
+                // binding and is released at that scope's exit.
+                for (a, &v) in args.iter().zip(&arg_vals) {
+                    if is_arc_type(&a.ty, self.struct_arc_fields, self.enum_has_payload)
+                        && !matches!(a.kind, HirExprKind::Local(_))
+                    {
+                        self.emit_arc_call("release", &a.ty, v)?;
+                    }
                 }
+                Ok(result)
             }
             HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
             HirExprKind::MethodCall { receiver, method, args } => {

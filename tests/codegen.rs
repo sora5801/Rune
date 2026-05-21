@@ -3336,3 +3336,79 @@ fn vec_of_dyn_push_existing_dyn() {
     // 6*6 = 36
     assert_eq!(run_main(src), 36);
 }
+
+#[test]
+fn call_arg_dyn_temp_released() {
+    // `describe(Circle { .. })` boxes a fresh `dyn` argument the
+    // callee only borrows. The caller reclaims that box once the
+    // call returns — 200 iterations, a double free would crash.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn describe(s: dyn Shape) -> i64 { s.area() }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut i = 0;
+            while i < 200 {
+                sum = sum + describe(Circle { r: 3 });
+                i = i + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (3 * 3) = 1800
+    assert_eq!(run_main(src), 1800);
+}
+
+#[test]
+fn call_arg_vec_temp_released() {
+    // The argument is a *call result* (`triple()`), a fresh ARC
+    // temporary. The caller releases it after `vlen` returns.
+    let src = r#"
+        fn vlen(v: Vec<i64>) -> i64 { v.len() }
+        fn triple() -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(1);
+            v.push(2);
+            v.push(3);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut i = 0;
+            while i < 200 {
+                sum = sum + vlen(triple());
+                i = i + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * 3 = 600
+    assert_eq!(run_main(src), 600);
+}
+
+#[test]
+fn call_arg_local_not_released() {
+    // A `Local` argument stays owned by its binding — the caller
+    // must NOT release it after the call. `v` is passed three
+    // times and remains valid each time; releasing it post-call
+    // would use-after-free on the second call.
+    let src = r#"
+        fn first(v: Vec<i64>) -> i64 { v.get(0) }
+        fn main() -> i64 {
+            let mut v: Vec<i64> = vec_new();
+            v.push(10);
+            let a = first(v);
+            let b = first(v);
+            let c = first(v);
+            a + b + c
+        }
+    "#;
+    // 10 + 10 + 10 = 30
+    assert_eq!(run_main(src), 30);
+}

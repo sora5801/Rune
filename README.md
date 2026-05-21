@@ -251,8 +251,8 @@ error if reached.
 
 ## Roadmap
 
-1. Owned call arguments — release ARC argument temporaries after the
-   call, closing the last v0.x leak class
+1. ARC field / index reads that retain; `dyn` coercion at
+   struct-literal fields and enum-variant payloads
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
