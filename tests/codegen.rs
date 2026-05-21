@@ -3164,3 +3164,77 @@ fn dyn_method_with_arg() {
     "#;
     assert_eq!(run_main(src), 107);
 }
+
+#[test]
+fn dyn_box_released_each_iteration() {
+    // Each loop iteration boxes a fresh trait object and drops it at
+    // the end of the body block. 50 alloc/release cycles — a double
+    // free in the synthesized `dyn` release would crash here.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let mut total = 0;
+            let mut i = 0;
+            while i < 50 {
+                let s: dyn Shape = Circle { r: 3 };
+                total = total + s.area();
+                i = i + 1;
+            }
+            total
+        }
+    "#;
+    // 50 * (3 * 3) = 450
+    assert_eq!(run_main(src), 450);
+}
+
+#[test]
+fn dyn_box_copy_shares_refcount() {
+    // `let b = a` copies a trait-object local: ARC-on-copy retains the
+    // shared box, so the two scope-exit releases net a single free. A
+    // missing copy-retain would free the box twice.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let a: dyn Shape = Circle { r: 6 };
+            let b: dyn Shape = a;
+            a.area() + b.area()
+        }
+    "#;
+    // 6*6 + 6*6 = 72
+    assert_eq!(run_main(src), 72);
+}
+
+#[test]
+fn dyn_box_from_local_retains_data() {
+    // Coercing a *borrowed* local into a `dyn` box: the box must
+    // retain the boxed struct, since both the original local and the
+    // box release it at scope exit.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let c: Circle = Circle { r: 7 };
+            let s: dyn Shape = c;
+            s.area() + c.r
+        }
+    "#;
+    // 7*7 + 7 = 56
+    assert_eq!(run_main(src), 56);
+}

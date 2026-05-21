@@ -72,6 +72,10 @@ pub struct Codegen<M: Module> {
     /// layout. `(type_sym, method) → impl fn sym` for building tables.
     trait_methods: HashMap<SymbolId, Vec<String>>,
     impl_methods: HashMap<(SymbolId, String), SymbolId>,
+    /// FuncId of the synthesized per-trait `dyn` release function. The
+    /// box decrements its rc and, at zero, drops the boxed data
+    /// through the box's drop slot and frees the box.
+    dyn_release_funcs: HashMap<SymbolId, FuncId>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -650,6 +654,20 @@ impl<M: Module> Codegen<M> {
                 .map_err(|e| CodegenError(e.to_string()))?;
             self.vec_release_funcs.insert(elem.clone(), id);
         }
+        // Pass 0 (cont.): declare a per-trait `dyn` release function.
+        // A trait object is a heap box `[fnptr_0..fnptr_{N-1}, data,
+        // drop, rc]`; its release decrements rc and, at zero, calls
+        // the drop slot (the concrete struct's release) and frees it.
+        for &trait_sym in hir.trait_methods.keys() {
+            let name = format!("__rune_release_dyn${}", trait_sym.0);
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.dyn_release_funcs.insert(trait_sym, id);
+        }
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
             let HirItem::Fn(f) = item;
@@ -675,6 +693,9 @@ impl<M: Module> Codegen<M> {
         }
         for (elem, &func_id) in &self.vec_release_funcs.clone() {
             self.define_vec_release(elem, func_id)?;
+        }
+        for (&sym, &func_id) in &self.dyn_release_funcs.clone() {
+            self.define_dyn_release(sym, func_id)?;
         }
         Ok(())
     }
@@ -908,6 +929,16 @@ impl<M: Module> Codegen<M> {
             // here in practice since is_arc_type returns false.)
             return Ok(());
         }
+        // Trait object: the synthesized per-trait release.
+        if let Ty::Dyn(sym) = ty {
+            let func_id = *self
+                .dyn_release_funcs
+                .get(sym)
+                .ok_or_else(|| CodegenError("missing dyn release fn".into()))?;
+            let local = self.module.declare_func_in_func(func_id, builder.func);
+            builder.ins().call(local, &[value]);
+            return Ok(());
+        }
         // Vec<T> with an ARC element type: synthesized per-element
         // release. A Vec of non-ARC elements has no entry and falls
         // through to the runtime helper (which frees only the array).
@@ -1016,6 +1047,79 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
+    /// Build a trait object's release function. The `dyn` box is a
+    /// heap cell `[fnptr_0..fnptr_{N-1}, data, drop, rc]` — field area
+    /// `(N+2)*8`, rc appended by `struct_new`. Decrement rc; at zero,
+    /// call the drop slot (the concrete struct's synthesized release)
+    /// on the data pointer, then free the box itself.
+    fn define_dyn_release(
+        &mut self,
+        trait_sym: SymbolId,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let n = self
+            .trait_methods
+            .get(&trait_sym)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let data_off = (n * 8) as i32;
+        let drop_off = ((n + 1) * 8) as i32;
+        let field_size = ((n + 2) * 8) as i64;
+        let rc_off = field_size as i32;
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let ptr = builder.block_params(entry)[0];
+        // rc -= 1; store.
+        let rc = builder.ins().load(types::I64, MemFlags::new(), ptr, rc_off);
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_rc = builder.ins().isub(rc, one);
+        builder.ins().store(MemFlags::new(), new_rc, ptr, rc_off);
+        let zero = builder.ins().iconst(types::I64, 0);
+        let alive = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThan, new_rc, zero);
+        let do_free = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(alive, done, &[], do_free, &[]);
+        // do_free: drop the boxed data through the drop slot, free box.
+        builder.switch_to_block(do_free);
+        builder.seal_block(do_free);
+        let data = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), ptr, data_off);
+        let drop_fn = builder
+            .ins()
+            .load(types::I64, MemFlags::new(), ptr, drop_off);
+        let mut drop_sig = self.module.make_signature();
+        drop_sig.params.push(AbiParam::new(types::I64));
+        let drop_sig_ref = builder.import_signature(drop_sig);
+        builder
+            .ins()
+            .call_indirect(drop_sig_ref, drop_fn, &[data]);
+        let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
+        let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
+        let size_const = builder.ins().iconst(types::I64, field_size);
+        builder.ins().call(dealloc_local, &[ptr, size_const]);
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
     /// Codegen-level mirror of `FnCodegen::ensure_runtime_func` — used
     /// when synthesizing helpers outside of a Rune-function context.
     fn ensure_runtime_func(&mut self, name: &str) -> Result<FuncId, CodegenError> {
@@ -1071,6 +1175,7 @@ impl<M: Module> Codegen<M> {
             vec_release_funcs: &self.vec_release_funcs,
             trait_methods: &self.trait_methods,
             impl_methods: &self.impl_methods,
+            dyn_release_funcs: &self.dyn_release_funcs,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -1197,6 +1302,7 @@ impl Codegen<JITModule> {
             vec_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             impl_methods: HashMap::new(),
+            dyn_release_funcs: HashMap::new(),
         })
     }
 
@@ -1254,6 +1360,7 @@ impl Codegen<ObjectModule> {
             vec_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             impl_methods: HashMap::new(),
+            dyn_release_funcs: HashMap::new(),
         })
     }
 
@@ -1332,6 +1439,7 @@ struct FnCodegen<'a, M: Module> {
     vec_release_funcs: &'a HashMap<Ty, FuncId>,
     trait_methods: &'a HashMap<SymbolId, Vec<String>>,
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
+    dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -1500,6 +1608,47 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     }
                     _ => {}
                 }
+            }
+        }
+        // Trait objects: retain bumps the box's rc (the slot after
+        // the N method pointers + data + drop); release dispatches to
+        // the synthesized per-trait release, which drops the boxed
+        // concrete value and frees the box.
+        if let Ty::Dyn(sym) = ty {
+            let n = self.trait_methods.get(sym).map(|m| m.len()).unwrap_or(0);
+            let rc_offset = ((n + 2) * 8) as i32;
+            match action {
+                "retain" => {
+                    let rc = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        value,
+                        rc_offset,
+                    );
+                    let one = self.builder.ins().iconst(types::I64, 1);
+                    let new_rc = self.builder.ins().iadd(rc, one);
+                    self.builder.ins().store(
+                        MemFlags::new(),
+                        new_rc,
+                        value,
+                        rc_offset,
+                    );
+                    return Ok(());
+                }
+                "release" => {
+                    let func_id = *self
+                        .dyn_release_funcs
+                        .get(sym)
+                        .ok_or_else(|| {
+                            CodegenError("missing dyn release fn".into())
+                        })?;
+                    let local = self
+                        .module
+                        .declare_func_in_func(func_id, self.builder.func);
+                    self.builder.ins().call(local, &[value]);
+                    return Ok(());
+                }
+                _ => {}
             }
         }
         // Vec<T>: retain is the type-agnostic runtime helper (rc++);
@@ -2484,9 +2633,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
     }
 
     /// Coerce a concrete struct into a `dyn Trait` object. Allocates
-    /// a heap cell `[fnptr_0, .., fnptr_{N-1}, data]` — the trait's
-    /// method pointers (per-instance method table) followed by the
-    /// concrete data pointer. The cell is never freed in v0.x.
+    /// a heap cell `[fnptr_0..fnptr_{N-1}, data, drop, rc]` — the
+    /// trait's method pointers (per-instance method table), the
+    /// concrete data pointer, a drop slot holding the struct's
+    /// synthesized release fn, and the ARC refcount (appended by
+    /// `struct_new`). The box owns a +1 on the data: it is reclaimed
+    /// by ARC, and its release drops the data through the drop slot.
     fn compile_dyn_box(
         &mut self,
         value: &HirExpr,
@@ -2496,15 +2648,21 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let data = self
             .compile_expr(value)?
             .ok_or_else(|| CodegenError("dyn coercion value produced no value".into()))?;
+        // The box owns a +1 on the boxed data. A fresh producer (a
+        // struct literal, a call) already carries that +1; a borrowed
+        // `Local` read does not, so retain it.
+        if let HirExprKind::Local(_) = &value.kind {
+            self.emit_arc_call("retain", &value.ty, data)?;
+        }
         let methods = self
             .trait_methods
             .get(&trait_sym)
             .cloned()
             .ok_or_else(|| CodegenError("dyn: unknown trait".into()))?;
         let n = methods.len();
-        // `struct_new(size)` allocs `size + 8` (the trailing rc slot
-        // goes unused — a trait-object box is not reclaimed in v0.x).
-        let cell_size = ((n + 1) * 8) as i64;
+        // `struct_new(size)` allocs `size + 8`, with rc=1 at offset
+        // `size`. Field area is the N method ptrs + data + drop slot.
+        let cell_size = ((n + 2) * 8) as i64;
         let new_id = self.ensure_runtime_func("struct_new")?;
         let new_local = self.module.declare_func_in_func(new_id, self.builder.func);
         let size_v = self.builder.ins().iconst(types::I64, cell_size);
@@ -2530,6 +2688,18 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         self.builder
             .ins()
             .store(MemFlags::new(), data, cell, (n * 8) as i32);
+        // Drop slot: the concrete struct's synthesized release fn.
+        // `define_dyn_release` calls it through this slot when the
+        // box's rc reaches zero, reclaiming the boxed data.
+        let drop_id = *self
+            .struct_release_funcs
+            .get(&struct_sym)
+            .ok_or_else(|| CodegenError("dyn: struct missing release fn".into()))?;
+        let drop_ref = self.module.declare_func_in_func(drop_id, self.builder.func);
+        let drop_ptr = self.builder.ins().func_addr(types::I64, drop_ref);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), drop_ptr, cell, ((n + 1) * 8) as i32);
         Ok(Some(cell))
     }
 
@@ -3162,7 +3332,8 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 /// `struct_arc_fields` map is still used for *field walks* during
 /// release, but is_arc_type returns true for any Ty::Struct). An
 /// enum is ARC-managed iff it has at least one payload-bearing
-/// variant (`enum_has_payload`).
+/// variant (`enum_has_payload`). A trait object (`dyn Trait`) is a
+/// heap box and is always ARC-managed.
 /// Max payload arity across an enum's variants. Used to size the
 /// heap descriptor `{ tag, payload[max_arity], rc }`. 0 for tag-only
 /// enums (which use the i64 representation instead).
@@ -3218,6 +3389,9 @@ fn is_arc_type(
         Ty::Struct(_, _) => true,
         Ty::Enum(sym, _) => enum_has_payload.contains(sym),
         Ty::Weak(_) => true,
+        // A trait object is a heap box reclaimed by ARC; its release
+        // also drops the boxed concrete value.
+        Ty::Dyn(_) => true,
         _ => false,
     }
 }
