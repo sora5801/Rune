@@ -148,7 +148,10 @@ impl Parser {
                 | TokenKind::Enum
                 | TokenKind::Const
                 | TokenKind::Pub
-                | TokenKind::Impl => return,
+                | TokenKind::Impl
+                | TokenKind::Trait
+                | TokenKind::Mod
+                | TokenKind::Use => return,
                 _ => {
                     self.bump();
                 }
@@ -172,6 +175,8 @@ impl Parser {
             TokenKind::Const => Ok(Item::Const(self.parse_const(vis, start)?)),
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl(start)?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait(vis, start)?)),
+            TokenKind::Mod => Ok(Item::Mod(self.parse_mod(vis, start)?)),
+            TokenKind::Use => Ok(Item::Use(self.parse_use(start)?)),
             _ => {
                 let span = self.peek_span();
                 Err(ParseError {
@@ -396,6 +401,33 @@ impl Parser {
             name,
             methods,
             span: Span::new(start, rb.span.end),
+        })
+    }
+
+    fn parse_mod(&mut self, vis: Visibility, start: usize) -> ParseResult<ModDecl> {
+        self.expect(&TokenKind::Mod, "`mod`")?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut items = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+            items.push(self.parse_item()?);
+        }
+        let rb = self.expect(&TokenKind::RBrace, "`}`")?;
+        Ok(ModDecl {
+            vis,
+            name,
+            items,
+            span: Span::new(start, rb.span.end),
+        })
+    }
+
+    fn parse_use(&mut self, start: usize) -> ParseResult<UseDecl> {
+        self.expect(&TokenKind::Use, "`use`")?;
+        let path = self.parse_path()?;
+        let semi = self.expect(&TokenKind::Semi, "`;`")?;
+        Ok(UseDecl {
+            path,
+            span: Span::new(start, semi.span.end),
         })
     }
 
@@ -636,6 +668,9 @@ impl Parser {
             | TokenKind::Struct
             | TokenKind::Enum
             | TokenKind::Const
+            | TokenKind::Trait
+            | TokenKind::Mod
+            | TokenKind::Use
             | TokenKind::Pub => Ok(Stmt::Item(self.parse_item()?)),
             _ => {
                 let expr = self.parse_expr()?;

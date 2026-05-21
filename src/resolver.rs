@@ -56,6 +56,9 @@ pub enum SymbolKind {
     /// compile-time-only construct; method dispatch is resolved
     /// statically via monomorphization.
     Trait,
+    /// An inline module (`mod name { ... }`). Compile-time-only — a
+    /// module is a namespace, not a runtime value.
+    Module,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +148,10 @@ pub struct Resolver {
     enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Names of the modules currently being declared / resolved,
+    /// outermost first. Empty means the root module. Item lookups
+    /// qualify against this path; functions mangle with it.
+    current_path: Vec<String>,
     errors: Vec<ResolveError>,
 }
 
@@ -168,6 +175,7 @@ impl Resolver {
             enum_generics: HashMap::new(),
             trait_methods: HashMap::new(),
             generic_bounds: HashMap::new(),
+            current_path: Vec::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -175,21 +183,15 @@ impl Resolver {
     }
 
     pub fn resolve_module(mut self, m: &Module) -> (Resolutions, Vec<ResolveError>) {
-        // Pass 1: declare non-impl items so impl blocks can resolve their
-        // target type.
-        for item in &m.items {
-            self.declare_item(item);
-        }
+        // Pass 1: declare non-impl items (recursing into modules) so
+        // impl blocks and `use` can resolve their targets.
+        self.declare_items(&m.items);
         // Pass 1.5: declare impl methods.
-        for item in &m.items {
-            if let Item::Impl(i) = item {
-                self.declare_impl(i);
-            }
-        }
+        self.declare_impls(&m.items);
+        // Pass 1.7: resolve `use` aliases now that every item exists.
+        self.resolve_uses(&m.items);
         // Pass 2: resolve all bodies.
-        for item in &m.items {
-            self.resolve_item(item);
-        }
+        self.resolve_items(&m.items);
         (
             Resolutions {
                 symbols: self.symbols,
@@ -207,6 +209,68 @@ impl Resolver {
             },
             self.errors,
         )
+    }
+
+    /// Pass 1.5 — declare impl methods, recursing into modules so an
+    /// `impl` block inside `mod m` resolves its target type relative
+    /// to `m`.
+    fn declare_impls(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Impl(i) => self.declare_impl(i),
+                Item::Mod(md) => {
+                    self.current_path.push(md.name.name.clone());
+                    self.declare_impls(&md.items);
+                    self.current_path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Pass 1.7 — resolve `use a::b::c;` declarations into aliases in
+    /// the using module's namespace.
+    fn resolve_uses(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Use(u) => {
+                    if let Some(id) = self.lookup_path(&u.path.segments) {
+                        // Alias the final segment into the current
+                        // module's namespace.
+                        let alias = u
+                            .path
+                            .segments
+                            .last()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default();
+                        let key = if self.current_path.is_empty() {
+                            alias
+                        } else {
+                            format!("{}::{}", self.current_path.join("::"), alias)
+                        };
+                        self.scopes[0].insert(key, id);
+                        self.path_to_sym.insert(u.path.span, id);
+                    } else {
+                        let shown: Vec<&str> = u
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect();
+                        self.error(
+                            format!("unresolved import `{}`", shown.join("::")),
+                            u.path.span,
+                        );
+                    }
+                }
+                Item::Mod(md) => {
+                    self.current_path.push(md.name.name.clone());
+                    self.resolve_uses(&md.items);
+                    self.current_path.pop();
+                }
+                _ => {}
+            }
+        }
     }
 
     fn declare_impl(&mut self, i: &ImplBlock) {
@@ -242,8 +306,16 @@ impl Resolver {
             }
         }
         let struct_name = self.symbols[struct_sym.0 as usize].name.clone();
+        // Module-prefix the impl method's codegen name so two structs
+        // named the same in different modules don't collide.
+        let mod_prefix = if self.current_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}__", self.current_path.join("__"))
+        };
         for method in &i.methods {
-            let mangled = format!("{}__{}", struct_name, method.name.name);
+            let mangled =
+                format!("{}{}__{}", mod_prefix, struct_name, method.name.name);
             let id = SymbolId(self.symbols.len() as u32);
             self.symbols.push(Symbol {
                 name: mangled,
@@ -370,21 +442,119 @@ impl Resolver {
     }
 
     fn lookup(&self, name: &str) -> Option<SymbolId> {
-        for scope in self.scopes.iter().rev() {
+        // Lexical scopes (locals) — skip scopes[0], which is the
+        // global namespace handled by the qualified lookups below.
+        for scope in self.scopes.iter().skip(1).rev() {
             if let Some(&id) = scope.get(name) {
+                return Some(id);
+            }
+        }
+        // Qualified lookup against the current module path, longest
+        // prefix first: inside `mod a { mod b { ... } }`, a bare
+        // `name` tries `a::b::name`, then `a::name`, then `name`.
+        for depth in (0..=self.current_path.len()).rev() {
+            let key = if depth == 0 {
+                name.to_string()
+            } else {
+                format!("{}::{}", self.current_path[..depth].join("::"), name)
+            };
+            if let Some(&id) = self.scopes[0].get(&key) {
                 return Some(id);
             }
         }
         None
     }
 
+    /// Resolve a multi-segment path (`a::b::c`) to a symbol. Tries the
+    /// path absolutely (from root) and relative to the current module.
+    fn lookup_path(&self, segments: &[Ident]) -> Option<SymbolId> {
+        if segments.len() == 1 {
+            return self.lookup(&segments[0].name);
+        }
+        let joined: Vec<&str> =
+            segments.iter().map(|s| s.name.as_str()).collect();
+        let tail = joined.join("::");
+        // Absolute.
+        if let Some(&id) = self.scopes[0].get(&tail) {
+            return Some(id);
+        }
+        // Relative to each enclosing module path prefix.
+        for depth in (0..=self.current_path.len()).rev() {
+            if depth == 0 {
+                continue; // depth 0 == absolute, already tried
+            }
+            let key =
+                format!("{}::{}", self.current_path[..depth].join("::"), tail);
+            if let Some(&id) = self.scopes[0].get(&key) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Build the codegen-visible (mangled) name for a function
+    /// declared in the current module. Root functions keep their
+    /// bare name so `main` stays `main`.
+    fn mangled_fn_name(&self, bare: &str) -> String {
+        if self.current_path.is_empty() {
+            bare.to_string()
+        } else {
+            format!("{}__{}", self.current_path.join("__"), bare)
+        }
+    }
+
+    /// Insert `bare` into the global namespace under its module-
+    /// qualified key. Returns the fresh SymbolId.
+    fn intern_item(
+        &mut self,
+        bare: &str,
+        span: Span,
+        kind: SymbolKind,
+        codegen_name: String,
+    ) -> SymbolId {
+        let id = SymbolId(self.symbols.len() as u32);
+        self.symbols.push(Symbol {
+            name: codegen_name,
+            span,
+            kind,
+        });
+        let key = if self.current_path.is_empty() {
+            bare.to_string()
+        } else {
+            format!("{}::{}", self.current_path.join("::"), bare)
+        };
+        self.scopes[0].insert(key, id);
+        id
+    }
+
     fn error(&mut self, msg: impl Into<String>, span: Span) {
         self.errors.push(ResolveError { message: msg.into(), span });
     }
 
-    // ---- pass 1: declare top-level items ----
+    // ---- pass 1: declare items (recursing into modules) ----
+
+    fn declare_items(&mut self, items: &[Item]) {
+        for item in items {
+            self.declare_item(item);
+        }
+    }
 
     fn declare_item(&mut self, item: &Item) {
+        // Modules: intern the module name, then recurse with the
+        // path extended.
+        if let Item::Mod(md) = item {
+            let id = self.intern_item(
+                &md.name.name,
+                md.name.span,
+                SymbolKind::Module,
+                md.name.name.clone(),
+            );
+            self.decl_to_sym.insert(md.name.span, id);
+            self.current_path.push(md.name.name.clone());
+            self.declare_items(&md.items);
+            self.current_path.pop();
+            return;
+        }
         let (name, kind) = match item {
             Item::Fn(f) => (&f.name, SymbolKind::Fn),
             Item::Struct(s) => (&s.name, SymbolKind::Struct),
@@ -392,11 +562,19 @@ impl Resolver {
             Item::Const(c) => (&c.name, SymbolKind::Const),
             Item::Trait(t) => (&t.name, SymbolKind::Trait),
             // Impl blocks contribute methods, not a top-level name.
-            // Methods are declared by a separate pass after all structs
-            // are known. See `declare_impl`.
             Item::Impl(_) => return,
+            // `use` is resolved in pass 1.7 after all items exist.
+            Item::Use(_) => return,
+            Item::Mod(_) => unreachable!("handled above"),
         };
-        let id = self.intern(name.name.clone(), name.span, kind);
+        // Functions get a mangled codegen name; everything else keeps
+        // its bare name (only functions become Cranelift symbols).
+        let codegen_name = if matches!(kind, SymbolKind::Fn) {
+            self.mangled_fn_name(&name.name)
+        } else {
+            name.name.clone()
+        };
+        let id = self.intern_item(&name.name, name.span, kind, codegen_name);
         self.decl_to_sym.insert(name.span, id);
 
         // For enums, also register each variant by name (off-scope —
@@ -456,7 +634,13 @@ impl Resolver {
         }
     }
 
-    // ---- pass 2: resolve bodies ----
+    // ---- pass 2: resolve bodies (recursing into modules) ----
+
+    fn resolve_items(&mut self, items: &[Item]) {
+        for item in items {
+            self.resolve_item(item);
+        }
+    }
 
     fn resolve_item(&mut self, item: &Item) {
         match item {
@@ -483,6 +667,14 @@ impl Resolver {
                     }
                     self.exit_scope();
                 }
+            }
+            Item::Mod(md) => {
+                self.current_path.push(md.name.name.clone());
+                self.resolve_items(&md.items);
+                self.current_path.pop();
+            }
+            Item::Use(_) => {
+                // Already resolved in pass 1.7.
             }
         }
     }
@@ -661,40 +853,47 @@ impl Resolver {
         for arg in &p.generic_args {
             self.resolve_type(arg);
         }
-        let first = &p.segments[0];
-        let Some(first_id) = self.lookup(&first.name) else {
-            self.error(format!("unresolved name `{}`", first.name), p.span);
-            return;
-        };
-        if p.segments.len() == 1 {
-            self.path_to_sym.insert(p.span, first_id);
+        // 1. Try the whole path as a single (possibly module-
+        //    qualified) item: `f`, `m::f`, `a::b::c`.
+        if let Some(id) = self.lookup_path(&p.segments) {
+            self.path_to_sym.insert(p.span, id);
             return;
         }
-        // Two-segment path: `Enum::Variant` is the only shape we resolve.
-        if p.segments.len() == 2
-            && matches!(self.symbols[first_id.0 as usize].kind, SymbolKind::Enum)
-        {
-            let variant_name = &p.segments[1].name;
-            if let Some(map) = self.enum_variants.get(&first_id) {
-                if let Some(&variant_id) = map.get(variant_name) {
-                    self.path_to_sym.insert(p.span, variant_id);
+        // 2. `Enum::Variant` — the leading segments name an enum
+        //    type (possibly module-qualified), the last is a variant.
+        if p.segments.len() >= 2 {
+            let n = p.segments.len();
+            let type_segs = &p.segments[..n - 1];
+            let variant_name = &p.segments[n - 1].name;
+            if let Some(enum_id) = self.lookup_path(type_segs) {
+                if matches!(
+                    self.symbols[enum_id.0 as usize].kind,
+                    SymbolKind::Enum
+                ) {
+                    if let Some(map) = self.enum_variants.get(&enum_id) {
+                        if let Some(&variant_id) = map.get(variant_name) {
+                            self.path_to_sym.insert(p.span, variant_id);
+                            return;
+                        }
+                    }
+                    self.error(
+                        format!("no variant `{}` on that enum", variant_name),
+                        p.span,
+                    );
                     return;
                 }
             }
+        }
+        let shown: Vec<&str> =
+            p.segments.iter().map(|s| s.name.as_str()).collect();
+        if shown.len() == 1 {
+            self.error(format!("unresolved name `{}`", shown[0]), p.span);
+        } else {
             self.error(
-                format!(
-                    "no variant `{}` on enum `{}`",
-                    variant_name, first.name
-                ),
+                format!("unresolved path `{}`", shown.join("::")),
                 p.span,
             );
-            return;
         }
-        // Longer paths (`a::b::c`, namespacing) not supported yet.
-        self.error(
-            format!("path `{}` has more segments than the resolver handles", first.name),
-            p.span,
-        );
     }
 
     fn resolve_expr(&mut self, e: &Expr) {

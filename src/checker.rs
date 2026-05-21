@@ -87,18 +87,46 @@ impl<'r> Checker<'r> {
     }
 
     pub fn check_module(mut self, m: &Module) -> CheckResults {
-        // Pass 1a: struct layouts — needed before signatures so that
-        // function params/returns that mention struct types resolve.
+        // Pass 1a: struct layouts — recurse into modules.
+        self.collect_struct_layouts(&m.items);
+        // Pass 1b: function signatures + const types + impl methods +
+        // trait signature types — recurse into modules.
+        self.register_signatures(&m.items);
+        // Pass 2: bodies.
         for item in &m.items {
-            if let Item::Struct(s) = item {
-                if let Some(&sym_id) = self.res.decl_to_sym.get(&s.name.span) {
-                    let layout = self.build_struct_layout(s);
-                    self.struct_layouts.insert(sym_id, layout);
+            self.check_item(item);
+        }
+
+        CheckResults {
+            expr_types: self.expr_types,
+            fn_signatures: self.fn_signatures,
+            local_types: self.local_types,
+            type_resolutions: self.type_resolutions,
+            struct_layouts: self.struct_layouts,
+            errors: self.errors,
+        }
+    }
+
+    /// Pass 1a — collect struct layouts, recursing into modules.
+    fn collect_struct_layouts(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Struct(s) => {
+                    if let Some(&sym_id) = self.res.decl_to_sym.get(&s.name.span) {
+                        let layout = self.build_struct_layout(s);
+                        self.struct_layouts.insert(sym_id, layout);
+                    }
                 }
+                Item::Mod(md) => self.collect_struct_layouts(&md.items),
+                _ => {}
             }
         }
-        // Pass 1b: function signatures + const types + impl methods.
-        for item in &m.items {
+    }
+
+    /// Pass 1b — register fn/const/impl/trait signatures, recursing
+    /// into modules.
+    fn register_signatures(&mut self, items: &[Item]) {
+        for item in items {
             match item {
                 Item::Fn(f) => {
                     let sig = self.fn_signature(f);
@@ -115,10 +143,6 @@ impl<'r> Checker<'r> {
                     }
                 }
                 Item::Trait(t) => {
-                    // Resolve each trait method signature's types so
-                    // `type_resolutions` has entries before any fn
-                    // body (which may call a bounded-generic method)
-                    // is checked in pass 2.
                     for m in &t.methods {
                         for p in &m.params {
                             self.resolve_type(&p.ty);
@@ -128,22 +152,9 @@ impl<'r> Checker<'r> {
                         }
                     }
                 }
-                Item::Struct(_) | Item::Enum(_) => {}
+                Item::Mod(md) => self.register_signatures(&md.items),
+                Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
             }
-        }
-
-        // Pass 2: bodies.
-        for item in &m.items {
-            self.check_item(item);
-        }
-
-        CheckResults {
-            expr_types: self.expr_types,
-            fn_signatures: self.fn_signatures,
-            local_types: self.local_types,
-            type_resolutions: self.type_resolutions,
-            struct_layouts: self.struct_layouts,
-            errors: self.errors,
         }
     }
 
@@ -228,9 +239,15 @@ impl<'r> Checker<'r> {
                 }
                 self.check_trait_impl_conformance(i);
             }
-            Item::Struct(_) | Item::Enum(_) | Item::Trait(_) => {
+            Item::Mod(md) => {
+                for inner in &md.items {
+                    self.check_item(inner);
+                }
+            }
+            Item::Struct(_) | Item::Enum(_) | Item::Trait(_) | Item::Use(_) => {
                 // Field/variant types were resolved by the resolver;
-                // trait method signature types are resolved in pass 1b.
+                // trait method signature types are resolved in pass 1b;
+                // `use` is fully handled by the resolver.
             }
         }
     }
@@ -1082,8 +1099,9 @@ impl<'r> Checker<'r> {
             | SymbolKind::Struct
             | SymbolKind::Enum
             | SymbolKind::TypeParam
-            | SymbolKind::Trait => {
-                self.error(p.span, format!("`{}` is a type, not a value", name));
+            | SymbolKind::Trait
+            | SymbolKind::Module => {
+                self.error(p.span, format!("`{}` is not a value", name));
                 Ty::Error
             }
         }
@@ -1309,8 +1327,9 @@ impl<'r> Checker<'r> {
                     | SymbolKind::Struct
                     | SymbolKind::Enum
                     | SymbolKind::TypeParam
-                    | SymbolKind::Trait => {
-                        self.error(span, format!("cannot assign to type `{}`", name));
+                    | SymbolKind::Trait
+                    | SymbolKind::Module => {
+                        self.error(span, format!("cannot assign to `{}`", name));
                     }
                     SymbolKind::EnumVariant { .. } => {
                         self.error(

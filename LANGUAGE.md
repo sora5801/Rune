@@ -332,14 +332,32 @@ needs careful integration with the existing Pratt parser because
 
 ## Modules and visibility
 
-**Status: Open.** Probable shape:
+**Status: Decided (inline modules).** Landed 2026-05-20.
 
-- One file = one module.
-- `mod name;` to declare a submodule.
-- `use path::Item;` to bring into scope.
-- `pub` for public visibility; private by default.
+- **Inline modules**: `mod name { items... }`. Nesting allowed.
+  Items inside a module are namespaced under `name`.
+- **Paths**: `a::b::c` walks the module tree. Resolution tries the
+  path absolutely (from root) then relative to the current module.
+- **`use a::b::c;`** aliases `c` into the using module's namespace
+  so it can be referenced unqualified.
+- **`EnumName::Variant`** continues to work and composes with
+  module paths (`m::Color::Red`).
+- Items inside a module reference their siblings unqualified;
+  ancestors and root items are visible too (innermost-first
+  lookup).
+- Functions get module-mangled codegen names (`a__b__f`) so two
+  modules can each declare `fn f` without a Cranelift symbol
+  clash. Root `main` keeps its bare name (entry point).
 
-Defer concrete decisions until the parser is more than a toy.
+**Not yet:**
+- **File-based modules** (`mod name;` loading `name.rn`) — needs
+  file-IO plumbing in the driver. Inline modules are the v0.x form.
+- **Visibility enforcement** — `pub` is parsed and stored but not
+  enforced across module boundaries; any item is reachable by its
+  qualified path. Real privacy checking (an item is accessible
+  from its own module and descendants, or anywhere if `pub`) is a
+  follow-up.
+- **`use` globs** (`use m::*`), `use` renaming (`use x as y`).
 
 ## Builtins
 
@@ -614,3 +632,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | Full generic struct + enum types | `Ty::Struct(SymbolId)` and `Ty::Enum(SymbolId)` grow into `Ty::Struct(SymbolId, Vec<Ty>)` and `Ty::Enum(SymbolId, Vec<Ty>)`. Type args are populated by the resolver from `Path::generic_args` at type position and inferred at construction sites: `Box { value: 5 }` produces `Ty::Struct(box_sym, [i64])`, `Some(5)` produces `Ty::Enum(option_sym, [i64])`. Field-access lowering substitutes the field's `TypeVar` using `build_struct_subst(struct_sym, use_args)`; match-arm payload bindings substitute using the scrutinee's enum args. The monomorphizer's `unify` recurses into `Struct/Enum` args so `unbox<T>(b: Box<T>)` infers T=i64 from `b: Box<i64>`. `Ty::compatible` treats `Struct/Enum` with matching syms as compatible regardless of args (variant-construction sites still emit `Vec::new()` for the placeholder). Resolutions gains `struct_generics` and `enum_generics` maps tracking each item's generic-param symbols. **What this unlocks**: `Option<T>`, `Result<T, E>`, method calls on generic struct fields (`b.value.len()`), arithmetic across generic fields, generic functions taking generic structs/enums. **What's still TODO**: nothing fundamental at this layer; subsequent work moves to `Weak<T>` (now buildable), traits/bounded generics, and stdlib-level types built on these primitives. |
 | 2026-05-20 | `Weak<T>` reference counting | Cycle-breaking weak refs. v0.x supports `Weak<Vec>` only; other inner types parse but error at codegen with a clear message. RuneVec grows `weak_count: i64` (40 bytes total). Initial state on `vec_new`: `rc=1`, `weak_count=1` — the strong refs collectively count as one weak. Four new runtime helpers: `rune_weak_downgrade_vec` (increments weak_count), `rune_weak_retain_vec` / `rune_weak_release_vec` for ARC-on-copy of Weak locals, `rune_weak_upgrade_vec` for the underlying try-promote, and the convenience `rune_weak_upgrade_or_vec(w, default)` that returns either a retained strong ref or a retained default. `rune_release_vec` was updated: when rc hits 0, dealloc the element array AND call `weak_release_vec` to drop the "all strong refs share one weak" slot — the descriptor only goes away when the last `Weak<Vec>` releases. New `Ty::Weak(Box<Ty>)`; new polymorphic builtins `weak(v) -> Weak<T>` and `upgrade_or(w, default) -> T`. `Weak` is a special builtin name the checker recognizes in `resolve_type` — `Weak<i64>` parses as `Ty::Weak(Box::new(Ty::Int(I64)))`. `is_arc_type` and `arc_helper_name` are extended for `Ty::Weak(_)` so scope-exit auto-release goes through the weak helpers, not the strong ones. **Limitation**: `Weak<Str>`, `Weak<Struct>`, `Weak<Enum>` rejected at checker. The control-block split for those types would mirror Vec; not done this session because the v0.x leak-tolerance argument from earlier sessions doesn't apply to weak refs (cycles require Weak, which requires control blocks per-type). |
 | 2026-05-20 | Traits + bounded generics | Static-dispatch traits. New `trait` keyword; `ast::Item::Trait(TraitDecl)` holds method signatures (bodies-less); `ImplBlock` gains `trait_path: Option<Path>` so `impl Trait for Type` parses; `ast::GenericParam { name, bounds }` replaces the bare `Vec<Ident>` of generic params, parsing `<T: A + B>`. Resolver: `SymbolKind::Trait`; `Resolutions::trait_methods` (trait sym → sigs) and `generic_bounds` (param sym → bound trait syms); trait-impl methods register into the existing `impl_methods` table. Checker: `check_trait_impl_conformance` (every trait method has a matching impl, arity-checked); `trait_bound_method_sig` resolves `x.fmt()` where `x: T` and `T: Display` by searching `T`'s bounds. Monomorphizer: trait method calls on a generic receiver survive lowering as `HirExprKind::MethodCall`; after a generic fn is specialized for a concrete type, `resolve_method_calls` rewrites each `MethodCall` on a now-concrete struct/enum receiver into a direct `Call` (via `HirModule::impl_methods`). Codegen sees only `Call` for trait methods. **Static dispatch only** — no vtables, no `dyn Trait`. Open: supertraits, associated types, generic impls (`impl<T> Trait for Box<T>`), full param-type conformance (today arity-only). |
+| 2026-05-20 | Module system (inline) | Inline modules: `mod name { items... }`, nestable. New `mod`/`use` keywords; `ast::Item::Mod(ModDecl)` and `Item::Use(UseDecl)`. The resolver flattens everything into the global namespace under module-qualified keys (`a::b::f`) — no separate per-module map. `current_path: Vec<String>` tracks module nesting through all three resolver passes (declare, declare-impls, resolve-bodies) plus a new pass 1.7 that resolves `use` aliases. `lookup` for a bare name tries each enclosing module prefix longest-first then root; `lookup_path` resolves multi-segment paths absolutely then relative. `resolve_path` first tries the whole path as a qualified item, then falls back to `Enum::Variant` (the leading segments naming the enum, possibly module-qualified). Functions get module-mangled codegen names (`a__b__f`) so same-named functions in different modules do not clash as Cranelift symbols; root `main` keeps its bare name. Impl methods inside a module mangle with the module prefix too. Checker and lowerer recurse into `Item::Mod`. **Not done**: file-based modules (`mod name;` loading a file), visibility enforcement (`pub` is parsed but any item is reachable by qualified path), `use` globs / renaming. |

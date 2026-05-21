@@ -22,18 +22,7 @@ impl<'a> Lowerer<'a> {
 
     pub fn lower_module(&self, m: &ast::Module) -> HirModule {
         let mut items = Vec::new();
-        for it in &m.items {
-            match it {
-                ast::Item::Fn(f) => items.push(HirItem::Fn(self.lower_fn(f))),
-                ast::Item::Impl(i) => {
-                    for method in &i.methods {
-                        items.push(HirItem::Fn(self.lower_fn(method)));
-                    }
-                }
-                // Const, Struct, Enum dropped — codegen doesn't handle them yet.
-                _ => {}
-            }
-        }
+        self.lower_items(&m.items, &mut items);
         // Compute the ARC-field map for every struct that contains one or
         // more ARC-managed fields. A struct is considered ARC-managed
         // transitively if it contains a Vec, Str, or another ARC struct.
@@ -133,6 +122,25 @@ impl<'a> Lowerer<'a> {
             enum_has_payload,
             enum_payload_tys,
             impl_methods: self.res.impl_methods.clone(),
+        }
+    }
+
+    /// Flatten items into HIR functions, recursing into modules.
+    /// Modules carry no runtime weight — their functions are emitted
+    /// flat (the resolver already mangled their codegen names).
+    fn lower_items(&self, items: &[ast::Item], out: &mut Vec<HirItem>) {
+        for it in items {
+            match it {
+                ast::Item::Fn(f) => out.push(HirItem::Fn(self.lower_fn(f))),
+                ast::Item::Impl(i) => {
+                    for method in &i.methods {
+                        out.push(HirItem::Fn(self.lower_fn(method)));
+                    }
+                }
+                ast::Item::Mod(md) => self.lower_items(&md.items, out),
+                // Const, Struct, Enum, Trait, Use carry no codegen.
+                _ => {}
+            }
         }
     }
 

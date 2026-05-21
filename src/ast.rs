@@ -30,6 +30,27 @@ pub enum Item {
     Const(ConstDecl),
     Impl(ImplBlock),
     Trait(TraitDecl),
+    /// `mod name { items... }` — an inline module. Items inside are
+    /// namespaced under `name`; addressable as `name::item` from
+    /// outside (if `pub`) and unqualified from within.
+    Mod(ModDecl),
+    /// `use a::b::c;` — imports `c` into the current module's scope
+    /// so it can be referenced unqualified.
+    Use(UseDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModDecl {
+    pub vis: Visibility,
+    pub name: Ident,
+    pub items: Vec<Item>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    pub path: Path,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

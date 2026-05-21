@@ -454,3 +454,26 @@ fn parses_multi_bound_generic() {
     let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
     assert_eq!(f.generics[0].bounds.len(), 2);
 }
+
+// ---- modules ----
+
+#[test]
+fn parses_module() {
+    let m = parse_ok("mod math { fn square(x: i64) -> i64 { x * x } }");
+    let Item::Mod(md) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(md.name.name, "math");
+    assert_eq!(md.items.len(), 1);
+}
+
+#[test]
+fn parses_nested_module() {
+    let m = parse_ok("mod a { mod b { fn f() {} } }");
+    let Item::Mod(md) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert!(matches!(md.items[0], Item::Mod(_)));
+}
+
+#[test]
+fn parses_use() {
+    let m = parse_ok("mod m { fn f() {} } use m::f;");
+    assert!(matches!(m.items[1], Item::Use(_)));
+}

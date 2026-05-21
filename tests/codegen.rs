@@ -2605,3 +2605,105 @@ fn struct_chain_of_returns() {
     assert_eq!(run_main(src), 21);
 }
 
+
+// ---- module system ----
+
+#[test]
+fn module_qualified_call() {
+    let src = r#"
+        mod math {
+            fn square(x: i64) -> i64 { x * x }
+        }
+        fn main() -> i64 {
+            math::square(7)
+        }
+    "#;
+    assert_eq!(run_main(src), 49);
+}
+
+#[test]
+fn module_use_import() {
+    let src = r#"
+        mod math {
+            fn cube(x: i64) -> i64 { x * x * x }
+        }
+        use math::cube;
+        fn main() -> i64 {
+            cube(3)
+        }
+    "#;
+    assert_eq!(run_main(src), 27);
+}
+
+#[test]
+fn module_intra_module_call() {
+    // A function inside a module calls a sibling unqualified.
+    let src = r#"
+        mod m {
+            fn helper(x: i64) -> i64 { x + 1 }
+            fn run(x: i64) -> i64 { helper(x) * 2 }
+        }
+        fn main() -> i64 {
+            m::run(10)
+        }
+    "#;
+    // (10+1)*2 = 22
+    assert_eq!(run_main(src), 22);
+}
+
+#[test]
+fn module_nested() {
+    let src = r#"
+        mod outer {
+            mod inner {
+                fn deep(x: i64) -> i64 { x * 100 }
+            }
+            fn mid(x: i64) -> i64 { inner::deep(x) + 1 }
+        }
+        fn main() -> i64 {
+            outer::mid(5)
+        }
+    "#;
+    // 5*100 + 1 = 501
+    assert_eq!(run_main(src), 501);
+}
+
+#[test]
+fn module_same_fn_name_no_collision() {
+    // Two modules each define `fn f` — distinct mangled codegen
+    // names mean no Cranelift symbol clash.
+    let src = r#"
+        mod a {
+            fn f(x: i64) -> i64 { x + 1 }
+        }
+        mod b {
+            fn f(x: i64) -> i64 { x + 2 }
+        }
+        fn main() -> i64 {
+            a::f(10) * 100 + b::f(10)
+        }
+    "#;
+    // 11*100 + 12 = 1112
+    assert_eq!(run_main(src), 1112);
+}
+
+#[test]
+fn module_struct_and_enum() {
+    let src = r#"
+        mod shapes {
+            struct Point { x: i64, y: i64 }
+            enum Kind { Flat, Tall }
+        }
+        fn main() -> i64 {
+            let p = shapes::Point { x: 3, y: 4 };
+            let k = shapes::Kind::Tall;
+            let kn = match k {
+                shapes::Kind::Flat => 0,
+                shapes::Kind::Tall => 1,
+            };
+            p.x + p.y + kn
+        }
+    "#;
+    // 3 + 4 + 1 = 8
+    assert_eq!(run_main(src), 8);
+}

@@ -51,7 +51,7 @@ rune: linked with clang -> primes.exe
 ### Parser — done
 
 - Items: `fn`, `struct`, `enum`, `const`, `trait`, `impl` /
-  `impl Trait for Type` (with optional `pub`)
+  `impl Trait for Type`, `mod`, `use` (with optional `pub`)
 - Statements: `let`, expression statements, items inside blocks
 - Expressions: literals, paths, parenthesized, unary, all binary operators
   with Pratt precedence, assignment and compound assignment, postfix
@@ -73,10 +73,14 @@ rune: linked with clang -> primes.exe
   `impl Display for Point { ... }`, `fn show<T: Display>(x: T)`.
   Static dispatch — trait method calls in a bounded-generic body
   are resolved per-specialization by the monomorphizer.
+- **Inline modules**: `mod name { items... }` (nestable),
+  `use a::b::c;` imports, `a::b::c` path resolution. Functions get
+  module-mangled codegen names so same-named functions in different
+  modules don't collide.
 - Generic type parameters with optional trait bounds
   (`<T>`, `<T: Display>`, `<T: A + B>`)
 - Error recovery at item-starting keywords
-- 51 integration tests
+- 54 integration tests
 
 ### Resolver — done
 
@@ -185,7 +189,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 178 JIT codegen tests + 34 AOT tests.
+- 184 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -208,10 +212,10 @@ a clear error if reached.
 
 ## Roadmap
 
-1. `dyn Trait` — dynamic dispatch via vtables
-2. Supertraits, associated types, generic impls
-   (`impl<T> Trait for Box<T>`)
-3. Module system (`use std::*`) — unblocks the stdlib
+1. File-based modules (`mod name;` loading `name.rn`) +
+   visibility enforcement
+2. `dyn Trait` — dynamic dispatch via vtables
+3. Supertraits, associated types, generic impls
 4. `?` operator desugared to Result matching
 5. Stdlib types (`Vec<T>`, `HashMap<K, V>`, iterator protocol)
 6. Self-hosted bootstrap (long-term)
