@@ -62,8 +62,9 @@ rune: linked with clang -> primes.exe
   unary `-` on numeric literals), path (`EnumName::Variant`),
   tuple-variant destructure (`Some(x)`), or-patterns (`a | b | c`),
   and ranges (`lo..hi`, `lo..=hi`)
-- Types: paths with optional generic args (`Vec<i64>`, `Result<i64,
-  str>`)
+- Types: paths with optional generic args, nestable — a `>>` token
+  is split so `Vec<Vec<i64>>` / `Weak<Vec<i64>>` parse (`Vec<i64>`,
+  `Result<i64, str>`, `Vec<Vec<i64>>`)
 - Generic type parameters on `fn`/`struct`/`enum` items. Generic
   functions are monomorphized per concrete instantiation
   (`id$$i64`, `pair$$i64$$str`). `Ty::Struct` and `Ty::Enum` carry
@@ -103,7 +104,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 94 integration tests.
+- 98 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -155,9 +156,12 @@ rune: linked with clang -> primes.exe
     `impl Point { fn magnitude_sq(self: Point) -> i64 { ... } }`.
     Methods dispatched at lowering time; `self` becomes the first
     argument of a regular Cranelift function with a mangled name.
-  - **`Vec`** as a concrete heap-allocated growable list of i64:
-    `vec_new()`, `.push(x)`, `.get(i)`, `.len()`. Element type
-    generalizes to `Vec<T>` once generics arrive.
+  - **`Vec<T>`** — a generic heap-allocated growable list:
+    `vec_new()`, `.push(x)`, `.get(i)`, `.len()`, exposed as
+    `std::Vec`. Elements occupy 8-byte slots; a `Vec` of ARC-managed
+    elements (structs, payload enums, nested `Vec`) reclaims them
+    through a codegen-synthesized per-element-type release. Still a
+    compiler builtin — Rune has no raw-memory primitives.
   - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
     represent as i64; **payload variants** (`Some(i64)`, `Err(str)`,
     `Pair(i64, i64)`) flip the whole enum to a heap-allocated
@@ -189,7 +193,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 191 JIT codegen tests + 34 AOT tests.
+- 198 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -234,8 +238,8 @@ a clear error if reached.
 2. `dyn Trait` — dynamic dispatch via vtables
 3. Supertraits, associated types, generic impls
 4. `?` operator desugared to Result matching
-5. Generic `std::Vec<T>` / `HashMap<K, V>` / iterator protocol — the
-   prelude exists; collections still need generic ARC destructors
+5. A `collections` module — `HashMap<K, V>`, an iterator protocol —
+   built on the now-generic `Vec<T>`
 6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

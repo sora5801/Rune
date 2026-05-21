@@ -49,10 +49,13 @@ pub enum Ty {
     Str,
     Unit,
     Array(Box<Ty>, usize),
-    /// Heap-allocated growable list of i64. v0.x has no generics, so this
-    /// is a single concrete type rather than `Vec<T>`. Becomes `Vec<T>`
-    /// once parametric polymorphism arrives.
-    Vec,
+    /// Heap-allocated growable list — `Vec<T>`, carrying its element
+    /// type. The descriptor (`{ ptr, len, cap, rc, weak_count }`) and
+    /// the runtime helpers are element-type-agnostic (8-byte slots);
+    /// the element type drives type-checking and per-element ARC
+    /// release. `vec_new()` produces a placeholder `Vec<i64>` that an
+    /// annotated binding refines to the real element type.
+    Vec(Box<Ty>),
     Fn { params: Vec<Ty>, ret: Box<Ty> },
     /// A struct type, with its type arguments at this use site.
     /// Empty `Vec` for non-generic structs; for generic structs the
@@ -111,7 +114,10 @@ impl Ty {
     /// their type-arg lists — args may differ at variant-construction
     /// sites (where we use `[]`) vs use sites (where the path carries
     /// the args). The monomorphizer + lowerer use the args directly
-    /// for codegen, not the checker's `compatible`.
+    /// for codegen, not the checker's `compatible`. `Vec` follows the
+    /// same rule: any `Vec` is compatible with any other `Vec`, since
+    /// `vec_new()` yields a placeholder `Vec<i64>` whose real element
+    /// type is pinned by the annotated binding it flows into.
     pub fn compatible(&self, other: &Ty) -> bool {
         if self.is_error() || other.is_error() || self.is_never() || other.is_never() {
             return true;
@@ -122,6 +128,7 @@ impl Ty {
         match (self, other) {
             (Ty::Struct(s1, _), Ty::Struct(s2, _)) => s1 == s2,
             (Ty::Enum(s1, _), Ty::Enum(s2, _)) => s1 == s2,
+            (Ty::Vec(_), Ty::Vec(_)) => true,
             _ => self == other,
         }
     }
@@ -144,7 +151,7 @@ impl Ty {
             Ty::Str => "str".into(),
             Ty::Unit => "()".into(),
             Ty::Array(elem, n) => format!("[{}; {}]", elem.display(), n),
-            Ty::Vec => "Vec".into(),
+            Ty::Vec(elem) => format!("Vec<{}>", elem.display()),
             Ty::Fn { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|t| t.display()).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display())

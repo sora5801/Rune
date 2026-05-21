@@ -64,6 +64,10 @@ pub struct Codegen<M: Module> {
     enum_payload_tys: HashMap<SymbolId, Vec<Vec<Ty>>>,
     /// FuncId of the synthesized release function per payload enum.
     enum_release_funcs: HashMap<SymbolId, FuncId>,
+    /// FuncId of the synthesized per-element-type release function for
+    /// each ARC-managed `Vec<T>` element type. Keyed by the element
+    /// `Ty`; the function walks a Vec's live elements releasing each.
+    vec_release_funcs: HashMap<Ty, FuncId>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -626,6 +630,20 @@ impl<M: Module> Codegen<M> {
                 .map_err(|e| CodegenError(e.to_string()))?;
             self.enum_release_funcs.insert(sym, id);
         }
+        // Pass 0 (cont.): declare a per-element-type release function
+        // for each ARC-managed Vec element type. Its body walks the
+        // live elements releasing each, so a `Vec<Vec<_>>` or
+        // `Vec<Struct>` reclaims its contents.
+        for elem in &hir.vec_arc_elem_tys {
+            let name = format!("__rune_release_vec${}", mangle_ty_name(elem));
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.vec_release_funcs.insert(elem.clone(), id);
+        }
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
             let HirItem::Fn(f) = item;
@@ -648,6 +666,9 @@ impl<M: Module> Codegen<M> {
         }
         for (&sym, &func_id) in &self.enum_release_funcs.clone() {
             self.define_enum_release(sym, func_id)?;
+        }
+        for (elem, &func_id) in &self.vec_release_funcs.clone() {
+            self.define_vec_release(elem, func_id)?;
         }
         Ok(())
     }
@@ -881,11 +902,111 @@ impl<M: Module> Codegen<M> {
             // here in practice since is_arc_type returns false.)
             return Ok(());
         }
+        // Vec<T> with an ARC element type: synthesized per-element
+        // release. A Vec of non-ARC elements has no entry and falls
+        // through to the runtime helper (which frees only the array).
+        if let Ty::Vec(elem) = ty {
+            if let Some(&func_id) = self.vec_release_funcs.get(&**elem) {
+                let local = self.module.declare_func_in_func(func_id, builder.func);
+                builder.ins().call(local, &[value]);
+                return Ok(());
+            }
+        }
         // Vec / Str: runtime helper.
         let helper = arc_helper_name("release", ty)?;
         let func_id = self.ensure_runtime_func(helper)?;
         let local = self.module.declare_func_in_func(func_id, builder.func);
         builder.ins().call(local, &[value]);
+        Ok(())
+    }
+
+    /// Build the per-element-type release function for a `Vec<elem>`
+    /// whose elements are ARC-managed. When the strong count is about
+    /// to hit zero it walks the live elements releasing each, then
+    /// hands off to the runtime `release_vec` (which does the rc
+    /// decrement, element-array free, and weak release).
+    fn define_vec_release(
+        &mut self,
+        elem: &Ty,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+
+        let entry = builder.create_block();
+        let walk = builder.create_block();
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let finish = builder.create_block();
+        let done = builder.create_block();
+
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let p = builder.block_params(entry)[0];
+        // Null guard — a null Vec pointer has nothing to release.
+        let zero = builder.ins().iconst(types::I64, 0);
+        let is_null = builder.ins().icmp(IntCC::Equal, p, zero);
+        builder.ins().brif(is_null, done, &[], walk, &[]);
+
+        // walk: release elements only when this call zeroes the rc.
+        // (Single-threaded — nothing changes rc between this peek and
+        // the `release_vec` call in `finish`.)
+        builder.switch_to_block(walk);
+        builder.seal_block(walk);
+        let i = Variable::new(0);
+        builder.declare_var(i, types::I64);
+        let zero_i = builder.ins().iconst(types::I64, 0);
+        builder.def_var(i, zero_i);
+        let rc = builder.ins().load(types::I64, MemFlags::new(), p, 24);
+        let one = builder.ins().iconst(types::I64, 1);
+        let will_zero = builder.ins().icmp(IntCC::Equal, rc, one);
+        builder.ins().brif(will_zero, header, &[], finish, &[]);
+
+        // header: i < len ?
+        builder.switch_to_block(header);
+        let len = builder.ins().load(types::I64, MemFlags::new(), p, 8);
+        let iv = builder.use_var(i);
+        let more = builder.ins().icmp(IntCC::SignedLessThan, iv, len);
+        builder.ins().brif(more, body, &[], finish, &[]);
+
+        // body: release element[i], then i++.
+        builder.switch_to_block(body);
+        builder.seal_block(body);
+        let arr = builder.ins().load(types::I64, MemFlags::new(), p, 0);
+        let iv2 = builder.use_var(i);
+        let eight = builder.ins().iconst(types::I64, 8);
+        let off = builder.ins().imul(iv2, eight);
+        let slot = builder.ins().iadd(arr, off);
+        let elem_val = builder.ins().load(types::I64, MemFlags::new(), slot, 0);
+        self.emit_release_field(&mut builder, elem, elem_val)?;
+        let iv3 = builder.use_var(i);
+        let one2 = builder.ins().iconst(types::I64, 1);
+        let next = builder.ins().iadd(iv3, one2);
+        builder.def_var(i, next);
+        builder.ins().jump(header, &[]);
+        builder.seal_block(header);
+
+        // finish: standard runtime release (rc--, free array, weak).
+        builder.switch_to_block(finish);
+        builder.seal_block(finish);
+        let rel = self.ensure_runtime_func("release_vec")?;
+        let rel_local = self.module.declare_func_in_func(rel, builder.func);
+        builder.ins().call(rel_local, &[p]);
+        builder.ins().jump(done, &[]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
         Ok(())
     }
 
@@ -941,6 +1062,7 @@ impl<M: Module> Codegen<M> {
             enum_has_payload: &self.enum_has_payload,
             enum_release_funcs: &self.enum_release_funcs,
             enum_payload_tys: &self.enum_payload_tys,
+            vec_release_funcs: &self.vec_release_funcs,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -1064,6 +1186,7 @@ impl Codegen<JITModule> {
             enum_has_payload: std::collections::HashSet::new(),
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
+            vec_release_funcs: HashMap::new(),
         })
     }
 
@@ -1118,6 +1241,7 @@ impl Codegen<ObjectModule> {
             enum_has_payload: std::collections::HashSet::new(),
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
+            vec_release_funcs: HashMap::new(),
         })
     }
 
@@ -1193,6 +1317,7 @@ struct FnCodegen<'a, M: Module> {
     enum_has_payload: &'a std::collections::HashSet<SymbolId>,
     enum_release_funcs: &'a HashMap<SymbolId, FuncId>,
     enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
+    vec_release_funcs: &'a HashMap<Ty, FuncId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -1360,6 +1485,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         return Ok(());
                     }
                     _ => {}
+                }
+            }
+        }
+        // Vec<T>: retain is the type-agnostic runtime helper (rc++);
+        // release dispatches to the synthesized per-element release
+        // when the element type is ARC-managed.
+        if let Ty::Vec(elem) = ty {
+            if action == "release" {
+                if let Some(&func_id) = self.vec_release_funcs.get(&**elem) {
+                    let local_func = self
+                        .module
+                        .declare_func_in_func(func_id, self.builder.func);
+                    self.builder.ins().call(local_func, &[value]);
+                    return Ok(());
                 }
             }
         }
@@ -2256,7 +2395,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
-            (Ty::Vec, m) if matches!(m, "push" | "get" | "len") => {
+            (Ty::Vec(elem), m) if matches!(m, "push" | "get" | "len") => {
+                let elem_ty = (**elem).clone();
+                let elem_cty = cranelift_type(&elem_ty)?;
+                let elem_arc = is_arc_type(
+                    &elem_ty,
+                    self.struct_arc_fields,
+                    self.enum_has_payload,
+                );
                 let runtime_key = match m {
                     "push" => "vec_push",
                     "get" => "vec_get",
@@ -2268,10 +2414,46 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     .module
                     .declare_func_in_func(func_id, self.builder.func);
                 let mut call_args = vec![recv_val];
-                call_args.extend(&arg_vals);
+                if m == "push" {
+                    // Pushing a borrowed ARC element (a Local read)
+                    // creates a second owner — retain so the Vec slot
+                    // holds its own +1. A fresh +1 producer transfers
+                    // its count straight in.
+                    if elem_arc {
+                        if let HirExprKind::Local(_) = &args[0].kind {
+                            self.emit_arc_call("retain", &elem_ty, arg_vals[0])?;
+                        }
+                    }
+                    // Element slots are 8 bytes — widen a narrow value.
+                    let stored = if elem_cty == types::I64 {
+                        arg_vals[0]
+                    } else {
+                        self.builder.ins().uextend(types::I64, arg_vals[0])
+                    };
+                    call_args.push(stored);
+                } else {
+                    call_args.extend(&arg_vals);
+                }
                 let inst = self.builder.ins().call(local_func, &call_args);
                 let results = self.builder.inst_results(inst);
-                if results.is_empty() { Ok(None) } else { Ok(Some(results[0])) }
+                if results.is_empty() {
+                    return Ok(None);
+                }
+                let raw = results[0];
+                if m == "get" {
+                    if elem_arc {
+                        // `get` returns a copy of the slot — a new
+                        // owner of an ARC element, so retain it.
+                        self.emit_arc_call("retain", &elem_ty, raw)?;
+                        Ok(Some(raw))
+                    } else if elem_cty != types::I64 {
+                        Ok(Some(self.builder.ins().ireduce(elem_cty, raw)))
+                    } else {
+                        Ok(Some(raw))
+                    }
+                } else {
+                    Ok(Some(raw))
+                }
             }
             (recv_ty, _) => Err(CodegenError(format!(
                 "method `.{}` on `{}` is not implemented",
@@ -2846,13 +3028,44 @@ fn enum_max_arity(
         .unwrap_or(0)
 }
 
+/// A symbol-safe mangling of a type, used to name the synthesized
+/// per-element-type Vec release functions. Distinct types must map to
+/// distinct strings (the funcs are keyed by element `Ty`), so type
+/// arguments are folded in.
+fn mangle_ty_name(ty: &Ty) -> String {
+    match ty {
+        Ty::Bool => "bool".into(),
+        Ty::Char => "char".into(),
+        Ty::Int(it) => it.name().into(),
+        Ty::Float(ft) => ft.name().into(),
+        Ty::Str => "str".into(),
+        Ty::Unit => "unit".into(),
+        Ty::Vec(e) => format!("Vec_{}", mangle_ty_name(e)),
+        Ty::Weak(e) => format!("Weak_{}", mangle_ty_name(e)),
+        Ty::Array(e, n) => format!("Arr{}_{}", n, mangle_ty_name(e)),
+        Ty::Struct(s, args) | Ty::Enum(s, args) => {
+            let tag = if matches!(ty, Ty::Struct(_, _)) { "S" } else { "E" };
+            if args.is_empty() {
+                format!("{}{}", tag, s.0)
+            } else {
+                let inner: Vec<String> = args.iter().map(mangle_ty_name).collect();
+                format!("{}{}_{}", tag, s.0, inner.join("_"))
+            }
+        }
+        Ty::TypeVar(s) => format!("T{}", s.0),
+        Ty::Fn { .. } => "fn".into(),
+        Ty::Never => "never".into(),
+        Ty::Error => "err".into(),
+    }
+}
+
 fn is_arc_type(
     ty: &Ty,
     _struct_arc_fields: &HashMap<SymbolId, Vec<(u32, Ty)>>,
     enum_has_payload: &std::collections::HashSet<SymbolId>,
 ) -> bool {
     match ty {
-        Ty::Vec | Ty::Str => true,
+        Ty::Vec(_) | Ty::Str => true,
         Ty::Struct(_, _) => true,
         Ty::Enum(sym, _) => enum_has_payload.contains(sym),
         Ty::Weak(_) => true,
@@ -2862,16 +3075,16 @@ fn is_arc_type(
 
 fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> {
     Ok(match (action, ty) {
-        ("retain", Ty::Vec) => "retain_vec",
-        ("release", Ty::Vec) => "release_vec",
+        ("retain", Ty::Vec(_)) => "retain_vec",
+        ("release", Ty::Vec(_)) => "release_vec",
         ("retain", Ty::Str) => "retain_str",
         ("release", Ty::Str) => "release_str",
         ("retain", Ty::Enum(_, _)) => "retain_enum",
         ("release", Ty::Enum(_, _)) => "release_enum",
         // Weak<T> uses the weak-counted helpers per inner type.
         // v0.x only supports Weak<Vec>.
-        ("retain", Ty::Weak(inner)) if matches!(**inner, Ty::Vec) => "weak_retain_vec",
-        ("release", Ty::Weak(inner)) if matches!(**inner, Ty::Vec) => "weak_release_vec",
+        ("retain", Ty::Weak(inner)) if matches!(**inner, Ty::Vec(_)) => "weak_retain_vec",
+        ("release", Ty::Weak(inner)) if matches!(**inner, Ty::Vec(_)) => "weak_release_vec",
         _ => {
             return Err(CodegenError(format!(
                 "no ARC helper for action `{}` on `{}`",
@@ -2895,8 +3108,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Str => types::I64,
         // Structs are represented as a pointer to their stack-allocated body.
         Ty::Struct(_, _) => types::I64,
-        // Vec is a pointer to a heap-allocated descriptor (`{ ptr, len, cap }`).
-        Ty::Vec => types::I64,
+        // Vec is a pointer to a heap-allocated descriptor.
+        Ty::Vec(_) => types::I64,
         // Unit-variant enums are stored as their i64 discriminant.
         Ty::Enum(_, _) => types::I64,
         // Weak<T> is also a pointer to the same control block as
@@ -2930,7 +3143,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec | Ty::Enum(_, _) | Ty::Weak(_) => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec(_) | Ty::Enum(_, _) | Ty::Weak(_) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",

@@ -1014,3 +1014,43 @@ fn stdlib_option_unwrap_or_typechecks() {
         }
     "#);
 }
+
+// ---- generic Vec<T> ----
+
+#[test]
+fn generic_vec_requires_type_arg() {
+    // `Vec` is parametric — a bare `Vec` type is rejected.
+    check_has_error(
+        "fn f(v: Vec) -> i64 { v.len() }",
+        "one type argument",
+    );
+}
+
+#[test]
+fn generic_vec_str_element_rejected() {
+    // `str` is a 16-byte descriptor — it can't be a Vec element.
+    check_has_error(
+        "fn main() -> i64 { let v: Vec<str> = vec_new(); 0 }",
+        "not supported",
+    );
+}
+
+#[test]
+fn generic_vec_push_type_mismatch() {
+    // push's parameter is element-typed off the receiver.
+    check_has_error(
+        "fn main() -> i64 { let v: Vec<i64> = vec_new(); v.push(true); 0 }",
+        "i64",
+    );
+}
+
+#[test]
+fn generic_vec_typechecks() {
+    check_ok(r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1);
+            v.get(0)
+        }
+    "#);
+}

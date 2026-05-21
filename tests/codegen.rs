@@ -678,7 +678,7 @@ fn vec_empty_get_returns_zero() {
 #[test]
 fn vec_passed_to_function() {
     let src = r#"
-        fn sum(xs: Vec) -> i64 {
+        fn sum(xs: Vec<i64>) -> i64 {
             let mut total = 0;
             for i in 0..xs.len() {
                 total = total + xs.get(i);
@@ -1295,7 +1295,7 @@ fn arc_return_local_vec_caller_uses_it() {
     // The callee retains the local before returning, then the
     // scope-exit release brings net to +1 (caller-owned).
     let src = r#"
-        fn make() -> Vec {
+        fn make() -> Vec<i64> {
             let v = vec_new();
             v.push(10);
             v.push(20);
@@ -1330,7 +1330,7 @@ fn arc_explicit_return_releases_locals() {
     // correctly. `extra` is dealloc'd on the return path; `v` is
     // retained for the caller.
     let src = r#"
-        fn pick(cond: bool) -> Vec {
+        fn pick(cond: bool) -> Vec<i64> {
             let v = vec_new();
             v.push(1);
             if cond {
@@ -1410,7 +1410,7 @@ fn arc_struct_with_vec_field_drops_at_scope_exit() {
     // the struct binding goes out of scope. 100k iterations confirm
     // steady reclamation.
     let src = r#"
-        struct Holder { v: Vec, n: i64 }
+        struct Holder { v: Vec<i64>, n: i64 }
         fn main() -> i64 {
             let mut i = 0;
             while i < 100000 {
@@ -1444,7 +1444,7 @@ fn arc_struct_field_assign_releases_old() {
     // Mutating an ARC field releases the old value before storing
     // the new one. With 100k iterations a leak would balloon RSS.
     let src = r#"
-        struct Holder { v: Vec }
+        struct Holder { v: Vec<i64> }
         fn main() -> i64 {
             let mut i = 0;
             let mut h = Holder { v: vec_new() };
@@ -2353,10 +2353,10 @@ fn weak_downgrade_after_drop_returns_default() {
     // Once the strong ref is gone, upgrade_or falls back to the
     // default. We construct v in an inner scope so it drops first.
     let src = r#"
-        fn drop_after(v: Vec) -> Vec {
+        fn drop_after(v: Vec<i64>) -> Vec<i64> {
             v
         }
-        fn get_weak() -> Weak<Vec> {
+        fn get_weak() -> Weak<Vec<i64>> {
             let v = vec_new();
             v.push(99);
             let w = weak(v);
@@ -2499,7 +2499,7 @@ fn enum_payload_vec_released_on_drop() {
     // synthesized enum-release function releases the Vec too — no
     // leak. 100k iterations stay RSS-flat.
     let src = r#"
-        enum Opt { Some(Vec), None }
+        enum Opt { Some(Vec<i64>), None }
         fn main() -> i64 {
             let mut i = 0;
             while i < 100000 {
@@ -2555,7 +2555,7 @@ fn struct_returned_by_value_with_arc_field() {
     // Returning a struct that owns a Vec. The Vec is retained inside
     // the struct's construction; ARC tracks it through the return.
     let src = r#"
-        struct Boxed { v: Vec, label: i64 }
+        struct Boxed { v: Vec<i64>, label: i64 }
         fn build(n: i64) -> Boxed {
             let v = vec_new();
             v.push(n);
@@ -2794,4 +2794,134 @@ fn stdlib_use_import_generic() {
         fn main() -> i64 { unwrap_or(std::Option::Some(5), 0) }
     "#;
     assert_eq!(run_main(src), 5);
+}
+
+// ---- generic Vec<T> ----
+
+#[test]
+fn generic_vec_std_namespaced() {
+    // The Vec builtin is reachable under the std namespace.
+    let src = r#"
+        fn main() -> i64 {
+            let v: std::Vec<i64> = std::vec_new();
+            v.push(10);
+            v.push(20);
+            v.push(12);
+            v.get(0) + v.get(1) + v.get(2) + v.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 45);
+}
+
+#[test]
+fn generic_vec_of_struct() {
+    // Vec<Point> — struct elements pushed and read back.
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let v: Vec<Point> = vec_new();
+            v.push(Point { x: 3, y: 4 });
+            v.push(Point { x: 10, y: 20 });
+            let a = v.get(0);
+            let b = v.get(1);
+            a.x + a.y + b.x + b.y
+        }
+    "#;
+    assert_eq!(run_main(src), 37);
+}
+
+#[test]
+fn generic_vec_push_local_struct() {
+    // Pushing a borrowed struct (a Local) — the push retains so the
+    // Vec's slot owns its own +1.
+    let src = r#"
+        struct P { v: i64 }
+        fn main() -> i64 {
+            let xs: Vec<P> = vec_new();
+            let p = P { v: 7 };
+            xs.push(p);
+            xs.get(0).v
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn generic_vec_nested() {
+    // Vec<Vec<i64>> — the element type is itself a Vec; release walks
+    // each inner Vec.
+    let src = r#"
+        fn main() -> i64 {
+            let outer: Vec<Vec<i64>> = vec_new();
+            let a: Vec<i64> = vec_new();
+            a.push(1);
+            a.push(2);
+            let b: Vec<i64> = vec_new();
+            b.push(10);
+            outer.push(a);
+            outer.push(b);
+            let x = outer.get(0);
+            let y = outer.get(1);
+            x.get(0) + x.get(1) + y.get(0) + outer.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn generic_vec_bool_element() {
+    // A narrow element type — bool values are widened to the 8-byte
+    // slot on push and narrowed back on get.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<bool> = vec_new();
+            v.push(true);
+            v.push(false);
+            v.push(true);
+            let mut n = 0;
+            if v.get(0) { n = n + 1; }
+            if v.get(1) { n = n + 10; }
+            if v.get(2) { n = n + 100; }
+            n
+        }
+    "#;
+    assert_eq!(run_main(src), 101);
+}
+
+#[test]
+fn generic_vec_in_generic_fn() {
+    // A generic function takes `Vec<T>`; the monomorphizer infers
+    // T = i64 and the Vec methods specialize.
+    let src = r#"
+        fn first_or<T>(v: Vec<T>, d: T) -> T {
+            if v.len() > 0 { v.get(0) } else { d }
+        }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(99);
+            first_or(v, 0)
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
+fn generic_vec_struct_loop_reclaims() {
+    // 100k iterations each allocating a Vec<Pt> with two struct
+    // elements. If the synthesized per-element release didn't run,
+    // this leaks unboundedly; a clean run proves elements reclaim.
+    let src = r#"
+        struct Pt { x: i64 }
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let v: Vec<Pt> = vec_new();
+                v.push(Pt { x: i });
+                v.push(Pt { x: i });
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
 }

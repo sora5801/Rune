@@ -140,6 +140,34 @@ impl Parser {
         }
     }
 
+    /// Consume one closing `>` of a type-argument list. A `>>` (`Shr`)
+    /// token is split in place: one `>` is consumed here, the other is
+    /// rewritten to a `Gt` for an enclosing list to consume — so
+    /// `Vec<Vec<i64>>` and `Weak<Vec<i64>>` parse without spaces.
+    fn expect_generic_close(&mut self) -> ParseResult<Span> {
+        match self.peek() {
+            TokenKind::Gt => Ok(self.bump().span),
+            TokenKind::Shr => {
+                let sp = self.peek_span();
+                self.tokens[self.pos] = Token {
+                    kind: TokenKind::Gt,
+                    span: Span::new(sp.start + 1, sp.end),
+                };
+                Ok(Span::new(sp.start, sp.start + 1))
+            }
+            _ => {
+                let span = self.peek_span();
+                Err(ParseError {
+                    message: format!(
+                        "expected `>`, found {}",
+                        describe_kind(self.peek())
+                    ),
+                    span,
+                })
+            }
+        }
+    }
+
     fn synchronize_item(&mut self) {
         while !self.is_eof() {
             match self.peek() {
@@ -459,9 +487,9 @@ impl Parser {
                     }
                 }
             }
-            let gt = self.expect(&TokenKind::Gt, "`>`")?;
+            let gt = self.expect_generic_close()?;
             path.generic_args = args;
-            path.span = Span::new(path.span.start, gt.span.end);
+            path.span = Span::new(path.span.start, gt.end);
         }
         Ok(Type::Path(path))
     }

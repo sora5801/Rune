@@ -137,6 +137,9 @@ impl MonoState {
             .into_iter()
             .map(HirItem::Fn)
             .collect();
+        // Every type is concrete now — gather the ARC-managed `Vec<T>`
+        // element types so codegen can synthesize per-element release.
+        module.vec_arc_elem_tys = collect_vec_arc_elems(module);
     }
 
     fn collect_requests_in_block(&mut self, b: &HirBlock) {
@@ -316,6 +319,8 @@ fn unify(param: &Ty, arg: &Ty, subst: &mut HashMap<SymbolId, Ty>) -> bool {
             true
         }
         (Ty::Array(p_elem, _), Ty::Array(a_elem, _)) => unify(p_elem, a_elem, subst),
+        (Ty::Vec(p_elem), Ty::Vec(a_elem)) => unify(p_elem, a_elem, subst),
+        (Ty::Weak(p_inner), Ty::Weak(a_inner)) => unify(p_inner, a_inner, subst),
         (a, b) => a == b,
     }
 }
@@ -360,6 +365,7 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
             args.iter().map(|t| subst_ty(t, subst)).collect(),
         ),
         Ty::Weak(inner) => Ty::Weak(Box::new(subst_ty(inner, subst))),
+        Ty::Vec(elem) => Ty::Vec(Box::new(subst_ty(elem, subst))),
         _ => ty.clone(),
     }
 }
@@ -843,7 +849,7 @@ fn mangle_ty(t: &Ty) -> String {
         Ty::Float(crate::ty::FloatTy::F64) => "f64".into(),
         Ty::Str => "str".into(),
         Ty::Unit => "unit".into(),
-        Ty::Vec => "Vec".into(),
+        Ty::Vec(e) => format!("Vec_{}", mangle_ty(e)),
         Ty::Array(e, n) => format!("arr{}_{}", mangle_ty(e), n),
         Ty::Struct(s, args) => {
             if args.is_empty() {
@@ -862,6 +868,195 @@ fn mangle_ty(t: &Ty) -> String {
             }
         }
         _ => "x".into(),
+    }
+}
+
+/// True if `t` is an ARC-managed type — one whose values carry a
+/// refcount and need a release on drop.
+fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -> bool {
+    match t {
+        Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) => true,
+        Ty::Enum(s, _) => enum_has_payload.contains(s),
+        _ => false,
+    }
+}
+
+/// Find every `Vec<E>` sub-term of `ty` and record `E` when it's
+/// ARC-managed. Recurses so `Vec<Vec<S>>` records `Vec<S>` and `S`.
+fn scan_ty_for_vec_elems(
+    ty: &Ty,
+    enum_has_payload: &std::collections::HashSet<SymbolId>,
+    out: &mut Vec<Ty>,
+) {
+    match ty {
+        Ty::Vec(elem) => {
+            if is_arc_mono(elem, enum_has_payload) && !out.contains(&**elem) {
+                out.push((**elem).clone());
+            }
+            scan_ty_for_vec_elems(elem, enum_has_payload, out);
+        }
+        Ty::Array(e, _) | Ty::Weak(e) => {
+            scan_ty_for_vec_elems(e, enum_has_payload, out)
+        }
+        Ty::Struct(_, args) | Ty::Enum(_, args) => {
+            for a in args {
+                scan_ty_for_vec_elems(a, enum_has_payload, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Distinct ARC-managed `Vec` element types used anywhere in the
+/// (fully monomorphized) module — walks every function's signature
+/// and body plus the struct-field and enum-payload type maps.
+fn collect_vec_arc_elems(module: &HirModule) -> Vec<Ty> {
+    let ehp = &module.enum_has_payload;
+    let mut out: Vec<Ty> = Vec::new();
+    for item in &module.items {
+        let HirItem::Fn(f) = item;
+        for p in &f.params {
+            scan_ty_for_vec_elems(&p.ty, ehp, &mut out);
+        }
+        scan_ty_for_vec_elems(&f.ret_ty, ehp, &mut out);
+        walk_tys_block(&f.body, &mut |t| scan_ty_for_vec_elems(t, ehp, &mut out));
+    }
+    for fields in module.struct_arc_fields.values() {
+        for (_, t) in fields {
+            scan_ty_for_vec_elems(t, ehp, &mut out);
+        }
+    }
+    for variants in module.enum_payload_tys.values() {
+        for v in variants {
+            for t in v {
+                scan_ty_for_vec_elems(t, ehp, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Invoke `f` on every `Ty` reachable from a block.
+fn walk_tys_block<F: FnMut(&Ty)>(b: &HirBlock, f: &mut F) {
+    f(&b.ty);
+    for s in &b.stmts {
+        match s {
+            HirStmt::Let(l) => {
+                f(&l.ty);
+                if let Some(init) = &l.init {
+                    walk_tys_expr(init, f);
+                }
+            }
+            HirStmt::Expr(e, _) => walk_tys_expr(e, f),
+        }
+    }
+}
+
+/// Invoke `f` on every `Ty` reachable from an expression.
+fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
+    use HirExprKind::*;
+    f(&e.ty);
+    match &e.kind {
+        Lit(_) | Local(_) | Fn(_) | EnumVariant { .. } | Unsupported(_) => {}
+        EnumPayloadCtor { payloads, .. } => {
+            for p in payloads {
+                walk_tys_expr(p, f);
+            }
+        }
+        Unary { expr, .. } | Cast { expr } => walk_tys_expr(expr, f),
+        Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
+            walk_tys_expr(lhs, f);
+            walk_tys_expr(rhs, f);
+        }
+        Assign { rhs, .. } | AssignOp { rhs, .. } => walk_tys_expr(rhs, f),
+        Call { args, .. } | BuiltinCall { args, .. } => {
+            for a in args {
+                walk_tys_expr(a, f);
+            }
+        }
+        MethodCall { receiver, args, .. } => {
+            walk_tys_expr(receiver, f);
+            for a in args {
+                walk_tys_expr(a, f);
+            }
+        }
+        StructLit { fields, .. } => {
+            for (_, v) in fields {
+                walk_tys_expr(v, f);
+            }
+        }
+        FieldAccess { receiver, field_ty, .. } => {
+            f(field_ty);
+            walk_tys_expr(receiver, f);
+        }
+        FieldAssign { receiver, field_ty, rhs, .. } => {
+            f(field_ty);
+            walk_tys_expr(receiver, f);
+            walk_tys_expr(rhs, f);
+        }
+        Array { elems, elem_ty } => {
+            f(elem_ty);
+            for el in elems {
+                walk_tys_expr(el, f);
+            }
+        }
+        Index { array, index, elem_ty } => {
+            f(elem_ty);
+            walk_tys_expr(array, f);
+            walk_tys_expr(index, f);
+        }
+        StrByteIndex { str_val, index } => {
+            walk_tys_expr(str_val, f);
+            walk_tys_expr(index, f);
+        }
+        StrSlice { str_val, start, end, .. } => {
+            walk_tys_expr(str_val, f);
+            walk_tys_expr(start, f);
+            walk_tys_expr(end, f);
+        }
+        Block(b) => walk_tys_block(b, f),
+        If { cond, then_b, else_b } => {
+            walk_tys_expr(cond, f);
+            walk_tys_block(then_b, f);
+            if let Some(eb) = else_b {
+                walk_tys_expr(eb, f);
+            }
+        }
+        While { cond, body } => {
+            walk_tys_expr(cond, f);
+            walk_tys_block(body, f);
+        }
+        For { iter, body, elem_ty, .. } => {
+            f(elem_ty);
+            walk_tys_expr(iter, f);
+            walk_tys_block(body, f);
+        }
+        ForRange { start, end, body, .. } => {
+            walk_tys_expr(start, f);
+            walk_tys_expr(end, f);
+            walk_tys_block(body, f);
+        }
+        Match { scrutinee, arms } => {
+            walk_tys_expr(scrutinee, f);
+            for arm in arms {
+                for p in &arm.patterns {
+                    if let HirPattern::EnumPayload { bindings, .. } = p {
+                        for (ty, _) in bindings {
+                            f(ty);
+                        }
+                    }
+                }
+                if let Some(g) = &arm.guard {
+                    walk_tys_expr(g, f);
+                }
+                walk_tys_expr(&arm.body, f);
+            }
+        }
+        Return(v) => {
+            if let Some(eb) = v {
+                walk_tys_expr(eb, f);
+            }
+        }
     }
 }
 

@@ -43,7 +43,7 @@ impl<'a> Lowerer<'a> {
                     .fields
                     .iter()
                     .filter(|f| match &f.ty {
-                        Ty::Vec | Ty::Str => true,
+                        Ty::Vec(_) | Ty::Str => true,
                         Ty::Struct(inner, _) => struct_arc_fields.contains_key(inner),
                         _ => false,
                     })
@@ -122,6 +122,8 @@ impl<'a> Lowerer<'a> {
             enum_has_payload,
             enum_payload_tys,
             impl_methods: self.res.impl_methods.clone(),
+            // Filled by the monomorphizer once every type is concrete.
+            vec_arc_elem_tys: Vec::new(),
         }
     }
 
@@ -324,7 +326,13 @@ impl<'a> Lowerer<'a> {
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
                 },
                 Some(sym) if self.is_builtin_fn_symbol(sym) => HirExprKind::BuiltinCall {
-                    name: self.res.symbol(sym).name.clone(),
+                    // Use the BuiltinFn's runtime-helper name, not the
+                    // symbol's interned key — a `std::`-namespaced alias
+                    // (`std::vec_new`) still calls the `vec_new` helper.
+                    name: match &self.res.symbol(sym).kind {
+                        SymbolKind::BuiltinFn(bf) => bf.name.to_string(),
+                        _ => self.res.symbol(sym).name.clone(),
+                    },
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
                 },
                 Some(sym) if self.is_poly_builtin_fn_symbol(sym) => self.lower_poly_call(sym, args),
@@ -871,8 +879,8 @@ impl<'a> Lowerer<'a> {
         let dispatched = match (poly_name, arg_ty) {
             ("print", Some(Ty::Int(_))) => "print_i64",
             ("print", Some(Ty::Str)) => "print_str",
-            ("weak", Some(Ty::Vec)) => "weak_downgrade_vec",
-            ("upgrade_or", Some(Ty::Weak(inner))) if matches!(**inner, Ty::Vec) => {
+            ("weak", Some(Ty::Vec(_))) => "weak_downgrade_vec",
+            ("upgrade_or", Some(Ty::Weak(inner))) if matches!(**inner, Ty::Vec(_)) => {
                 "weak_upgrade_or_vec"
             }
             _ => {

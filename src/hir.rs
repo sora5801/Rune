@@ -36,6 +36,14 @@ pub struct HirModule {
     /// to rewrite trait method calls on a now-concrete receiver
     /// (`x.fmt()` inside a `<T: Display>` body) into direct calls.
     pub impl_methods: HashMap<(SymbolId, String), SymbolId>,
+    /// Distinct ARC-managed `Vec<T>` element types used anywhere in
+    /// the program (transitively closed — `Vec<Vec<S>>` contributes
+    /// both `Vec<S>` and `S`). Populated by the monomorphizer after
+    /// all specialization. Codegen synthesizes one per-element-type
+    /// release function (`__rune_release_vec$<elem>`) for each, so a
+    /// `Vec` whose elements are themselves ARC-managed reclaims them
+    /// when its strong count hits zero.
+    pub vec_arc_elem_tys: Vec<Ty>,
 }
 
 #[derive(Debug, Clone)]

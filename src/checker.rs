@@ -214,6 +214,34 @@ impl<'r> Checker<'r> {
                             Ty::Weak(Box::new(type_args[0].clone()))
                         }
                     }
+                    // `Vec<T>` is a builtin parametric type — read the
+                    // element type from the path's generic args.
+                    SymbolKind::BuiltinType(Ty::Vec(_)) => {
+                        if type_args.len() != 1 {
+                            self.error(
+                                p.span,
+                                "`Vec` requires exactly one type argument".to_string(),
+                            );
+                            Ty::Error
+                        } else {
+                            let elem = type_args[0].clone();
+                            if vec_element_supported(&elem) {
+                                Ty::Vec(Box::new(elem))
+                            } else {
+                                self.error(
+                                    p.span,
+                                    format!(
+                                        "`Vec<{}>` is not supported in v0.x — the \
+                                         element type must fit an 8-byte slot \
+                                         (integers, bool, char, structs, enums, or \
+                                         a nested Vec; not str, floats, or arrays)",
+                                        elem.display()
+                                    ),
+                                );
+                                Ty::Error
+                            }
+                        }
+                    }
                     SymbolKind::BuiltinType(t) => t,
                     SymbolKind::Struct => Ty::Struct(sym_id, type_args.clone()),
                     SymbolKind::Enum => Ty::Enum(sym_id, type_args.clone()),
@@ -1881,7 +1909,7 @@ impl<'r> Checker<'r> {
                     return Ty::Error;
                 }
                 let t = arg_tys.into_iter().next().unwrap();
-                if !matches!(t, Ty::Vec | Ty::Error) {
+                if !matches!(t, Ty::Vec(_) | Ty::Error) {
                     self.error(
                         args[0].span(),
                         format!(
@@ -2291,6 +2319,26 @@ fn is_printable(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Str)
 }
 
+/// Whether `T` is a valid `Vec<T>` element type in v0.x. Vec stores
+/// elements in 8-byte slots, so the element must be i64-or-smaller
+/// scalar or a pointer-shaped type. `str` is a 16-byte stack
+/// descriptor (can't fit, and storing its pointer would dangle);
+/// floats and arrays are deferred. `TypeVar` is allowed — a generic
+/// `Vec<T>` is validated once monomorphization makes `T` concrete.
+fn vec_element_supported(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Int(_)
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Struct(_, _)
+            | Ty::Enum(_, _)
+            | Ty::Vec(_)
+            | Ty::TypeVar(_)
+            | Ty::Error
+    )
+}
+
 /// Method signature, used by `check_method_call`.
 struct MethodSig {
     params: Vec<Ty>,
@@ -2320,16 +2368,16 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
             params: vec![],
             ret: Ty::Int(IntTy::I64),
         }),
-        // Vec methods. v0.x: element type is implicitly i64.
-        (Ty::Vec, "push") => Some(MethodSig {
-            params: vec![Ty::Int(IntTy::I64)],
+        // Vec<T> methods — element-typed off the receiver.
+        (Ty::Vec(elem), "push") => Some(MethodSig {
+            params: vec![(**elem).clone()],
             ret: Ty::Unit,
         }),
-        (Ty::Vec, "get") => Some(MethodSig {
+        (Ty::Vec(elem), "get") => Some(MethodSig {
             params: vec![Ty::Int(IntTy::I64)],
-            ret: Ty::Int(IntTy::I64),
+            ret: (**elem).clone(),
         }),
-        (Ty::Vec, "len") => Some(MethodSig {
+        (Ty::Vec(_), "len") => Some(MethodSig {
             params: vec![],
             ret: Ty::Int(IntTy::I64),
         }),

@@ -364,7 +364,7 @@ impl Resolver {
             ("usize", Ty::Int(IntTy::USize)),
             ("f32", Ty::Float(FloatTy::F32)),
             ("f64", Ty::Float(FloatTy::F64)),
-            ("Vec", Ty::Vec),
+            ("Vec", Ty::Vec(Box::new(Ty::Error))),
         ];
         for (name, ty) in builtins {
             self.intern(name.to_string(), zero, SymbolKind::BuiltinType(ty.clone()));
@@ -410,15 +410,31 @@ impl Resolver {
             zero,
             SymbolKind::BuiltinFn(print_i64),
         );
-        let vec_new = BuiltinFn {
-            name: "vec_new",
-            params: vec![],
-            ret: Ty::Vec,
-        };
         self.intern(
-            vec_new.name.to_string(),
+            "vec_new".to_string(),
             zero,
-            SymbolKind::BuiltinFn(vec_new),
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "vec_new",
+                params: vec![],
+                ret: Ty::Vec(Box::new(Ty::Int(IntTy::I64))),
+            }),
+        );
+        // Also expose Vec under the `std` namespace — `std::Vec<T>`
+        // and `std::vec_new()`. The bare `Vec` / `vec_new` stay
+        // available (the existing test corpus uses the bare forms).
+        self.intern(
+            "std::Vec".to_string(),
+            zero,
+            SymbolKind::BuiltinType(Ty::Vec(Box::new(Ty::Error))),
+        );
+        self.intern(
+            "std::vec_new".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "vec_new",
+                params: vec![],
+                ret: Ty::Vec(Box::new(Ty::Int(IntTy::I64))),
+            }),
         );
     }
 
