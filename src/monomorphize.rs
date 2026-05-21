@@ -193,6 +193,15 @@ impl MonoState {
                     self.collect_requests_in_expr(a);
                 }
             }
+            HirExprKind::DynBox { value, .. } => {
+                self.collect_requests_in_expr(value);
+            }
+            HirExprKind::DynCall { receiver, args, .. } => {
+                self.collect_requests_in_expr(receiver);
+                for a in args {
+                    self.collect_requests_in_expr(a);
+                }
+            }
             HirExprKind::StructLit { fields, .. } => {
                 for (_, v) in fields {
                     self.collect_requests_in_expr(v);
@@ -467,6 +476,17 @@ fn subst_expr_kind(k: &HirExprKind, subst: &HashMap<SymbolId, Ty>) -> HirExprKin
             method: method.clone(),
             args: args.iter().map(|e| subst_expr(e, subst)).collect(),
         },
+        DynBox { value, struct_sym, trait_sym } => DynBox {
+            value: Box::new(subst_expr(value, subst)),
+            struct_sym: *struct_sym,
+            trait_sym: *trait_sym,
+        },
+        DynCall { receiver, trait_sym, method, args } => DynCall {
+            receiver: Box::new(subst_expr(receiver, subst)),
+            trait_sym: *trait_sym,
+            method: method.clone(),
+            args: args.iter().map(|e| subst_expr(e, subst)).collect(),
+        },
         StructLit { sym, fields, size } => StructLit {
             sym: *sym,
             fields: fields
@@ -610,6 +630,13 @@ fn rewrite_calls_in_expr(
                 rewrite_calls_in_expr(a, cache, generics);
             }
         }
+        DynBox { value, .. } => rewrite_calls_in_expr(value, cache, generics),
+        DynCall { receiver, args, .. } => {
+            rewrite_calls_in_expr(receiver, cache, generics);
+            for a in args.iter_mut() {
+                rewrite_calls_in_expr(a, cache, generics);
+            }
+        }
         StructLit { fields, .. } => {
             for (_, v) in fields.iter_mut() {
                 rewrite_calls_in_expr(v, cache, generics);
@@ -727,6 +754,15 @@ fn resolve_method_calls_in_expr(
             }
         }
         MethodCall { receiver, args, .. } => {
+            resolve_method_calls_in_expr(receiver, impl_methods);
+            for a in args {
+                resolve_method_calls_in_expr(a, impl_methods);
+            }
+        }
+        DynBox { value, .. } => {
+            resolve_method_calls_in_expr(value, impl_methods);
+        }
+        DynCall { receiver, args, .. } => {
             resolve_method_calls_in_expr(receiver, impl_methods);
             for a in args {
                 resolve_method_calls_in_expr(a, impl_methods);
@@ -980,6 +1016,13 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
                 walk_tys_expr(a, f);
             }
         }
+        DynBox { value, .. } => walk_tys_expr(value, f),
+        DynCall { receiver, args, .. } => {
+            walk_tys_expr(receiver, f);
+            for a in args {
+                walk_tys_expr(a, f);
+            }
+        }
         StructLit { fields, .. } => {
             for (_, v) in fields {
                 walk_tys_expr(v, f);
@@ -1115,6 +1158,13 @@ fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
             }
         }
         MethodCall { receiver, args, .. } => {
+            walk_expr_collect_syms(receiver, max);
+            for a in args {
+                walk_expr_collect_syms(a, max);
+            }
+        }
+        DynBox { value, .. } => walk_expr_collect_syms(value, max),
+        DynCall { receiver, args, .. } => {
             walk_expr_collect_syms(receiver, max);
             for a in args {
                 walk_expr_collect_syms(a, max);

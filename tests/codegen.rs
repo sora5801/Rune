@@ -3099,3 +3099,68 @@ fn try_chains_multiple() {
     "#;
     assert_eq!(run_main(src), 42);
 }
+
+// ---- dyn Trait (dynamic dispatch) ----
+
+#[test]
+fn dyn_dispatch_two_impls() {
+    // One function dispatches to two concrete types via a trait
+    // object — the boxed method table picks `area` at runtime.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r * 3 }
+        }
+        struct Square { side: i64 }
+        impl Shape for Square {
+            fn area(self: Square) -> i64 { self.side * self.side }
+        }
+        fn describe(s: dyn Shape) -> i64 { s.area() }
+        fn main() -> i64 {
+            describe(Circle { r: 10 }) + describe(Square { side: 5 })
+        }
+    "#;
+    // 10*10*3 + 5*5 = 300 + 25
+    assert_eq!(run_main(src), 325);
+}
+
+#[test]
+fn dyn_let_binding() {
+    // A `dyn Trait` local — the coercion fires at the `let`.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let s: dyn Shape = Circle { r: 6 };
+            s.area()
+        }
+    "#;
+    assert_eq!(run_main(src), 36);
+}
+
+#[test]
+fn dyn_method_with_arg() {
+    // A trait-object method that takes an explicit argument.
+    let src = r#"
+        trait Greet {
+            fn hello(self: dyn Greet, n: i64) -> i64;
+        }
+        struct En { base: i64 }
+        impl Greet for En {
+            fn hello(self: En, n: i64) -> i64 { self.base + n }
+        }
+        fn main() -> i64 {
+            let g: dyn Greet = En { base: 100 };
+            g.hello(7)
+        }
+    "#;
+    assert_eq!(run_main(src), 107);
+}

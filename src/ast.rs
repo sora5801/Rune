@@ -171,12 +171,15 @@ pub struct ConstDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Path(Path),
+    /// `dyn TraitName` — a trait object (dynamic dispatch).
+    Dyn(Path),
 }
 
 impl Type {
     pub fn span(&self) -> Span {
         match self {
             Type::Path(p) => p.span,
+            Type::Dyn(p) => p.span,
         }
     }
 }

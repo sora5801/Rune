@@ -496,10 +496,10 @@ The plumbing is uniform:
 - No user-side FFI yet — will land alongside an `extern "C"` keyword
   on function items.
 
-## Traits (bounded generics)
+## Traits (bounded generics + trait objects)
 
-**Status: Decided.** Landed 2026-05-20 — static dispatch via
-monomorphization. Dynamic dispatch (`dyn Trait`), supertraits,
+**Status: Decided.** Static dispatch via monomorphization landed
+2026-05-20; dynamic dispatch (`dyn Trait`) 2026-05-21. Supertraits,
 associated types, and generic impls (`impl<T> Trait for Box<T>`)
 remain open.
 
@@ -545,12 +545,32 @@ How it works (as implemented):
    `MethodCall`. Builtin method calls (`str.len()` etc.) remain
    `MethodCall` and dispatch as before.
 
-**Static dispatch only.** No vtables; every trait call is resolved
-to a concrete function by monomorphization. Calling a generic
-function with N distinct types produces N specializations.
+**Static dispatch** (the above): every trait call on a bounded
+generic is resolved to a concrete function by monomorphization.
+Calling a generic function with N distinct types produces N
+specializations.
+
+**Dynamic dispatch** — `dyn Trait`:
+
+```rune
+fn describe(s: dyn Shape) -> i64 { s.area() }   // any Shape
+```
+
+A `dyn Trait` value is an 8-byte pointer to a heap cell
+`[fnptr_0, .., fnptr_{N-1}, data]` — the trait's method pointers
+(a per-instance method table) followed by the concrete data pointer.
+A concrete struct that implements the trait coerces to `dyn Trait`
+at `let`, call-argument, and `return` sites (the checker records the
+coercion; the lowerer wraps it in a `DynBox`). A method call on a
+`dyn` receiver lowers to a `DynCall` — codegen loads the method
+pointer and data pointer from the box and emits a `call_indirect`.
+The trait-object box (and the concrete value it wraps) are **not
+reclaimed** — a v0.x leak; ARC for trait objects is a follow-up.
 
 Still open:
-- **Dynamic dispatch** (`dyn Trait`, trait objects) — needs vtables.
+- **ARC for trait objects** — the `dyn` box currently leaks.
+- **`dyn` in `Vec`** and other nested positions — coercion fires at
+  `let` / call-arg / `return` only.
 - **Supertraits** (`trait Ord: Eq`).
 - **Associated types** / constants.
 - **Generic impls** (`impl<T> Display for Box<T>`) — today only
@@ -681,3 +701,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-21 | Module system polish | Three module-system features. **Nested directories**: `mod foo;` in the main file loads `foo.rn` beside it, and a `mod bar;` inside a loaded `foo.rn` loads `foo/bar.rn` — `modules.rs`'s expander threads a `/`-terminated directory prefix so module paths are `/`-joined. Because `mod` always descends, file modules form a tree — import cycles are now structurally impossible, so session 029's load-stack cycle check is replaced by a depth cap against a pathological loader. **`use` globs**: `use m::*;` aliases every visible direct item of `m` into the using module. New `UseDecl.glob` flag; `parse_use` parses the path by hand so a trailing `::*` doesn't trip `parse_path`; the resolver enumerates `scopes[0]` keys under the module's qualified prefix and aliases each with `entry().or_insert` so an explicit `use` or local item wins over a glob. **`pub` enforcement**: the resolver records per-symbol `(declaring module path, is_pub)` in an `item_vis` table; `is_visible(sym)` is `is_pub || current_path.starts_with(decl_module)` — a non-`pub` item is reachable only from its declaring module and that module's descendants. Checked in `resolve_path` (the final symbol of every path, plus the `Enum::Variant` fallback) and in `resolve_uses`; the glob filters by it too. Variants inherit the enum's visibility; builtins/locals are absent from the table and always visible. v0.x checks only the path's final symbol — an intermediate private module isn't caught. **Ripple**: every item in `std.rn` is now `pub` (the prelude's `mod std` is referenced cross-module from user code), and session 026's module tests gained `pub` on their cross-module items. 420 tests green (+8 from session 029: 2 codegen, 6 typecheck). |
 | 2026-05-21 | Module refinements: use-as, pub use, per-segment privacy | Three module-system refinements. **`use x as y`**: `UseDecl` gains `alias: Option<Ident>`; `parse_use` parses an optional `as ident` after a non-glob path; `resolve_uses` binds the import under the alias name instead of the path's last segment. **`pub use` re-exports**: `UseDecl` gains `vis: Visibility`; a `pub use` records its alias key in the resolver's `pub_reexport_keys` set, and a path that resolves to (or through) such a key skips the privacy check — so a module can re-export even an otherwise-private item under its own namespace. **Per-segment privacy**: `lookup_path` now returns the matched global-namespace key alongside the symbol; `check_path_visibility` walks every module prefix of that key — `a`, `a::b`, `a::b::c` — checking each with `is_visible`, so a private *intermediate* module is caught, not just a private final item (session 030 checked only the final symbol). The check runs in `resolve_path` (the direct-item branch and the `Enum::Variant` fallback's type path) and in `resolve_uses` (you can only `use` a path you can see); a `pub use` key short-circuits it. 427 tests green (+7 from session 030: 2 codegen, 5 typecheck). |
 | 2026-05-21 | `?` operator | `expr?` for ergonomic `Result` propagation. The parser already produced `ast::Expr::Try`; this session type-checks and lowers it. **Checker** `check_try`: the operand must be a `Result`-shaped enum — `Ty::Enum(s, [T, E])` with `Ok`/`Err` variants — and the enclosing function must return a `Result` with the same enum and a matching error type; `expr?` then has type `T`. **Lowerer** `lower_try` desugars it to `match expr { Ok(v) => v, Err(e) => return Err(e) }` — a `HirExprKind::Match` built directly, with fresh binding symbols allocated past the resolver's max via a `Cell<u32>` counter on the `Lowerer`. The resolver, monomorphizer, and codegen need no `?`-specific code — it's a desugar to existing constructs. Two supporting fixes: (1) the monomorphizer's `walk_expr_collect_syms` was incomplete (missed `Match`/`Return`/most expr kinds), so the synthetic binding syms weren't counted toward the fresh-sym base — rewritten to be exhaustive; (2) `compile_match` rejected a diverging arm — a `return` arm body leaves a fresh unreachable block so `is_filled()` reads false — now an arm whose body type is `Ty::Never` terminates that block with a trap and contributes no merge value (this also fixes any `match` with a `return` in an arm). **Not done**: `?` error-type *conversion* (a `From`-style coercion) — the propagated and declared error types must match exactly. 433 tests green (+6 from session 031: 2 codegen, 4 typecheck). |
+| 2026-05-21 | `dyn Trait` dynamic dispatch | Trait objects. New `dyn` keyword; `ast::Type::Dyn(Path)`; `Ty::Dyn(trait_sym)` — at runtime an 8-byte pointer to a heap cell `[fnptr_0, .., fnptr_{N-1}, data]` (the trait's method pointers — a per-instance method table — then the concrete data pointer). **Coercion**: a concrete struct that implements trait `T` coerces to `dyn T` at `let` / call-argument / `return` sites — the checker's `check_assignable` verifies the struct provides every trait method (`struct_impls_trait`) and records the coercion in `CheckResults::dyn_coercions`; the lowerer wraps the expression in `HirExprKind::DynBox`. **Dispatch**: a method call on a `dyn` receiver lowers to `HirExprKind::DynCall`; codegen loads the method pointer (slot `index`) and data pointer (slot `N`) from the box and emits a `call_indirect` with a signature built from the argument and result types. `DynBox` codegen heap-allocates the cell, takes each impl method's address with `func_addr`, and stores the data pointer; `HirModule::trait_methods` (ordered method names per trait) drives the table layout. The monomorphizer leaves `DynBox`/`DynCall` alone — all six expr-walk passes gained arms. **A per-instance method table was chosen over a shared data-object vtable** to avoid a first-time use of `DataDescription::write_function_addr`; the table is rebuilt at each coercion. **Not done**: the `dyn` box and the concrete value it wraps are never freed (a v0.x leak — no ARC for trait objects); coercion fires only at `let`/call-arg/`return`, not in `Vec` or other nested positions; object safety isn't enforced beyond "the impl exists". 439 tests green (+6 from session 032: 3 codegen, 3 typecheck). |

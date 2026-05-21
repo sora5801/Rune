@@ -43,7 +43,7 @@ pub enum TokenKind {
     Struct, Enum, Match,
     Pub, Const, As,
     Impl, Trait,
-    Mod, Use,
+    Mod, Use, Dyn,
 
     // Arithmetic
     Plus, Minus, Star, Slash, Percent,
@@ -105,6 +105,7 @@ impl TokenKind {
             "trait" => TokenKind::Trait,
             "mod" => TokenKind::Mod,
             "use" => TokenKind::Use,
+            "dyn" => TokenKind::Dyn,
             _ => return None,
         })
     }

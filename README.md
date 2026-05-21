@@ -74,6 +74,9 @@ rune: linked with clang -> primes.exe
   `impl Display for Point { ... }`, `fn show<T: Display>(x: T)`.
   Static dispatch — trait method calls in a bounded-generic body
   are resolved per-specialization by the monomorphizer.
+- **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
+  trait object (a boxed method table); `s.method()` on a `dyn`
+  dispatches through it via `call_indirect`.
 - **Modules**: inline `mod name { items... }` (nestable) and
   file-based `mod name;` (loads `name.rn`; nested — `mod bar;` inside
   `foo.rn` loads `foo/bar.rn`). `use a::b::c;` imports, `use x as y;`
@@ -112,7 +115,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 116 integration tests.
+- 119 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -205,7 +208,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 208 JIT codegen tests + 34 AOT tests.
+- 211 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -245,7 +248,7 @@ error if reached.
 
 ## Roadmap
 
-1. `dyn Trait` — dynamic dispatch via vtables
+1. ARC for trait objects (the `dyn` box currently leaks); `Vec<dyn T>`
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`

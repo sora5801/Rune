@@ -141,6 +141,14 @@ impl<'a> Lowerer<'a> {
             impl_methods: self.res.impl_methods.clone(),
             // Filled by the monomorphizer once every type is concrete.
             vec_arc_elem_tys: Vec::new(),
+            trait_methods: self
+                .res
+                .trait_methods
+                .iter()
+                .map(|(t, ms)| {
+                    (*t, ms.iter().map(|m| m.name.name.clone()).collect())
+                })
+                .collect(),
         }
     }
 
@@ -255,8 +263,25 @@ impl<'a> Lowerer<'a> {
     fn lower_expr(&self, e: &ast::Expr) -> HirExpr {
         let span = e.span();
         let ty = self.check.expr_types.get(&span).cloned().unwrap_or(Ty::Error);
-        let kind = self.lower_expr_kind(e);
-        HirExpr { kind, ty }
+        let inner = HirExpr {
+            kind: self.lower_expr_kind(e),
+            ty,
+        };
+        // A `dyn Trait` coercion the checker recorded at this span:
+        // wrap the value in a `DynBox`.
+        if let Some(&(struct_sym, trait_sym)) =
+            self.check.dyn_coercions.get(&span)
+        {
+            return HirExpr {
+                kind: HirExprKind::DynBox {
+                    value: Box::new(inner),
+                    struct_sym,
+                    trait_sym,
+                },
+                ty: Ty::Dyn(trait_sym),
+            };
+        }
+        inner
     }
 
     fn lower_expr_kind(&self, e: &ast::Expr) -> HirExprKind {
@@ -384,6 +409,16 @@ impl<'a> Lowerer<'a> {
             ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
             ast::Expr::MethodCall { receiver, method, args, .. } => {
                 let receiver_hir = self.lower_expr(receiver);
+                // A method call on a `dyn Trait` receiver dispatches
+                // dynamically through the boxed method table.
+                if let Ty::Dyn(trait_sym) = &receiver_hir.ty {
+                    return HirExprKind::DynCall {
+                        receiver: Box::new(receiver_hir.clone()),
+                        trait_sym: *trait_sym,
+                        method: method.name.clone(),
+                        args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                    };
+                }
                 // User-defined methods on structs (via `impl`) are lowered
                 // to a regular Call with the receiver as the first
                 // argument. Builtin methods go through HirExprKind::MethodCall.

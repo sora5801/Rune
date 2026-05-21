@@ -500,6 +500,12 @@ impl Parser {
     // ---- types & paths ----
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        // `dyn TraitName` — a trait object. v0.x: the trait path
+        // carries no generic args.
+        if self.eat(&TokenKind::Dyn) {
+            let path = self.parse_path()?;
+            return Ok(Type::Dyn(path));
+        }
         // At type position, `Vec<i64>` is unambiguous — the parser
         // can greedily consume the `<...>`.
         let mut path = self.parse_path()?;

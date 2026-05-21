@@ -76,6 +76,10 @@ pub enum Ty {
     /// runtime support; other inner types are accepted by the
     /// checker but error at codegen.
     Weak(Box<Ty>),
+    /// `dyn Trait` — a trait object. Carries the trait's `SymbolId`.
+    /// At runtime an 8-byte pointer to a heap cell holding the method
+    /// pointers followed by the concrete data pointer.
+    Dyn(SymbolId),
     /// Diverging — `return`, `break`, `continue`.
     Never,
     /// Cascades silently; comparisons against `Error` succeed to avoid
@@ -172,6 +176,7 @@ impl Ty {
             }
             Ty::TypeVar(id) => format!("T#{}", id.0),
             Ty::Weak(inner) => format!("Weak<{}>", inner.display()),
+            Ty::Dyn(id) => format!("dyn#{}", id.0),
             Ty::Never => "!".into(),
             Ty::Error => "?".into(),
         }

@@ -410,7 +410,7 @@ fn parses_generic_enum() {
 fn parses_generic_type_arg_in_type_position() {
     let m = parse_ok("fn first(v: Vec<i64>) -> i64 { 0 }");
     let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
-    let Type::Path(p) = &f.params[0].ty;
+    let Type::Path(p) = &f.params[0].ty else { panic!() };
     assert_eq!(p.generic_args.len(), 1);
 }
 

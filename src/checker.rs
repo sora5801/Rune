@@ -38,6 +38,10 @@ pub struct CheckResults {
     pub local_types: HashMap<Span, Ty>,
     pub type_resolutions: HashMap<Span, Ty>,
     pub struct_layouts: HashMap<SymbolId, StructLayout>,
+    /// Spans of expressions that coerce a concrete struct into a
+    /// `dyn Trait` — `expr span → (struct sym, trait sym)`. The
+    /// lowerer wraps each such expression in a `DynBox`.
+    pub dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
     pub errors: Vec<TypeError>,
 }
 
@@ -68,6 +72,7 @@ pub struct Checker<'r> {
     local_types: HashMap<Span, Ty>,
     type_resolutions: HashMap<Span, Ty>,
     struct_layouts: HashMap<SymbolId, StructLayout>,
+    dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
     errors: Vec<TypeError>,
     current_return: Ty,
 }
@@ -81,6 +86,7 @@ impl<'r> Checker<'r> {
             local_types: HashMap::new(),
             type_resolutions: HashMap::new(),
             struct_layouts: HashMap::new(),
+            dyn_coercions: HashMap::new(),
             errors: Vec::new(),
             current_return: Ty::Unit,
         }
@@ -103,6 +109,7 @@ impl<'r> Checker<'r> {
             local_types: self.local_types,
             type_resolutions: self.type_resolutions,
             struct_layouts: self.struct_layouts,
+            dyn_coercions: self.dyn_coercions,
             errors: self.errors,
         }
     }
@@ -254,6 +261,22 @@ impl<'r> Checker<'r> {
                 self.type_resolutions.insert(p.span, ty.clone());
                 ty
             }
+            Type::Dyn(p) => {
+                let Some(&sym_id) = self.res.path_to_sym.get(&p.span) else {
+                    return Ty::Error;
+                };
+                if !matches!(self.res.symbol(sym_id).kind, SymbolKind::Trait) {
+                    let name = self.res.symbol(sym_id).name.clone();
+                    self.error(
+                        p.span,
+                        format!("`dyn {}` — `{}` is not a trait", name, name),
+                    );
+                    return Ty::Error;
+                }
+                let ty = Ty::Dyn(sym_id);
+                self.type_resolutions.insert(p.span, ty.clone());
+                ty
+            }
         }
     }
 
@@ -401,7 +424,9 @@ impl<'r> Checker<'r> {
         let inferred = l.init.as_ref().map(|e| self.check_expr(e));
         let final_ty = match (declared, inferred) {
             (Some(d), Some(i)) => {
-                if !i.compatible(&d) {
+                let init_span =
+                    l.init.as_ref().map(|e| e.span()).unwrap_or(l.span);
+                if !self.check_assignable(init_span, &i, &d) {
                     self.error(
                         l.span,
                         format!(
@@ -1409,6 +1434,37 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Whether a value of type `actual` may be supplied where
+    /// `expected` is wanted — directly compatible, or a concrete
+    /// struct coercing into a `dyn Trait` it implements. A coercion is
+    /// recorded at `span` so the lowerer wraps that expression in a
+    /// `DynBox`.
+    fn check_assignable(&mut self, span: Span, actual: &Ty, expected: &Ty) -> bool {
+        if actual.compatible(expected) {
+            return true;
+        }
+        if let (Ty::Struct(c, _), Ty::Dyn(t)) = (actual, expected) {
+            if self.struct_impls_trait(*c, *t) {
+                self.dyn_coercions.insert(span, (*c, *t));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True if struct `c` provides an impl method for every method
+    /// the trait `t` declares.
+    fn struct_impls_trait(&self, c: SymbolId, t: SymbolId) -> bool {
+        let Some(methods) = self.res.trait_methods.get(&t) else {
+            return false;
+        };
+        methods.iter().all(|m| {
+            self.res
+                .impl_methods
+                .contains_key(&(c, m.name.name.clone()))
+        })
+    }
+
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
         // Intercept calls to polymorphic builtins before checking the callee
         // as a value expression — they have no single signature to bind.
@@ -1450,7 +1506,7 @@ impl<'r> Checker<'r> {
                     std::collections::HashMap::new();
                 for (i, (param_ty, arg_ty)) in params.iter().zip(&arg_tys).enumerate() {
                     unify_typevars(param_ty, arg_ty, &mut subst);
-                    if !arg_ty.compatible(param_ty) {
+                    if !self.check_assignable(args[i].span(), arg_ty, param_ty) {
                         self.error(
                             args[i].span(),
                             format!(
@@ -1809,6 +1865,29 @@ impl<'r> Checker<'r> {
         None
     }
 
+    /// Method signature for a call on a `dyn Trait` receiver — looked
+    /// up directly in the trait, with the leading `self` dropped.
+    fn dyn_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+        let Ty::Dyn(trait_sym) = recv else { return None };
+        let methods = self.res.trait_methods.get(trait_sym)?;
+        let m = methods.iter().find(|m| m.name.name == name)?;
+        let mut params: Vec<Ty> = Vec::new();
+        for p in m.params.iter().skip(1) {
+            params.push(
+                self.type_resolutions
+                    .get(&p.ty.span())
+                    .cloned()
+                    .unwrap_or(Ty::Error),
+            );
+        }
+        let ret = m
+            .return_type
+            .as_ref()
+            .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
+            .unwrap_or(Ty::Unit);
+        Some(MethodSig { params, ret })
+    }
+
     fn check_method_call(
         &mut self,
         receiver: &Expr,
@@ -1820,7 +1899,8 @@ impl<'r> Checker<'r> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
         let sig = resolve_method(&recv_ty, &method.name)
             .or_else(|| self.user_method_sig(&recv_ty, &method.name))
-            .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name));
+            .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name))
+            .or_else(|| self.dyn_method_sig(&recv_ty, &method.name));
         let Some(sig) = sig else {
             if !recv_ty.is_error() {
                 self.error(
@@ -2253,7 +2333,8 @@ impl<'r> Checker<'r> {
     fn check_return(&mut self, value: Option<&Expr>, span: Span) -> Ty {
         let ret_ty = self.current_return.clone();
         let actual = value.map(|v| self.check_expr(v)).unwrap_or(Ty::Unit);
-        if !actual.compatible(&ret_ty) {
+        let value_span = value.map(|v| v.span()).unwrap_or(span);
+        if !self.check_assignable(value_span, &actual, &ret_ty) {
             self.error(
                 span,
                 format!(

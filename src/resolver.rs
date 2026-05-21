@@ -1036,6 +1036,7 @@ impl Resolver {
     fn resolve_type(&mut self, t: &Type) {
         match t {
             Type::Path(p) => self.resolve_path(p),
+            Type::Dyn(p) => self.resolve_path(p),
         }
     }
 

@@ -1297,3 +1297,47 @@ fn try_error_type_mismatch() {
         "propagates an error",
     );
 }
+
+// ---- dyn Trait ----
+
+#[test]
+fn dyn_trait_typechecks() {
+    check_ok(r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r }
+        }
+        fn describe(s: dyn Shape) -> i64 { s.area() }
+        fn main() -> i64 { describe(Circle { r: 1 }) }
+    "#);
+}
+
+#[test]
+fn dyn_non_implementing_struct_rejected() {
+    // A struct that doesn't implement the trait can't coerce to it.
+    check_has_error(
+        r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct NotShape { x: i64 }
+        fn describe(s: dyn Shape) -> i64 { 0 }
+        fn main() -> i64 { describe(NotShape { x: 1 }) }
+        "#,
+        "argument 1",
+    );
+}
+
+#[test]
+fn dyn_of_non_trait_rejected() {
+    // `dyn T` requires `T` to be a trait.
+    check_has_error(
+        r#"
+        struct Foo { x: i64 }
+        fn take(f: dyn Foo) -> i64 { 0 }
+        fn main() -> i64 { 0 }
+        "#,
+        "is not a trait",
+    );
+}

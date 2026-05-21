@@ -44,6 +44,10 @@ pub struct HirModule {
     /// `Vec` whose elements are themselves ARC-managed reclaims them
     /// when its strong count hits zero.
     pub vec_arc_elem_tys: Vec<Ty>,
+    /// Per-trait ordered method names. Codegen uses the order to lay
+    /// out a trait object's method-pointer table and to find a
+    /// method's slot for an indirect call.
+    pub trait_methods: HashMap<SymbolId, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +147,22 @@ pub enum HirExprKind {
     /// inline IR (e.g. `str.len()` is a load from the descriptor).
     MethodCall {
         receiver: Box<HirExpr>,
+        method: String,
+        args: Vec<HirExpr>,
+    },
+    /// Coerce a concrete struct value into a `dyn Trait` object —
+    /// heap-allocate a cell holding the trait's method pointers
+    /// followed by the data pointer.
+    DynBox {
+        value: Box<HirExpr>,
+        struct_sym: SymbolId,
+        trait_sym: SymbolId,
+    },
+    /// A method call on a `dyn Trait` receiver — dispatched through
+    /// the boxed method-pointer table (`call_indirect`).
+    DynCall {
+        receiver: Box<HirExpr>,
+        trait_sym: SymbolId,
         method: String,
         args: Vec<HirExpr>,
     },

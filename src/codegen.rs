@@ -68,6 +68,10 @@ pub struct Codegen<M: Module> {
     /// each ARC-managed `Vec<T>` element type. Keyed by the element
     /// `Ty`; the function walks a Vec's live elements releasing each.
     vec_release_funcs: HashMap<Ty, FuncId>,
+    /// Per-trait ordered method names — the trait-object method-table
+    /// layout. `(type_sym, method) → impl fn sym` for building tables.
+    trait_methods: HashMap<SymbolId, Vec<String>>,
+    impl_methods: HashMap<(SymbolId, String), SymbolId>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -607,6 +611,8 @@ impl<M: Module> Codegen<M> {
         self.struct_sizes = hir.struct_sizes.clone();
         self.enum_has_payload = hir.enum_has_payload.clone();
         self.enum_payload_tys = hir.enum_payload_tys.clone();
+        self.trait_methods = hir.trait_methods.clone();
+        self.impl_methods = hir.impl_methods.clone();
         // Pass 0: declare per-struct + per-enum release functions so
         // they can call each other (e.g. a struct with a nested
         // struct field, or an enum payload that's a struct).
@@ -1063,6 +1069,8 @@ impl<M: Module> Codegen<M> {
             enum_release_funcs: &self.enum_release_funcs,
             enum_payload_tys: &self.enum_payload_tys,
             vec_release_funcs: &self.vec_release_funcs,
+            trait_methods: &self.trait_methods,
+            impl_methods: &self.impl_methods,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -1187,6 +1195,8 @@ impl Codegen<JITModule> {
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
+            trait_methods: HashMap::new(),
+            impl_methods: HashMap::new(),
         })
     }
 
@@ -1242,6 +1252,8 @@ impl Codegen<ObjectModule> {
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
+            trait_methods: HashMap::new(),
+            impl_methods: HashMap::new(),
         })
     }
 
@@ -1318,6 +1330,8 @@ struct FnCodegen<'a, M: Module> {
     enum_release_funcs: &'a HashMap<SymbolId, FuncId>,
     enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
     vec_release_funcs: &'a HashMap<Ty, FuncId>,
+    trait_methods: &'a HashMap<SymbolId, Vec<String>>,
+    impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -1715,6 +1729,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
             HirExprKind::MethodCall { receiver, method, args } => {
                 self.compile_method_call(receiver, method, args, &e.ty)
+            }
+            HirExprKind::DynBox { value, struct_sym, trait_sym } => {
+                self.compile_dyn_box(value, *struct_sym, *trait_sym)
+            }
+            HirExprKind::DynCall { receiver, trait_sym, method, args } => {
+                self.compile_dyn_call(receiver, *trait_sym, method, args, &e.ty)
             }
             HirExprKind::StructLit { sym: _, fields, size } => {
                 self.compile_struct_lit(fields, *size)
@@ -2463,6 +2483,125 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
     }
 
+    /// Coerce a concrete struct into a `dyn Trait` object. Allocates
+    /// a heap cell `[fnptr_0, .., fnptr_{N-1}, data]` — the trait's
+    /// method pointers (per-instance method table) followed by the
+    /// concrete data pointer. The cell is never freed in v0.x.
+    fn compile_dyn_box(
+        &mut self,
+        value: &HirExpr,
+        struct_sym: SymbolId,
+        trait_sym: SymbolId,
+    ) -> Result<Option<Value>, CodegenError> {
+        let data = self
+            .compile_expr(value)?
+            .ok_or_else(|| CodegenError("dyn coercion value produced no value".into()))?;
+        let methods = self
+            .trait_methods
+            .get(&trait_sym)
+            .cloned()
+            .ok_or_else(|| CodegenError("dyn: unknown trait".into()))?;
+        let n = methods.len();
+        // `struct_new(size)` allocs `size + 8` (the trailing rc slot
+        // goes unused — a trait-object box is not reclaimed in v0.x).
+        let cell_size = ((n + 1) * 8) as i64;
+        let new_id = self.ensure_runtime_func("struct_new")?;
+        let new_local = self.module.declare_func_in_func(new_id, self.builder.func);
+        let size_v = self.builder.ins().iconst(types::I64, cell_size);
+        let inst = self.builder.ins().call(new_local, &[size_v]);
+        let cell = self.builder.inst_results(inst)[0];
+        for (i, m) in methods.iter().enumerate() {
+            let fn_sym = *self
+                .impl_methods
+                .get(&(struct_sym, m.clone()))
+                .ok_or_else(|| {
+                    CodegenError(format!("dyn: method `{}` has no impl", m))
+                })?;
+            let func_id = *self
+                .sym_to_func
+                .get(&fn_sym)
+                .ok_or_else(|| CodegenError("dyn: impl method not compiled".into()))?;
+            let fref = self.module.declare_func_in_func(func_id, self.builder.func);
+            let fptr = self.builder.ins().func_addr(types::I64, fref);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), fptr, cell, (i * 8) as i32);
+        }
+        self.builder
+            .ins()
+            .store(MemFlags::new(), data, cell, (n * 8) as i32);
+        Ok(Some(cell))
+    }
+
+    /// A method call on a `dyn Trait` receiver — load the method
+    /// pointer and data pointer from the box and `call_indirect`.
+    fn compile_dyn_call(
+        &mut self,
+        receiver: &HirExpr,
+        trait_sym: SymbolId,
+        method: &str,
+        args: &[HirExpr],
+        result_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let cell = self
+            .compile_expr(receiver)?
+            .ok_or_else(|| CodegenError("dyn receiver produced no value".into()))?;
+        let methods = self
+            .trait_methods
+            .get(&trait_sym)
+            .cloned()
+            .ok_or_else(|| CodegenError("dyn: unknown trait".into()))?;
+        let n = methods.len();
+        let index = methods
+            .iter()
+            .position(|m| m == method)
+            .ok_or_else(|| CodegenError(format!("dyn: no method `{}`", method)))?;
+        // Compile the explicit args before reading the box slots.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);
+        let mut compiled = Vec::with_capacity(args.len());
+        for a in args {
+            compiled.push(
+                self.compile_expr(a)?
+                    .ok_or_else(|| CodegenError("dyn call arg produced no value".into()))?,
+            );
+        }
+        // `self` = the data pointer in the box's final slot.
+        let data = self.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            cell,
+            (n * 8) as i32,
+        );
+        arg_vals.push(data);
+        arg_vals.extend(compiled);
+        let fnptr = self.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            cell,
+            (index * 8) as i32,
+        );
+        // Signature of the indirect call: `(self, args...) -> result`.
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        for a in args {
+            sig.params.push(AbiParam::new(cranelift_type(&a.ty)?));
+        }
+        if !matches!(result_ty, Ty::Unit | Ty::Never) {
+            sig.returns.push(AbiParam::new(cranelift_type(result_ty)?));
+        }
+        let sig_ref = self.builder.import_signature(sig);
+        let inst = self
+            .builder
+            .ins()
+            .call_indirect(sig_ref, fnptr, &arg_vals);
+        let results = self.builder.inst_results(inst);
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(results[0]))
+        }
+    }
+
     fn compile_builtin_call(
         &mut self,
         name: &str,
@@ -3062,6 +3201,7 @@ fn mangle_ty_name(ty: &Ty) -> String {
             }
         }
         Ty::TypeVar(s) => format!("T{}", s.0),
+        Ty::Dyn(s) => format!("dyn{}", s.0),
         Ty::Fn { .. } => "fn".into(),
         Ty::Never => "never".into(),
         Ty::Error => "err".into(),
@@ -3125,6 +3265,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         // the strong reference. The distinction lives in which
         // retain/release helpers we call on it.
         Ty::Weak(_) => types::I64,
+        // A trait object is a pointer to its boxed method table.
+        Ty::Dyn(_) => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -3152,7 +3294,8 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec(_) | Ty::Enum(_, _) | Ty::Weak(_) => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec(_) | Ty::Enum(_, _) | Ty::Weak(_)
+        | Ty::Dyn(_) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",
