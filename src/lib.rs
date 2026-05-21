@@ -5,6 +5,7 @@ pub mod codegen;
 pub mod hir;
 pub mod lexer;
 pub mod lower;
+pub mod modules;
 pub mod monomorphize;
 pub mod parser;
 pub mod resolver;
@@ -18,6 +19,7 @@ pub use codegen::{Codegen, CodegenError, OptLevel};
 pub use hir::{HirModule, HirItem, HirFn};
 pub use lexer::{LexError, Lexer};
 pub use lower::Lowerer;
+pub use modules::{expand_modules, Expansion, ModuleError, SourceMap};
 pub use monomorphize::monomorphize_module;
 
 /// The standard prelude — a `mod std { ... }` written in Rune,

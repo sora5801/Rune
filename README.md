@@ -74,10 +74,10 @@ rune: linked with clang -> primes.exe
   `impl Display for Point { ... }`, `fn show<T: Display>(x: T)`.
   Static dispatch — trait method calls in a bounded-generic body
   are resolved per-specialization by the monomorphizer.
-- **Inline modules**: `mod name { items... }` (nestable),
-  `use a::b::c;` imports, `a::b::c` path resolution. Functions get
-  module-mangled codegen names so same-named functions in different
-  modules don't collide.
+- **Modules**: inline `mod name { items... }` (nestable) and
+  file-based `mod name;` (loads `name.rn`); `use a::b::c;` imports,
+  `a::b::c` path resolution. Functions get module-mangled codegen
+  names so same-named functions in different modules don't collide.
 - Generic type parameters with optional trait bounds
   (`<T>`, `<T: Display>`, `<T: A + B>`)
 - Error recovery at item-starting keywords
@@ -104,7 +104,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 98 integration tests.
+- 101 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -193,7 +193,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 198 JIT codegen tests + 34 AOT tests.
+- 202 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -233,8 +233,7 @@ a clear error if reached.
 
 ## Roadmap
 
-1. File-based modules (`mod name;` loading `name.rn`) +
-   visibility enforcement
+1. Module visibility enforcement (`pub`) + nested module directories
 2. `dyn Trait` — dynamic dispatch via vtables
 3. Supertraits, associated types, generic impls
 4. `?` operator desugared to Result matching

@@ -3,10 +3,29 @@ use rune::*;
 /// Compile `src` and JIT-call its `main() -> i64`, returning the value.
 /// The standard prelude is prepended so `std::` items are in scope.
 fn run_main(src: &str) -> i64 {
-    let src = with_prelude(src);
-    let (tokens, le) = Lexer::new(&src).tokenize();
-    assert!(le.is_empty(), "lex errors: {:?}", le);
-    let (module, pe) = Parser::new(tokens).parse_module();
+    run_main_files(&[("main", src)])
+}
+
+/// Like `run_main`, but for a multi-file program. `files[0]` is the
+/// main source (gets the prelude); the rest are `(module-name,
+/// source)` pairs reachable through `mod name;` declarations.
+fn run_main_files(files: &[(&str, &str)]) -> i64 {
+    let main_src = with_prelude(files[0].1);
+    let mods: Vec<(String, String)> = files[1..]
+        .iter()
+        .map(|(n, s)| (n.to_string(), s.to_string()))
+        .collect();
+    let loader = |name: &str| {
+        mods.iter().find(|(n, _)| n == name).map(|(_, s)| s.clone())
+    };
+    let exp = expand_modules(&main_src, "<test>", &loader);
+    assert!(exp.lex_errors.is_empty(), "lex errors: {:?}", exp.lex_errors);
+    assert!(
+        exp.module_errors.is_empty(),
+        "module errors: {:?}",
+        exp.module_errors
+    );
+    let (module, pe) = Parser::new(exp.tokens).parse_module();
     assert!(pe.is_empty(), "parse errors: {:?}", pe);
     let (res, re) = Resolver::new().resolve_module(&module);
     assert!(re.is_empty(), "resolve errors: {:?}", re);
@@ -2924,4 +2943,57 @@ fn generic_vec_struct_loop_reclaims() {
         }
     "#;
     assert_eq!(run_main(src), 100000);
+}
+
+// ---- file-based modules ----
+
+#[test]
+fn file_module_call_across_files() {
+    let main = r#"
+        mod helper;
+        fn main() -> i64 { helper::triple(7) }
+    "#;
+    let helper = "fn triple(x: i64) -> i64 { x * 3 }";
+    assert_eq!(run_main_files(&[("main", main), ("helper", helper)]), 21);
+}
+
+#[test]
+fn file_module_use_import() {
+    let main = r#"
+        mod helper;
+        use helper::square;
+        fn main() -> i64 { square(5) }
+    "#;
+    let helper = "fn square(x: i64) -> i64 { x * x }";
+    assert_eq!(run_main_files(&[("main", main), ("helper", helper)]), 25);
+}
+
+#[test]
+fn file_module_nested() {
+    // A file module that itself declares a file module.
+    let main = r#"
+        mod mid;
+        fn main() -> i64 { mid::go() }
+    "#;
+    let mid = r#"
+        mod leaf;
+        fn go() -> i64 { leaf::val() + 1 }
+    "#;
+    let leaf = "fn val() -> i64 { 100 }";
+    assert_eq!(
+        run_main_files(&[("main", main), ("mid", mid), ("leaf", leaf)]),
+        101
+    );
+}
+
+#[test]
+fn file_module_uses_std() {
+    // A loaded module sees the prelude's `std::` items — they live in
+    // the shared global namespace, not in the module's own file.
+    let main = r#"
+        mod m;
+        fn main() -> i64 { m::biggest() }
+    "#;
+    let m = "fn biggest() -> i64 { std::max(3, 9) }";
+    assert_eq!(run_main_files(&[("main", main), ("m", m)]), 9);
 }

@@ -50,12 +50,41 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
     })
 }
 
-/// Read a source file and prepend the standard prelude. The compile
-/// commands (check/run/build) use this so `std::` items are in scope.
-/// The debug commands (tokens/ast) use `read_source` directly so they
-/// reflect only the user's file.
-fn read_program_source(path: &str) -> Result<String, ExitCode> {
-    read_source(path).map(|s| rune::with_prelude(&s))
+/// Read `path`, optionally prepend the standard prelude, and expand
+/// `mod name;` declarations by loading sibling `<name>.rn` files. The
+/// compile commands (check/run/build) prepend the prelude so `std::`
+/// items are in scope; `ast` does not (it shows only the user tree).
+fn load_and_expand(path: &str, prelude: bool) -> Result<rune::Expansion, ExitCode> {
+    let raw = read_source(path)?;
+    let source = if prelude { rune::with_prelude(&raw) } else { raw };
+    // `mod name;` resolves to `<dir-of-main-file>/name.rn` — v0.x
+    // keeps module files flat in one directory.
+    let dir = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let loader = move |name: &str| -> Option<String> {
+        fs::read_to_string(dir.join(format!("{}.rn", name))).ok()
+    };
+    Ok(rune::expand_modules(&source, path, &loader))
+}
+
+/// Print each error to stderr; return whether any were printed.
+fn print_errors<E: std::fmt::Display>(errors: &[E]) -> bool {
+    for e in errors {
+        eprintln!("{}", e);
+    }
+    !errors.is_empty()
+}
+
+/// When a program spans multiple files, error byte offsets live in one
+/// shared space; print the file→range map so they can be traced back.
+fn note_source_map(sm: &rune::SourceMap) {
+    if sm.is_multi_file() {
+        eprintln!("note: byte offsets span multiple files —");
+        eprintln!("{}", sm.summary());
+    }
 }
 
 fn cmd_tokens(args: &[String]) -> ExitCode {
@@ -86,23 +115,23 @@ fn cmd_ast(args: &[String]) -> ExitCode {
         eprintln!("usage: rune ast <file>");
         return ExitCode::from(2);
     };
-    let source = match read_source(path) {
-        Ok(s) => s,
+    let exp = match load_and_expand(path, false) {
+        Ok(e) => e,
         Err(code) => return code,
     };
-    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let rune::Expansion { tokens, lex_errors, module_errors, source_map } = exp;
     let (module, parse_errors) = Parser::new(tokens).parse_module();
     println!("{:#?}", module);
     let mut had_errors = false;
-    for err in &lex_errors {
-        eprintln!("{}", err);
-        had_errors = true;
+    had_errors |= print_errors(&lex_errors);
+    had_errors |= print_errors(&module_errors);
+    had_errors |= print_errors(&parse_errors);
+    if had_errors {
+        note_source_map(&source_map);
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
-    for err in &parse_errors {
-        eprintln!("{}", err);
-        had_errors = true;
-    }
-    if had_errors { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
@@ -110,24 +139,27 @@ fn cmd_check(args: &[String]) -> ExitCode {
         eprintln!("usage: rune check <file>");
         return ExitCode::from(2);
     };
-    let source = match read_program_source(path) {
-        Ok(s) => s,
+    let exp = match load_and_expand(path, true) {
+        Ok(e) => e,
         Err(code) => return code,
     };
-    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let rune::Expansion { tokens, lex_errors, module_errors, source_map } = exp;
     let (module, parse_errors) = Parser::new(tokens).parse_module();
     let (resolutions, resolve_errors) = Resolver::new().resolve_module(&module);
     let check_results = Checker::new(&resolutions).check_module(&module);
 
     let mut had_errors = false;
-    for err in &lex_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &parse_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &resolve_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &check_results.errors { eprintln!("{}", err); had_errors = true; }
-    if !had_errors {
-        println!("ok");
+    had_errors |= print_errors(&lex_errors);
+    had_errors |= print_errors(&module_errors);
+    had_errors |= print_errors(&parse_errors);
+    had_errors |= print_errors(&resolve_errors);
+    had_errors |= print_errors(&check_results.errors);
+    if had_errors {
+        note_source_map(&source_map);
+        return ExitCode::FAILURE;
     }
-    if had_errors { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    println!("ok");
+    ExitCode::SUCCESS
 }
 
 fn cmd_run(args: &[String]) -> ExitCode {
@@ -135,20 +167,22 @@ fn cmd_run(args: &[String]) -> ExitCode {
         eprintln!("usage: rune run <file>");
         return ExitCode::from(2);
     };
-    let source = match read_program_source(path) {
-        Ok(s) => s,
+    let exp = match load_and_expand(path, true) {
+        Ok(e) => e,
         Err(code) => return code,
     };
-    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let rune::Expansion { tokens, lex_errors, module_errors, source_map } = exp;
     let (module, parse_errors) = Parser::new(tokens).parse_module();
     let (resolutions, resolve_errors) = Resolver::new().resolve_module(&module);
     let check_results = Checker::new(&resolutions).check_module(&module);
     let mut had_errors = false;
-    for err in &lex_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &parse_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &resolve_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &check_results.errors { eprintln!("{}", err); had_errors = true; }
+    had_errors |= print_errors(&lex_errors);
+    had_errors |= print_errors(&module_errors);
+    had_errors |= print_errors(&parse_errors);
+    had_errors |= print_errors(&resolve_errors);
+    had_errors |= print_errors(&check_results.errors);
     if had_errors {
+        note_source_map(&source_map);
         return ExitCode::FAILURE;
     }
 
@@ -195,21 +229,23 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let output_path = output_override
         .unwrap_or_else(|| derive_default_output_path(&input_path));
 
-    let source = match read_program_source(&input_path) {
-        Ok(s) => s,
+    let exp = match load_and_expand(&input_path, true) {
+        Ok(e) => e,
         Err(code) => return code,
     };
-    let (tokens, lex_errors) = Lexer::new(&source).tokenize();
+    let rune::Expansion { tokens, lex_errors, module_errors, source_map } = exp;
     let (module, parse_errors) = Parser::new(tokens).parse_module();
     let (resolutions, resolve_errors) = Resolver::new().resolve_module(&module);
     let check_results = Checker::new(&resolutions).check_module(&module);
 
     let mut had_errors = false;
-    for err in &lex_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &parse_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &resolve_errors { eprintln!("{}", err); had_errors = true; }
-    for err in &check_results.errors { eprintln!("{}", err); had_errors = true; }
+    had_errors |= print_errors(&lex_errors);
+    had_errors |= print_errors(&module_errors);
+    had_errors |= print_errors(&parse_errors);
+    had_errors |= print_errors(&resolve_errors);
+    had_errors |= print_errors(&check_results.errors);
     if had_errors {
+        note_source_map(&source_map);
         return ExitCode::FAILURE;
     }
 

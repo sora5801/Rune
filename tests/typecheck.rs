@@ -2,11 +2,32 @@ use rune::*;
 
 fn run(src: &str) -> (Vec<LexError>, Vec<ParseError>, Vec<ResolveError>, Vec<TypeError>) {
     let src = with_prelude(src);
-    let (tokens, le) = Lexer::new(&src).tokenize();
-    let (module, pe) = Parser::new(tokens).parse_module();
+    let exp = expand_modules(&src, "<test>", &|_| None);
+    let (module, pe) = Parser::new(exp.tokens).parse_module();
     let (res, re) = Resolver::new().resolve_module(&module);
     let cr = Checker::new(&res).check_module(&module);
-    (le, pe, re, cr.errors)
+    (exp.lex_errors, pe, re, cr.errors)
+}
+
+/// Run the front-end on a multi-file program. `files[0]` is the main
+/// source (gets the prelude); the rest are `(module-name, source)`
+/// pairs reachable through `mod name;` declarations.
+fn run_files(
+    files: &[(&str, &str)],
+) -> (Vec<ModuleError>, Vec<ParseError>, Vec<ResolveError>, Vec<TypeError>) {
+    let main_src = with_prelude(files[0].1);
+    let mods: Vec<(String, String)> = files[1..]
+        .iter()
+        .map(|(n, s)| (n.to_string(), s.to_string()))
+        .collect();
+    let loader = |name: &str| {
+        mods.iter().find(|(n, _)| n == name).map(|(_, s)| s.clone())
+    };
+    let exp = expand_modules(&main_src, "<test>", &loader);
+    let (module, pe) = Parser::new(exp.tokens).parse_module();
+    let (res, re) = Resolver::new().resolve_module(&module);
+    let cr = Checker::new(&res).check_module(&module);
+    (exp.module_errors, pe, re, cr.errors)
 }
 
 fn check_ok(src: &str) {
@@ -1053,4 +1074,45 @@ fn generic_vec_typechecks() {
             v.get(0)
         }
     "#);
+}
+
+// ---- file-based modules ----
+
+#[test]
+fn file_module_resolves_ok() {
+    let (me, pe, re, te) = run_files(&[
+        ("main", "mod helper; fn main() -> i64 { helper::n() }"),
+        ("helper", "fn n() -> i64 { 1 }"),
+    ]);
+    assert!(me.is_empty(), "module errors: {:?}", me);
+    assert!(pe.is_empty(), "parse errors: {:?}", pe);
+    assert!(re.is_empty(), "resolve errors: {:?}", re);
+    assert!(te.is_empty(), "type errors: {:?}", te);
+}
+
+#[test]
+fn file_module_missing_file_is_error() {
+    let (me, _pe, _re, _te) =
+        run_files(&[("main", "mod ghost; fn main() -> i64 { 0 }")]);
+    assert!(
+        me.iter()
+            .any(|e| e.message.contains("cannot find module file `ghost.rn`")),
+        "expected a missing-module error, got {:?}",
+        me
+    );
+}
+
+#[test]
+fn file_module_cycle_is_error() {
+    // main -> a -> b -> a : the load stack catches the cycle.
+    let (me, _pe, _re, _te) = run_files(&[
+        ("main", "mod a; fn main() -> i64 { 0 }"),
+        ("a", "mod b;"),
+        ("b", "mod a;"),
+    ]);
+    assert!(
+        me.iter().any(|e| e.message.contains("circular module")),
+        "expected a circular-module error, got {:?}",
+        me
+    );
 }
