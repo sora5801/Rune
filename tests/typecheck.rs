@@ -1082,7 +1082,7 @@ fn generic_vec_typechecks() {
 fn file_module_resolves_ok() {
     let (me, pe, re, te) = run_files(&[
         ("main", "mod helper; fn main() -> i64 { helper::n() }"),
-        ("helper", "fn n() -> i64 { 1 }"),
+        ("helper", "pub fn n() -> i64 { 1 }"),
     ]);
     assert!(me.is_empty(), "module errors: {:?}", me);
     assert!(pe.is_empty(), "parse errors: {:?}", pe);
@@ -1103,16 +1103,79 @@ fn file_module_missing_file_is_error() {
 }
 
 #[test]
-fn file_module_cycle_is_error() {
-    // main -> a -> b -> a : the load stack catches the cycle.
-    let (me, _pe, _re, _te) = run_files(&[
-        ("main", "mod a; fn main() -> i64 { 0 }"),
-        ("a", "mod b;"),
-        ("b", "mod a;"),
+fn file_module_nested_directory() {
+    // `mod b;` inside `a.rn` resolves into the `a/` subdirectory.
+    let (me, pe, re, te) = run_files(&[
+        ("main", "mod a; fn main() -> i64 { a::b::deep() }"),
+        ("a", "pub mod b;"),
+        ("a/b", "pub fn deep() -> i64 { 7 }"),
     ]);
-    assert!(
-        me.iter().any(|e| e.message.contains("circular module")),
-        "expected a circular-module error, got {:?}",
-        me
+    assert!(me.is_empty(), "module errors: {:?}", me);
+    assert!(pe.is_empty(), "parse errors: {:?}", pe);
+    assert!(re.is_empty(), "resolve errors: {:?}", re);
+    assert!(te.is_empty(), "type errors: {:?}", te);
+}
+
+// ---- module visibility + use globs ----
+
+#[test]
+fn private_module_item_rejected() {
+    check_has_error(
+        r#"
+        mod m { fn secret() -> i64 { 9 } }
+        fn main() -> i64 { m::secret() }
+        "#,
+        "private",
+    );
+}
+
+#[test]
+fn pub_module_item_visible() {
+    check_ok(r#"
+        mod m { pub fn ok() -> i64 { 1 } }
+        fn main() -> i64 { m::ok() }
+    "#);
+}
+
+#[test]
+fn private_item_visible_within_module() {
+    // A sibling inside the same module sees a non-pub item.
+    check_ok(r#"
+        mod m {
+            fn helper() -> i64 { 1 }
+            pub fn run() -> i64 { helper() }
+        }
+        fn main() -> i64 { m::run() }
+    "#);
+}
+
+#[test]
+fn use_glob_brings_items_into_scope() {
+    check_ok(r#"
+        mod m { pub fn a() -> i64 { 1 } }
+        use m::*;
+        fn main() -> i64 { a() }
+    "#);
+}
+
+#[test]
+fn use_glob_of_missing_module_errors() {
+    check_has_error("use nope::*; fn main() -> i64 { 0 }", "no such module");
+}
+
+#[test]
+fn use_glob_omits_private_items() {
+    // The glob imports only items visible from here, so a non-pub
+    // item of `m` stays out of scope.
+    check_has_error(
+        r#"
+        mod m {
+            pub fn shown() -> i64 { 1 }
+            fn hidden() -> i64 { 2 }
+        }
+        use m::*;
+        fn main() -> i64 { hidden() }
+        "#,
+        "unresolved name `hidden`",
     );
 }

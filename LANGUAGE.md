@@ -344,15 +344,26 @@ needs careful integration with the existing Pratt parser because
   ever see inline modules. Each loaded file is lexed into a fresh,
   disjoint slice of the global byte-offset space (its spans shifted by
   a base offset) so spans stay unique; a `SourceMap` records which
-  file owns which range. Import cycles are detected and reported.
-  v0.x keeps module files flat: `mod foo;` always loads `foo.rn` from
-  the main file's directory, regardless of nesting depth.
+  file owns which range.
+- **Nested module directories**: `mod foo;` in the main file loads
+  `foo.rn` beside it; a `mod bar;` *inside* a loaded `foo.rn` loads
+  `foo/bar.rn`. Module paths are `/`-joined and resolved by the
+  driver against the filesystem. Because `mod` always descends into a
+  subdirectory, file modules form a tree — import cycles are
+  structurally impossible; a depth cap guards a pathological loader.
 - **Paths**: `a::b::c` walks the module tree. Resolution tries the
   path absolutely (from root) then relative to the current module.
 - **`use a::b::c;`** aliases `c` into the using module's namespace
-  so it can be referenced unqualified.
+  so it can be referenced unqualified. **`use m::*;`** is a glob —
+  it aliases every item of `m` that's visible from here (an explicit
+  `use` or a local item of the same name wins over a glob import).
+- **Visibility**: `pub` is enforced. A non-`pub` item is reachable
+  only from its declaring module and that module's descendants; a
+  `pub` item is reachable anywhere. The check applies to the final
+  symbol of a path (intermediate private modules aren't checked —
+  a v0.x simplification). `use m::*` skips items not visible here.
 - **`EnumName::Variant`** continues to work and composes with
-  module paths (`m::Color::Red`).
+  module paths (`m::Color::Red`); variants inherit the enum's `pub`.
 - Items inside a module reference their siblings unqualified;
   ancestors and root items are visible too (innermost-first
   lookup).
@@ -361,15 +372,11 @@ needs careful integration with the existing Pratt parser because
   clash. Root `main` keeps its bare name (entry point).
 
 **Not yet:**
-- **Visibility enforcement** — `pub` is parsed and stored but not
-  enforced across module boundaries; any item is reachable by its
-  qualified path. Real privacy checking (an item is accessible
-  from its own module and descendants, or anywhere if `pub`) is a
-  follow-up.
-- **`use` globs** (`use m::*`), `use` renaming (`use x as y`).
-- **Nested module directories** — `mod foo;` resolves flat (one
-  directory). Per-file relative paths and `mod.rs`-style directory
-  trees are a follow-up.
+- **Intermediate-module privacy** — a path's privacy check looks
+  only at the final symbol, so `m::f` with `f` `pub` but `m` private
+  is allowed. Per-segment checking is a follow-up.
+- **`use` renaming** (`use x as y`), `pub use` re-exports,
+  `mod.rs`-style directory roots.
 
 ## Builtins
 
@@ -665,3 +672,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | Stdlib prelude | The standard library is a `mod std { ... }` written in Rune itself (`src/std.rn`), embedded into the compiler via `include_str!` as `rune::PRELUDE` and prepended to every program by `rune::with_prelude` before lexing. With traits and the module system already shipped, the prelude is plain Rune compiled by the same pipeline as user code — no special-casing. The compile commands (`check`/`run`/`build`) and both test harnesses (`run_main`, typecheck `run`) operate on the combined source; the debug commands (`tokens`/`ast`) stay on the user file only. v0.x prelude contents: `Option<T>` and `Result<T, E>` enums; generic helpers `unwrap_or` / `is_some` / `is_none` / `ok_or` / `is_ok` / `is_err`; concrete i64 helpers `min` / `max` / `abs` / `clamp`. The generic helpers are zero-cost when unused — the monomorphizer only emits called specializations and drops the generic originals — so a program that touches no `std::` generic pays nothing; the concrete helpers compile into every binary. **Monomorphizer fix shipped alongside**: `subst_expr_kind`'s `Match` arm cloned arm patterns without type-substituting them, so a specialized generic function's `match` arms kept `TypeVar(T)` binding types in `HirPattern::EnumPayload` and codegen rejected them (`type T#NN not supported`). New `subst_pattern` helper substitutes the binding `Ty`s through `subst_ty`. **Still hardcoded**: `print`, the i64-only builtin `Vec`, ARC primitives `weak`/`upgrade_or`. **Not done**: file-based modules for an external (non-embedded) stdlib, a generic `Vec<T>`, the `?` operator. Byte offsets in user-code errors are shifted by the prelude's length — a known rough edge. |
 | 2026-05-20 | Generic `Vec<T>` | The builtin `Vec` becomes generic over its element type. `Ty::Vec` grows into `Ty::Vec(Box<Ty>)`; the checker reads the element type from a `Vec<T>` path (rejecting `str`, floats, and arrays — they don't fit the 8-byte element slot) and types `push`/`get` off it. `vec_new()` is a no-arg builtin so it yields a placeholder `Vec<i64>` that an annotated binding refines; `Ty::compatible` treats any `Vec` as compatible with any `Vec` (the same rule as `Struct`/`Enum` regardless of type args), and `HirLet.ty` is the binding's declared type so codegen drives every Vec operation off that. The runtime descriptor and `vec_new`/`vec_push`/`vec_get`/`vec_len` helpers are unchanged — elements live in 8-byte slots, narrow scalars widened on push / narrowed on get. **Per-element ARC release**: after monomorphization (every type concrete) `collect_vec_arc_elems` gathers the distinct ARC-managed `Vec` element types — transitively, so `Vec<Vec<S>>` records `Vec<S>` and `S` — into `HirModule::vec_arc_elem_tys`; codegen synthesizes a `__rune_release_vec$<elem>` per entry that, when the strong count is about to hit zero, walks the live elements releasing each, then hands off to the runtime `release_vec`. `push` of a borrowed (`Local`) ARC element retains it; `get` of an ARC element retains the returned copy. Exposed as `std::Vec` / `std::vec_new` — the resolver aliases the builtin under `std::` keys, the lowerer emits the `BuiltinFn`'s runtime name so the alias still calls the `vec_new` helper; the bare `Vec` / `vec_new` stay. **Parser**: `expect_generic_close` splits a `>>` (`Shr`) token in place so `Vec<Vec<i64>>` and `Weak<Vec<i64>>` parse. **Not done**: `Vec` is still a compiler builtin, not Rune source (Rune has no raw-memory primitives — pointers, `alloc`, `unsafe`); `str`/float/array element types are rejected; a generic `Vec<T>` instantiated at a rejected type isn't re-validated post-monomorphization; no `vec![...]` literal syntax. 405 tests green (+11 from session 027: 7 codegen, 4 typecheck). |
 | 2026-05-20 | File-based modules | `mod name;` (no body) loads `name.rn` and splices its items in as an inline `mod name { ... }`. Expansion is a token-stream transformation (new `src/modules.rs`) that runs between lexing and parsing: `expand_modules` scans the token stream for `mod IDENT ;`, loads the file via a `loader` callback, lexes it, and rewrites the three tokens to `mod IDENT { <loaded tokens> }`. The parser, resolver, checker, and lowerer are entirely unchanged — they only ever see inline modules. Each loaded file is lexed into a fresh, disjoint slice of the global byte-offset space (token + lex-error spans shifted by a base offset past every prior file) so spans stay globally unique — the resolver and checker key `HashMap`s on `Span`, and two independently-lexed files would otherwise collide at low offsets. A `SourceMap` records each file's `label: start..end` range; the driver prints it as a note when a multi-file program has errors, since error offsets are now global. New `ModuleError` category for a missing file or an import cycle (a load-stack catches `a → b → a`). The driver's `loader` reads `<main-file-dir>/<name>.rn`; the test harnesses use an in-memory `(name, source)` map so multi-file tests need no temp files (`run_main_files`, `run_files`). v0.x: module files are flat — `mod foo;` always resolves to the main file's directory regardless of nesting depth; loaded modules see the prelude's `std::` items through the shared global namespace (the prelude is prepended to the main source only). **Not done**: nested module directories / per-file relative paths, visibility enforcement, `use` globs. 412 tests green (+7 from session 028: 4 codegen, 3 typecheck). |
+| 2026-05-21 | Module system polish | Three module-system features. **Nested directories**: `mod foo;` in the main file loads `foo.rn` beside it, and a `mod bar;` inside a loaded `foo.rn` loads `foo/bar.rn` — `modules.rs`'s expander threads a `/`-terminated directory prefix so module paths are `/`-joined. Because `mod` always descends, file modules form a tree — import cycles are now structurally impossible, so session 029's load-stack cycle check is replaced by a depth cap against a pathological loader. **`use` globs**: `use m::*;` aliases every visible direct item of `m` into the using module. New `UseDecl.glob` flag; `parse_use` parses the path by hand so a trailing `::*` doesn't trip `parse_path`; the resolver enumerates `scopes[0]` keys under the module's qualified prefix and aliases each with `entry().or_insert` so an explicit `use` or local item wins over a glob. **`pub` enforcement**: the resolver records per-symbol `(declaring module path, is_pub)` in an `item_vis` table; `is_visible(sym)` is `is_pub || current_path.starts_with(decl_module)` — a non-`pub` item is reachable only from its declaring module and that module's descendants. Checked in `resolve_path` (the final symbol of every path, plus the `Enum::Variant` fallback) and in `resolve_uses`; the glob filters by it too. Variants inherit the enum's visibility; builtins/locals are absent from the table and always visible. v0.x checks only the path's final symbol — an intermediate private module isn't caught. **Ripple**: every item in `std.rn` is now `pub` (the prelude's `mod std` is referenced cross-module from user code), and session 026's module tests gained `pub` on their cross-module items. 420 tests green (+8 from session 029: 2 codegen, 6 typecheck). |

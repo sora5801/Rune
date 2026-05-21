@@ -50,6 +50,8 @@ pub struct ModDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UseDecl {
     pub path: Path,
+    /// `true` for `use m::*;` — import every item of module `m`.
+    pub glob: bool,
     pub span: Span,
 }
 

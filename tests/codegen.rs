@@ -2633,7 +2633,7 @@ fn struct_chain_of_returns() {
 fn module_qualified_call() {
     let src = r#"
         mod math {
-            fn square(x: i64) -> i64 { x * x }
+            pub fn square(x: i64) -> i64 { x * x }
         }
         fn main() -> i64 {
             math::square(7)
@@ -2646,7 +2646,7 @@ fn module_qualified_call() {
 fn module_use_import() {
     let src = r#"
         mod math {
-            fn cube(x: i64) -> i64 { x * x * x }
+            pub fn cube(x: i64) -> i64 { x * x * x }
         }
         use math::cube;
         fn main() -> i64 {
@@ -2662,7 +2662,7 @@ fn module_intra_module_call() {
     let src = r#"
         mod m {
             fn helper(x: i64) -> i64 { x + 1 }
-            fn run(x: i64) -> i64 { helper(x) * 2 }
+            pub fn run(x: i64) -> i64 { helper(x) * 2 }
         }
         fn main() -> i64 {
             m::run(10)
@@ -2677,9 +2677,9 @@ fn module_nested() {
     let src = r#"
         mod outer {
             mod inner {
-                fn deep(x: i64) -> i64 { x * 100 }
+                pub fn deep(x: i64) -> i64 { x * 100 }
             }
-            fn mid(x: i64) -> i64 { inner::deep(x) + 1 }
+            pub fn mid(x: i64) -> i64 { inner::deep(x) + 1 }
         }
         fn main() -> i64 {
             outer::mid(5)
@@ -2695,10 +2695,10 @@ fn module_same_fn_name_no_collision() {
     // names mean no Cranelift symbol clash.
     let src = r#"
         mod a {
-            fn f(x: i64) -> i64 { x + 1 }
+            pub fn f(x: i64) -> i64 { x + 1 }
         }
         mod b {
-            fn f(x: i64) -> i64 { x + 2 }
+            pub fn f(x: i64) -> i64 { x + 2 }
         }
         fn main() -> i64 {
             a::f(10) * 100 + b::f(10)
@@ -2712,8 +2712,8 @@ fn module_same_fn_name_no_collision() {
 fn module_struct_and_enum() {
     let src = r#"
         mod shapes {
-            struct Point { x: i64, y: i64 }
-            enum Kind { Flat, Tall }
+            pub struct Point { x: i64, y: i64 }
+            pub enum Kind { Flat, Tall }
         }
         fn main() -> i64 {
             let p = shapes::Point { x: 3, y: 4 };
@@ -2953,7 +2953,7 @@ fn file_module_call_across_files() {
         mod helper;
         fn main() -> i64 { helper::triple(7) }
     "#;
-    let helper = "fn triple(x: i64) -> i64 { x * 3 }";
+    let helper = "pub fn triple(x: i64) -> i64 { x * 3 }";
     assert_eq!(run_main_files(&[("main", main), ("helper", helper)]), 21);
 }
 
@@ -2964,7 +2964,7 @@ fn file_module_use_import() {
         use helper::square;
         fn main() -> i64 { square(5) }
     "#;
-    let helper = "fn square(x: i64) -> i64 { x * x }";
+    let helper = "pub fn square(x: i64) -> i64 { x * x }";
     assert_eq!(run_main_files(&[("main", main), ("helper", helper)]), 25);
 }
 
@@ -2977,11 +2977,12 @@ fn file_module_nested() {
     "#;
     let mid = r#"
         mod leaf;
-        fn go() -> i64 { leaf::val() + 1 }
+        pub fn go() -> i64 { leaf::val() + 1 }
     "#;
-    let leaf = "fn val() -> i64 { 100 }";
+    // `mod leaf;` inside `mid.rn` resolves into the `mid/` directory.
+    let leaf = "pub fn val() -> i64 { 100 }";
     assert_eq!(
-        run_main_files(&[("main", main), ("mid", mid), ("leaf", leaf)]),
+        run_main_files(&[("main", main), ("mid", mid), ("mid/leaf", leaf)]),
         101
     );
 }
@@ -2994,6 +2995,37 @@ fn file_module_uses_std() {
         mod m;
         fn main() -> i64 { m::biggest() }
     "#;
-    let m = "fn biggest() -> i64 { std::max(3, 9) }";
+    let m = "pub fn biggest() -> i64 { std::max(3, 9) }";
     assert_eq!(run_main_files(&[("main", main), ("m", m)]), 9);
+}
+
+// ---- use globs ----
+
+#[test]
+fn use_glob_imports_fns() {
+    let src = r#"
+        mod m {
+            pub fn one() -> i64 { 1 }
+            pub fn two() -> i64 { 2 }
+        }
+        use m::*;
+        fn main() -> i64 { one() + two() }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn use_glob_imports_struct() {
+    // A glob brings a struct type into scope, usable unqualified.
+    let src = r#"
+        mod shapes {
+            pub struct Pt { x: i64, y: i64 }
+        }
+        use shapes::*;
+        fn main() -> i64 {
+            let p = Pt { x: 5, y: 9 };
+            p.x + p.y
+        }
+    "#;
+    assert_eq!(run_main(src), 14);
 }

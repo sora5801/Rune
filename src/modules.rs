@@ -15,14 +15,21 @@
 //! records which file owns which range so an error offset can be
 //! traced back to a file.
 //!
-//! v0.x keeps module files flat: `mod foo;` always loads `foo.rn`
-//! from the main file's directory, regardless of nesting depth.
+//! Module files nest by directory: `mod foo;` in the main file loads
+//! `foo.rn` beside it, and `mod bar;` inside a loaded `foo.rn` loads
+//! `foo/bar.rn`. Module paths are `/`-joined strings resolved by the
+//! `loader` callback, which the driver backs with the filesystem.
 
 use crate::lexer::{LexError, Lexer};
 use crate::token::{Span, Token, TokenKind};
 
-/// A `mod name;` whose file is missing, or that forms an import
-/// cycle. A separate error category from lex/parse/resolve/type.
+/// Cap on module nesting depth. File modules form a tree — `mod`
+/// always descends into a subdirectory — so import cycles can't form;
+/// this only guards against a pathological `loader`.
+const MAX_MODULE_DEPTH: usize = 64;
+
+/// A `mod name;` whose file is missing, or that nests past the depth
+/// cap. A separate error category from lex/parse/resolve/type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleError {
     pub message: String,
@@ -109,7 +116,7 @@ pub fn expand_modules(
         module_errors: Vec::new(),
         loading: Vec::new(),
     };
-    let tokens = exp.expand_stream(main_tokens);
+    let tokens = exp.expand_stream(main_tokens, "");
     Expansion {
         tokens,
         lex_errors: exp.lex_errors,
@@ -124,7 +131,8 @@ struct Expander<'a> {
     files: Vec<SourceFile>,
     lex_errors: Vec<LexError>,
     module_errors: Vec<ModuleError>,
-    /// Module names currently on the load stack — for cycle detection.
+    /// Modules currently on the load stack; its length is the active
+    /// nesting depth, capped to guard against a runaway loader.
     loading: Vec<String>,
 }
 
@@ -132,16 +140,20 @@ impl Expander<'_> {
     /// Rewrite a token stream, replacing each `mod name;` with
     /// `mod name { <loaded tokens> }`. Linear scan, so a `mod foo;`
     /// nested inside an inline `mod a { ... }` is expanded too.
-    fn expand_stream(&mut self, tokens: Vec<Token>) -> Vec<Token> {
+    /// `dir_prefix` is the `/`-terminated module-path prefix that the
+    /// declarations in this stream resolve under (`""` for the main
+    /// file, `"foo/"` inside a loaded `foo.rn`).
+    fn expand_stream(&mut self, tokens: Vec<Token>, dir_prefix: &str) -> Vec<Token> {
         let mut out = Vec::with_capacity(tokens.len());
         let mut i = 0;
         while i < tokens.len() {
             if let Some((name, name_span)) = file_mod_at(&tokens, i) {
                 let semi_span = tokens[i + 2].span;
+                let module_path = format!("{}{}", dir_prefix, name);
                 out.push(tokens[i].clone()); // `mod`
                 out.push(tokens[i + 1].clone()); // ident
                 out.push(Token::new(TokenKind::LBrace, semi_span));
-                out.extend(self.load(&name, name_span));
+                out.extend(self.load(&module_path, name_span));
                 out.push(Token::new(TokenKind::RBrace, semi_span));
                 i += 3;
             } else {
@@ -152,22 +164,24 @@ impl Expander<'_> {
         out
     }
 
-    /// Load `name.rn`, lex it into a fresh offset range, recursively
-    /// expand it, and return its body tokens (trailing `Eof` dropped).
-    fn load(&mut self, name: &str, decl_span: Span) -> Vec<Token> {
-        if self.loading.iter().any(|n| n == name) {
+    /// Load the file at `module_path`, lex it into a fresh offset
+    /// range, recursively expand it, and return its body tokens
+    /// (trailing `Eof` dropped). A loaded module's own `mod`
+    /// declarations resolve into a subdirectory named after it.
+    fn load(&mut self, module_path: &str, decl_span: Span) -> Vec<Token> {
+        if self.loading.len() >= MAX_MODULE_DEPTH {
             self.module_errors.push(ModuleError {
                 message: format!(
-                    "circular module dependency — `{}` is already being loaded",
-                    name
+                    "module nesting too deep (over {}) at `{}`",
+                    MAX_MODULE_DEPTH, module_path
                 ),
                 span: decl_span,
             });
             return Vec::new();
         }
-        let Some(source) = (self.loader)(name) else {
+        let Some(source) = (self.loader)(module_path) else {
             self.module_errors.push(ModuleError {
-                message: format!("cannot find module file `{}.rn`", name),
+                message: format!("cannot find module file `{}.rn`", module_path),
                 span: decl_span,
             });
             return Vec::new();
@@ -175,7 +189,7 @@ impl Expander<'_> {
         let base = self.next_base;
         self.next_base += source.len() + 1;
         self.files.push(SourceFile {
-            label: format!("{}.rn", name),
+            label: format!("{}.rn", module_path),
             start: base,
             end: base + source.len(),
         });
@@ -191,8 +205,9 @@ impl Expander<'_> {
         if matches!(tokens.last().map(|t| &t.kind), Some(TokenKind::Eof)) {
             tokens.pop();
         }
-        self.loading.push(name.to_string());
-        let expanded = self.expand_stream(tokens);
+        self.loading.push(module_path.to_string());
+        let child_prefix = format!("{}/", module_path);
+        let expanded = self.expand_stream(tokens, &child_prefix);
         self.loading.pop();
         expanded
     }

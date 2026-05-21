@@ -152,11 +152,31 @@ pub struct Resolver {
     /// outermost first. Empty means the root module. Item lookups
     /// qualify against this path; functions mangle with it.
     current_path: Vec<String>,
+    /// Per-item visibility: symbol → (declaring module path, is_pub).
+    /// A non-`pub` item is visible only from its own module and
+    /// descendants. Symbols absent here (builtins, locals, type
+    /// params, enum variants resolved off-table) are always visible.
+    item_vis: HashMap<SymbolId, (Vec<String>, bool)>,
     errors: Vec<ResolveError>,
 }
 
 impl Default for Resolver {
     fn default() -> Self { Self::new() }
+}
+
+/// Whether a top-level item is declared `pub`. Impl blocks and `use`
+/// statements carry no visibility of their own.
+fn item_is_pub(item: &Item) -> bool {
+    let vis = match item {
+        Item::Fn(f) => &f.vis,
+        Item::Struct(s) => &s.vis,
+        Item::Enum(e) => &e.vis,
+        Item::Const(c) => &c.vis,
+        Item::Trait(t) => &t.vis,
+        Item::Mod(m) => &m.vis,
+        Item::Impl(_) | Item::Use(_) => return false,
+    };
+    matches!(vis, Visibility::Pub)
 }
 
 impl Resolver {
@@ -176,6 +196,7 @@ impl Resolver {
             trait_methods: HashMap::new(),
             generic_bounds: HashMap::new(),
             current_path: Vec::new(),
+            item_vis: HashMap::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -234,7 +255,18 @@ impl Resolver {
         for item in items {
             match item {
                 Item::Use(u) => {
-                    if let Some(id) = self.lookup_path(&u.path.segments) {
+                    if u.glob {
+                        self.resolve_use_glob(u);
+                    } else if let Some(id) = self.lookup_path(&u.path.segments) {
+                        if !self.is_visible(id) {
+                            let display = u
+                                .path
+                                .segments
+                                .last()
+                                .map(|s| s.name.as_str())
+                                .unwrap_or("item");
+                            self.visibility_error(display, id, u.path.span);
+                        }
                         // Alias the final segment into the current
                         // module's namespace.
                         let alias = u
@@ -270,6 +302,71 @@ impl Resolver {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Resolve `use m::*;` — alias every direct item of module `m`
+    /// into the using module's namespace. Existing entries (local
+    /// items, explicit `use`s) are not overwritten, and items not
+    /// visible from here are skipped.
+    fn resolve_use_glob(&mut self, u: &UseDecl) {
+        let joined = u
+            .path
+            .segments
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        // Find the module's qualified key — absolute, then relative
+        // to each enclosing module prefix.
+        let mut candidates = vec![joined.clone()];
+        for depth in (1..=self.current_path.len()).rev() {
+            candidates.push(format!(
+                "{}::{}",
+                self.current_path[..depth].join("::"),
+                joined
+            ));
+        }
+        let mut module_key: Option<String> = None;
+        for cand in candidates {
+            if let Some(&id) = self.scopes[0].get(&cand) {
+                if matches!(self.symbols[id.0 as usize].kind, SymbolKind::Module) {
+                    module_key = Some(cand);
+                    break;
+                }
+            }
+        }
+        let Some(module_key) = module_key else {
+            self.error(
+                format!("unresolved glob import `{}::*` — no such module", joined),
+                u.path.span,
+            );
+            return;
+        };
+        // Direct children: keys `module_key::<name>` with no `::` left.
+        let prefix = format!("{}::", module_key);
+        let children: Vec<(String, SymbolId)> = self.scopes[0]
+            .iter()
+            .filter_map(|(k, &id)| {
+                let rest = k.strip_prefix(&prefix)?;
+                if rest.contains("::") {
+                    None // a grandchild, not a direct item
+                } else {
+                    Some((rest.to_string(), id))
+                }
+            })
+            .collect();
+        for (name, id) in children {
+            if !self.is_visible(id) {
+                continue;
+            }
+            let key = if self.current_path.is_empty() {
+                name
+            } else {
+                format!("{}::{}", self.current_path.join("::"), name)
+            };
+            // An explicit `use` or a local item of the same name wins.
+            self.scopes[0].entry(key).or_insert(id);
         }
     }
 
@@ -508,6 +605,29 @@ impl Resolver {
         None
     }
 
+    /// Whether `sym` is visible from the current module. A non-`pub`
+    /// item is reachable only from its declaring module and that
+    /// module's descendants. Symbols with no recorded visibility
+    /// (builtins, locals, type params) are always visible.
+    fn is_visible(&self, sym: SymbolId) -> bool {
+        match self.item_vis.get(&sym) {
+            None => true,
+            Some((decl_mod, is_pub)) => {
+                *is_pub || self.current_path.starts_with(decl_mod)
+            }
+        }
+    }
+
+    /// Record a "private item" resolve error against `span`.
+    fn visibility_error(&mut self, display: &str, sym: SymbolId, span: Span) {
+        let where_ = match self.item_vis.get(&sym) {
+            Some((m, _)) if m.is_empty() => "the crate root".to_string(),
+            Some((m, _)) => format!("module `{}`", m.join("::")),
+            None => "another module".to_string(),
+        };
+        self.error(format!("`{}` is private to {}", display, where_), span);
+    }
+
     /// Build the codegen-visible (mangled) name for a function
     /// declared in the current module. Root functions keep their
     /// bare name so `main` stays `main`.
@@ -565,6 +685,10 @@ impl Resolver {
                 SymbolKind::Module,
                 md.name.name.clone(),
             );
+            self.item_vis.insert(
+                id,
+                (self.current_path.clone(), matches!(md.vis, Visibility::Pub)),
+            );
             self.decl_to_sym.insert(md.name.span, id);
             self.current_path.push(md.name.name.clone());
             self.declare_items(&md.items);
@@ -591,6 +715,8 @@ impl Resolver {
             name.name.clone()
         };
         let id = self.intern_item(&name.name, name.span, kind, codegen_name);
+        self.item_vis
+            .insert(id, (self.current_path.clone(), item_is_pub(item)));
         self.decl_to_sym.insert(name.span, id);
 
         // For enums, also register each variant by name (off-scope —
@@ -598,6 +724,8 @@ impl Resolver {
         if let Item::Enum(e) = item {
             let mut variants: HashMap<String, SymbolId> = HashMap::new();
             let mut any_payload = false;
+            // Variants inherit the enum's visibility.
+            let enum_is_pub = matches!(e.vis, Visibility::Pub);
             for (discriminant, v) in e.variants.iter().enumerate() {
                 // Variant symbols sit outside any lexical scope. They get
                 // a fresh entry in `symbols` for span-keyed queries; lookups
@@ -612,6 +740,10 @@ impl Resolver {
                     },
                 });
                 self.decl_to_sym.insert(v.name.span, variant_id);
+                self.item_vis.insert(
+                    variant_id,
+                    (self.current_path.clone(), enum_is_pub),
+                );
                 variants.insert(v.name.name.clone(), variant_id);
                 // Capture payload types per variant for the checker /
                 // lowerer / codegen to look up.
@@ -872,6 +1004,14 @@ impl Resolver {
         // 1. Try the whole path as a single (possibly module-
         //    qualified) item: `f`, `m::f`, `a::b::c`.
         if let Some(id) = self.lookup_path(&p.segments) {
+            if !self.is_visible(id) {
+                let display = p
+                    .segments
+                    .last()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("item");
+                self.visibility_error(display, id, p.span);
+            }
             self.path_to_sym.insert(p.span, id);
             return;
         }
@@ -888,6 +1028,13 @@ impl Resolver {
                 ) {
                     if let Some(map) = self.enum_variants.get(&enum_id) {
                         if let Some(&variant_id) = map.get(variant_name) {
+                            if !self.is_visible(variant_id) {
+                                self.visibility_error(
+                                    variant_name,
+                                    variant_id,
+                                    p.span,
+                                );
+                            }
                             self.path_to_sym.insert(p.span, variant_id);
                             return;
                         }

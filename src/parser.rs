@@ -451,10 +451,29 @@ impl Parser {
 
     fn parse_use(&mut self, start: usize) -> ParseResult<UseDecl> {
         self.expect(&TokenKind::Use, "`use`")?;
-        let path = self.parse_path()?;
+        // Parse the path by hand so a trailing `::*` glob terminator
+        // doesn't trip `parse_path`'s `expect_ident`.
+        let first = self.expect_ident()?;
+        let path_start = first.span.start;
+        let mut segments = vec![first];
+        let mut glob = false;
+        while self.eat(&TokenKind::ColonColon) {
+            if self.eat(&TokenKind::Star) {
+                glob = true;
+                break;
+            }
+            segments.push(self.expect_ident()?);
+        }
+        let path_end = segments.last().unwrap().span.end;
+        let path = Path {
+            segments,
+            generic_args: Vec::new(),
+            span: Span::new(path_start, path_end),
+        };
         let semi = self.expect(&TokenKind::Semi, "`;`")?;
         Ok(UseDecl {
             path,
+            glob,
             span: Span::new(start, semi.span.end),
         })
     }
