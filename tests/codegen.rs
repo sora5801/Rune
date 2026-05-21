@@ -3029,3 +3029,29 @@ fn use_glob_imports_struct() {
     "#;
     assert_eq!(run_main(src), 14);
 }
+
+// ---- use renaming + pub use ----
+
+#[test]
+fn use_as_rename() {
+    let src = r#"
+        mod m { pub fn f() -> i64 { 42 } }
+        use m::f as g;
+        fn main() -> i64 { g() }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn pub_use_reexport() {
+    // `pub use` re-exports m's own private item — reachable as
+    // `m::secret` from outside, which a bare reference would reject.
+    let src = r#"
+        mod m {
+            fn secret() -> i64 { 55 }
+            pub use secret;
+        }
+        fn main() -> i64 { m::secret() }
+    "#;
+    assert_eq!(run_main(src), 55);
+}

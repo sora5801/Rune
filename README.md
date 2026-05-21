@@ -76,9 +76,10 @@ rune: linked with clang -> primes.exe
   are resolved per-specialization by the monomorphizer.
 - **Modules**: inline `mod name { items... }` (nestable) and
   file-based `mod name;` (loads `name.rn`; nested — `mod bar;` inside
-  `foo.rn` loads `foo/bar.rn`). `use a::b::c;` imports and `use m::*;`
-  globs; `a::b::c` path resolution. `pub` is enforced — a non-`pub`
-  item is private to its module and descendants. Functions get
+  `foo.rn` loads `foo/bar.rn`). `use a::b::c;` imports, `use x as y;`
+  renaming, `use m::*;` globs, `pub use` re-exports. `pub` is enforced
+  per path segment — a non-`pub` item (or a private intermediate
+  module) is private to its module and descendants. Functions get
   module-mangled codegen names so same-named functions in different
   modules don't collide.
 - Generic type parameters with optional trait bounds
@@ -93,9 +94,10 @@ rune: linked with clang -> primes.exe
 - Built-in type names pre-populated (`bool`, `char`, `str`, `i8`–`i64`,
   `u8`–`u64`, `isize`/`usize`, `f32`/`f64`).
 - Lexical scoping with same-scope shadowing allowed.
-- Module-qualified namespacing, `use` imports and globs, and `pub`
-  visibility enforcement (a non-`pub` item is reachable only from its
-  module and descendants).
+- Module-qualified namespacing; `use` imports, renaming (`as`),
+  globs, and `pub use` re-exports; per-segment `pub` visibility
+  enforcement (a non-`pub` item is reachable only from its module
+  and descendants).
 
 ### Type checker — done
 
@@ -110,7 +112,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 107 integration tests.
+- 112 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -199,7 +201,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 204 JIT codegen tests + 34 AOT tests.
+- 206 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -239,13 +241,12 @@ a clear error if reached.
 
 ## Roadmap
 
-1. `use x as y` renaming, `pub use` re-exports, per-segment privacy
-2. `dyn Trait` — dynamic dispatch via vtables
-3. Supertraits, associated types, generic impls
-4. `?` operator desugared to Result matching
-5. A `collections` module — `HashMap<K, V>`, an iterator protocol —
+1. `dyn Trait` — dynamic dispatch via vtables
+2. Supertraits, associated types, generic impls
+3. `?` operator desugared to Result matching
+4. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
-6. Self-hosted bootstrap (long-term)
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

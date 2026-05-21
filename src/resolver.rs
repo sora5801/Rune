@@ -157,6 +157,10 @@ pub struct Resolver {
     /// descendants. Symbols absent here (builtins, locals, type
     /// params, enum variants resolved off-table) are always visible.
     item_vis: HashMap<SymbolId, (Vec<String>, bool)>,
+    /// Global-namespace keys created by a `pub use` — these alias
+    /// keys are publicly visible re-exports, so a path resolving to
+    /// one (or through one) skips the privacy check.
+    pub_reexport_keys: std::collections::HashSet<String>,
     errors: Vec<ResolveError>,
 }
 
@@ -197,6 +201,7 @@ impl Resolver {
             generic_bounds: HashMap::new(),
             current_path: Vec::new(),
             item_vis: HashMap::new(),
+            pub_reexport_keys: std::collections::HashSet::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -257,30 +262,35 @@ impl Resolver {
                 Item::Use(u) => {
                     if u.glob {
                         self.resolve_use_glob(u);
-                    } else if let Some(id) = self.lookup_path(&u.path.segments) {
-                        if !self.is_visible(id) {
-                            let display = u
-                                .path
-                                .segments
-                                .last()
-                                .map(|s| s.name.as_str())
-                                .unwrap_or("item");
-                            self.visibility_error(display, id, u.path.span);
-                        }
-                        // Alias the final segment into the current
-                        // module's namespace.
+                    } else if let Some((id, path_key)) =
+                        self.lookup_path(&u.path.segments)
+                    {
+                        // You can only `use` what you can see — the
+                        // whole path, intermediate modules included.
+                        self.check_path_visibility(&path_key, u.path.span);
+                        // `use x as y;` binds under `y`; a plain `use`
+                        // binds under the path's final segment.
                         let alias = u
-                            .path
-                            .segments
-                            .last()
-                            .map(|s| s.name.clone())
-                            .unwrap_or_default();
-                        let key = if self.current_path.is_empty() {
+                            .alias
+                            .as_ref()
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| {
+                                u.path
+                                    .segments
+                                    .last()
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_default()
+                            });
+                        let alias_key = if self.current_path.is_empty() {
                             alias
                         } else {
                             format!("{}::{}", self.current_path.join("::"), alias)
                         };
-                        self.scopes[0].insert(key, id);
+                        // `pub use` — the alias is a public re-export.
+                        if matches!(u.vis, Visibility::Pub) {
+                            self.pub_reexport_keys.insert(alias_key.clone());
+                        }
+                        self.scopes[0].insert(alias_key, id);
                         self.path_to_sym.insert(u.path.span, id);
                     } else {
                         let shown: Vec<&str> = u
@@ -365,6 +375,10 @@ impl Resolver {
             } else {
                 format!("{}::{}", self.current_path.join("::"), name)
             };
+            // `pub use m::*;` re-exports each imported item publicly.
+            if matches!(u.vis, Visibility::Pub) {
+                self.pub_reexport_keys.insert(key.clone());
+            }
             // An explicit `use` or a local item of the same name wins.
             self.scopes[0].entry(key).or_insert(id);
         }
@@ -578,18 +592,24 @@ impl Resolver {
         None
     }
 
-    /// Resolve a multi-segment path (`a::b::c`) to a symbol. Tries the
-    /// path absolutely (from root) and relative to the current module.
-    fn lookup_path(&self, segments: &[Ident]) -> Option<SymbolId> {
+    /// Resolve a multi-segment path (`a::b::c`) to a symbol *and the
+    /// global-namespace key it matched*. Tries the path absolutely
+    /// (from root) and relative to the current module. The key lets
+    /// callers walk the path's module prefixes for privacy checks.
+    fn lookup_path(&self, segments: &[Ident]) -> Option<(SymbolId, String)> {
         if segments.len() == 1 {
-            return self.lookup(&segments[0].name);
+            // A bare name's key isn't a qualified path; callers only
+            // use the key for multi-segment prefix walks.
+            return self
+                .lookup(&segments[0].name)
+                .map(|id| (id, segments[0].name.clone()));
         }
         let joined: Vec<&str> =
             segments.iter().map(|s| s.name.as_str()).collect();
         let tail = joined.join("::");
         // Absolute.
         if let Some(&id) = self.scopes[0].get(&tail) {
-            return Some(id);
+            return Some((id, tail));
         }
         // Relative to each enclosing module path prefix.
         for depth in (0..=self.current_path.len()).rev() {
@@ -599,7 +619,7 @@ impl Resolver {
             let key =
                 format!("{}::{}", self.current_path[..depth].join("::"), tail);
             if let Some(&id) = self.scopes[0].get(&key) {
-                return Some(id);
+                return Some((id, key));
             }
         }
         None
@@ -614,6 +634,29 @@ impl Resolver {
             None => true,
             Some((decl_mod, is_pub)) => {
                 *is_pub || self.current_path.starts_with(decl_mod)
+            }
+        }
+    }
+
+    /// Check that every module prefix of a resolved path key — and
+    /// the item itself — is visible from the current module. A `pub
+    /// use` re-export key short-circuits the check (the path, or a
+    /// prefix of it, is a public re-export).
+    fn check_path_visibility(&mut self, resolved_key: &str, span: Span) {
+        if self.pub_reexport_keys.contains(resolved_key) {
+            return;
+        }
+        let parts: Vec<&str> = resolved_key.split("::").collect();
+        for len in 1..=parts.len() {
+            let prefix = parts[..len].join("::");
+            if self.pub_reexport_keys.contains(&prefix) {
+                continue;
+            }
+            if let Some(&pid) = self.scopes[0].get(&prefix) {
+                if !self.is_visible(pid) {
+                    self.visibility_error(parts[len - 1], pid, span);
+                    return;
+                }
             }
         }
     }
@@ -1003,15 +1046,8 @@ impl Resolver {
         }
         // 1. Try the whole path as a single (possibly module-
         //    qualified) item: `f`, `m::f`, `a::b::c`.
-        if let Some(id) = self.lookup_path(&p.segments) {
-            if !self.is_visible(id) {
-                let display = p
-                    .segments
-                    .last()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("item");
-                self.visibility_error(display, id, p.span);
-            }
+        if let Some((id, key)) = self.lookup_path(&p.segments) {
+            self.check_path_visibility(&key, p.span);
             self.path_to_sym.insert(p.span, id);
             return;
         }
@@ -1021,13 +1057,14 @@ impl Resolver {
             let n = p.segments.len();
             let type_segs = &p.segments[..n - 1];
             let variant_name = &p.segments[n - 1].name;
-            if let Some(enum_id) = self.lookup_path(type_segs) {
+            if let Some((enum_id, type_key)) = self.lookup_path(type_segs) {
                 if matches!(
                     self.symbols[enum_id.0 as usize].kind,
                     SymbolKind::Enum
                 ) {
                     if let Some(map) = self.enum_variants.get(&enum_id) {
                         if let Some(&variant_id) = map.get(variant_name) {
+                            self.check_path_visibility(&type_key, p.span);
                             if !self.is_visible(variant_id) {
                                 self.visibility_error(
                                     variant_name,

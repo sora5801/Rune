@@ -204,7 +204,7 @@ impl Parser {
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl(start)?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait(vis, start)?)),
             TokenKind::Mod => Ok(Item::Mod(self.parse_mod(vis, start)?)),
-            TokenKind::Use => Ok(Item::Use(self.parse_use(start)?)),
+            TokenKind::Use => Ok(Item::Use(self.parse_use(vis, start)?)),
             _ => {
                 let span = self.peek_span();
                 Err(ParseError {
@@ -449,7 +449,7 @@ impl Parser {
         })
     }
 
-    fn parse_use(&mut self, start: usize) -> ParseResult<UseDecl> {
+    fn parse_use(&mut self, vis: Visibility, start: usize) -> ParseResult<UseDecl> {
         self.expect(&TokenKind::Use, "`use`")?;
         // Parse the path by hand so a trailing `::*` glob terminator
         // doesn't trip `parse_path`'s `expect_ident`.
@@ -470,10 +470,18 @@ impl Parser {
             generic_args: Vec::new(),
             span: Span::new(path_start, path_end),
         };
+        // `use x as y;` — a glob can't be renamed.
+        let alias = if !glob && self.eat(&TokenKind::As) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
         let semi = self.expect(&TokenKind::Semi, "`;`")?;
         Ok(UseDecl {
             path,
             glob,
+            alias,
+            vis,
             span: Span::new(start, semi.span.end),
         })
     }

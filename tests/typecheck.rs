@@ -1179,3 +1179,68 @@ fn use_glob_omits_private_items() {
         "unresolved name `hidden`",
     );
 }
+
+// ---- use renaming, pub use, per-segment privacy ----
+
+#[test]
+fn use_as_binds_new_name() {
+    check_ok(r#"
+        mod m { pub fn f() -> i64 { 1 } }
+        use m::f as g;
+        fn main() -> i64 { g() }
+    "#);
+}
+
+#[test]
+fn use_as_of_missing_item_errors() {
+    check_has_error(
+        r#"
+        mod m {}
+        use m::nope as x;
+        fn main() -> i64 { 0 }
+        "#,
+        "unresolved import",
+    );
+}
+
+#[test]
+fn per_segment_private_module_rejected() {
+    // `b` is a private module — a path through it is rejected even
+    // though the final item `deep` is `pub`.
+    check_has_error(
+        r#"
+        mod a {
+            mod b {
+                pub fn deep() -> i64 { 7 }
+            }
+        }
+        fn main() -> i64 { a::b::deep() }
+        "#,
+        "private",
+    );
+}
+
+#[test]
+fn per_segment_pub_module_allowed() {
+    check_ok(r#"
+        mod a {
+            pub mod b {
+                pub fn deep() -> i64 { 7 }
+            }
+        }
+        fn main() -> i64 { a::b::deep() }
+    "#);
+}
+
+#[test]
+fn pub_use_reexports_private_item() {
+    // `pub use` of m's own private item makes it reachable as
+    // `m::secret` from outside the module.
+    check_ok(r#"
+        mod m {
+            fn secret() -> i64 { 1 }
+            pub use secret;
+        }
+        fn main() -> i64 { m::secret() }
+    "#);
+}

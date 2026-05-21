@@ -52,6 +52,10 @@ pub struct UseDecl {
     pub path: Path,
     /// `true` for `use m::*;` — import every item of module `m`.
     pub glob: bool,
+    /// `Some(y)` for `use x as y;` — bind the import under `y`.
+    pub alias: Option<Ident>,
+    /// `Pub` for `pub use ...;` — a re-export, visible from outside.
+    pub vis: Visibility,
     pub span: Span,
 }
 
