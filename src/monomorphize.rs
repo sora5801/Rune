@@ -352,6 +352,7 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
             *s,
             args.iter().map(|t| subst_ty(t, subst)).collect(),
         ),
+        Ty::Weak(inner) => Ty::Weak(Box::new(subst_ty(inner, subst))),
         _ => ty.clone(),
     }
 }

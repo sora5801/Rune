@@ -174,6 +174,21 @@ impl<'r> Checker<'r> {
                 let type_args: Vec<Ty> =
                     p.generic_args.iter().map(|t| self.resolve_type(t)).collect();
                 let ty = match kind {
+                    // `Weak<T>` is a builtin parametric type. The
+                    // sentinel from the resolver is just a marker;
+                    // we read the path's generic args to build the
+                    // real Ty::Weak(inner).
+                    SymbolKind::BuiltinType(Ty::Weak(_)) => {
+                        if type_args.len() != 1 {
+                            self.error(
+                                p.span,
+                                "`Weak` requires exactly one type argument".to_string(),
+                            );
+                            Ty::Error
+                        } else {
+                            Ty::Weak(Box::new(type_args[0].clone()))
+                        }
+                    }
                     SymbolKind::BuiltinType(t) => t,
                     SymbolKind::Struct => Ty::Struct(sym_id, type_args.clone()),
                     SymbolKind::Enum => Ty::Enum(sym_id, type_args.clone()),
@@ -1746,6 +1761,68 @@ impl<'r> Checker<'r> {
                 }
                 Ty::Unit
             }
+            "weak" => {
+                // weak(v: T) -> Weak<T>. v0.x: only T = Vec works.
+                if arg_tys.len() != 1 {
+                    self.error(
+                        span,
+                        format!("`weak` expects 1 argument, found {}", arg_tys.len()),
+                    );
+                    return Ty::Error;
+                }
+                let t = arg_tys.into_iter().next().unwrap();
+                if !matches!(t, Ty::Vec | Ty::Error) {
+                    self.error(
+                        args[0].span(),
+                        format!(
+                            "`weak` only supports `Vec` in v0.x — got `{}`",
+                            t.display()
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                Ty::Weak(Box::new(t))
+            }
+            "upgrade_or" => {
+                // upgrade_or(w: Weak<T>, default: T) -> T. v0.x: T = Vec.
+                if arg_tys.len() != 2 {
+                    self.error(
+                        span,
+                        format!(
+                            "`upgrade_or` expects 2 arguments, found {}",
+                            arg_tys.len()
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                let weak_ty = &arg_tys[0];
+                let default_ty = &arg_tys[1];
+                let inner = match weak_ty {
+                    Ty::Weak(t) => (**t).clone(),
+                    Ty::Error => return Ty::Error,
+                    _ => {
+                        self.error(
+                            args[0].span(),
+                            format!(
+                                "`upgrade_or` first arg must be `Weak<T>`, got `{}`",
+                                weak_ty.display()
+                            ),
+                        );
+                        return Ty::Error;
+                    }
+                };
+                if !default_ty.compatible(&inner) {
+                    self.error(
+                        args[1].span(),
+                        format!(
+                            "`upgrade_or` default has type `{}`, expected `{}`",
+                            default_ty.display(),
+                            inner.display()
+                        ),
+                    );
+                }
+                inner
+            }
             _ => {
                 self.error(span, format!("unknown polymorphic builtin `{}`", name));
                 Ty::Error
@@ -2041,6 +2118,7 @@ fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
             *s,
             args.iter().map(|t| apply_subst(t, subst)).collect(),
         ),
+        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst(inner, subst))),
         _ => ty.clone(),
     }
 }

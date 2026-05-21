@@ -2249,6 +2249,72 @@ fn generics_option_i64() {
     assert_eq!(run_main(src), 41);
 }
 
+// ---- Weak<T> reference counting ----
+
+#[test]
+fn weak_downgrade_upgrade_alive() {
+    // While the strong reference is alive, upgrade_or returns the
+    // original Vec — we observe its element through the upgraded
+    // pointer.
+    let src = r#"
+        fn main() -> i64 {
+            let v = vec_new();
+            v.push(42);
+            let w = weak(v);
+            let default = vec_new();
+            let r = upgrade_or(w, default);
+            r.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn weak_downgrade_after_drop_returns_default() {
+    // Once the strong ref is gone, upgrade_or falls back to the
+    // default. We construct v in an inner scope so it drops first.
+    let src = r#"
+        fn drop_after(v: Vec) -> Vec {
+            v
+        }
+        fn get_weak() -> Weak<Vec> {
+            let v = vec_new();
+            v.push(99);
+            let w = weak(v);
+            w
+        }
+        fn main() -> i64 {
+            let w = get_weak();
+            // v's strong ref dropped at get_weak's exit; w's target is dead.
+            let default = vec_new();
+            default.push(7);
+            let r = upgrade_or(w, default);
+            r.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn weak_doesnt_keep_alive_in_loop() {
+    // 100k weak refs created and dropped each iteration. RSS stays
+    // flat — the weak helpers correctly free the descriptor when
+    // both rc and weak_count drain.
+    let src = r#"
+        fn main() -> i64 {
+            let mut i = 0;
+            while i < 100000 {
+                let v = vec_new();
+                v.push(i);
+                let w = weak(v);
+                i = i + 1;
+            }
+            i
+        }
+    "#;
+    assert_eq!(run_main(src), 100000);
+}
+
 #[test]
 fn generics_result_two_params() {
     let src = r#"

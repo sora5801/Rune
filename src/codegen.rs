@@ -84,16 +84,18 @@ extern "C" fn rune_runtime_print_i64(x: i64) {
     println!("{}", x);
 }
 
-/// Vec descriptor: `{ ptr, len, cap, rc }` — 32 bytes.
-/// See `RuneStr` for the `rc` sentinel convention; today only string
-/// literals use a stack descriptor, so Vec descriptors are always
-/// heap-allocated and rc starts at 1.
+/// Vec descriptor: `{ ptr, len, cap, rc, weak_count }` — 40 bytes.
+/// Strong refs collectively count as one weak. When the strong rc
+/// drops to 0 the element array is dealloc'd; the descriptor itself
+/// sticks around until the last `Weak<Vec>` releases (weak_count
+/// reaches 0).
 #[repr(C)]
 struct RuneVec {
     ptr: *mut i64,
     len: i64,
     cap: i64,
     rc: i64,
+    weak_count: i64,
 }
 
 extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
@@ -104,6 +106,7 @@ extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
         (*v).len = 0;
         (*v).cap = 0;
         (*v).rc = 1;
+        (*v).weak_count = 1;
         v
     }
 }
@@ -446,13 +449,116 @@ extern "C" fn rune_runtime_release_vec(v: *mut RuneVec) {
         if new_rc > 0 {
             return;
         }
+        // Strong count hit zero: dealloc the element array. The
+        // descriptor itself stays alive until the last Weak releases
+        // (via release_weak_vec below, called once now to drop the
+        // "all strong refs = 1 weak" share).
         let v_ref = &*v;
         if v_ref.cap > 0 && !v_ref.ptr.is_null() {
             let elems_layout = Layout::array::<i64>(v_ref.cap as usize).unwrap();
             dealloc(v_ref.ptr as *mut u8, elems_layout);
+            // Mark elements as freed so accidental accesses fail
+            // loudly and weak upgrade(after-zero) returns null.
+            (*v).ptr = std::ptr::null_mut();
+            (*v).cap = 0;
+            (*v).len = 0;
+        }
+        rune_runtime_weak_release_vec(v);
+    }
+}
+
+/// Create a Weak<Vec> pointing at the same descriptor. Bumps the
+/// weak count. Returns the same pointer — at runtime a Weak and a
+/// strong reference are the same i64 value; they differ only in
+/// which retain/release helpers are called on them.
+extern "C" fn rune_runtime_weak_downgrade_vec(v: *mut RuneVec) -> *mut RuneVec {
+    unsafe {
+        if v.is_null() {
+            return v;
+        }
+        let wc = (*v).weak_count;
+        if wc == -1 {
+            return v;
+        }
+        (*v).weak_count = wc + 1;
+        v
+    }
+}
+
+/// Retain a Weak<Vec> (used when copying a Weak local). Symmetric
+/// with weak_release. Doesn't touch the strong rc.
+extern "C" fn rune_runtime_weak_retain_vec(v: *mut RuneVec) {
+    unsafe {
+        if v.is_null() {
+            return;
+        }
+        let wc = (*v).weak_count;
+        if wc == -1 {
+            return;
+        }
+        (*v).weak_count = wc + 1;
+    }
+}
+
+/// Release a Weak<Vec>. Drops the weak count; when it reaches 0
+/// (and the strong count has already reached 0), free the descriptor
+/// itself.
+extern "C" fn rune_runtime_weak_release_vec(v: *mut RuneVec) {
+    use std::alloc::{dealloc, Layout};
+    unsafe {
+        if v.is_null() {
+            return;
+        }
+        let wc = (*v).weak_count;
+        if wc == -1 {
+            return;
+        }
+        let new_wc = wc - 1;
+        (*v).weak_count = new_wc;
+        if new_wc > 0 {
+            return;
         }
         let desc_layout = Layout::new::<RuneVec>();
         dealloc(v as *mut u8, desc_layout);
+    }
+}
+
+/// Try to promote a Weak<Vec> back to a strong reference. Returns
+/// the same pointer with strong rc++ if the value is still alive
+/// (rc > 0); returns null otherwise. The caller uses the result to
+/// build an Option<Vec> at the language level.
+extern "C" fn rune_runtime_weak_upgrade_vec(v: *mut RuneVec) -> *mut RuneVec {
+    unsafe {
+        if v.is_null() {
+            return std::ptr::null_mut();
+        }
+        let rc = (*v).rc;
+        if rc <= 0 {
+            return std::ptr::null_mut();
+        }
+        (*v).rc = rc + 1;
+        v
+    }
+}
+
+/// `upgrade_or(w, default) -> Vec`. Always returns a freshly-
+/// retained pointer (+1 to the caller). Args are borrowed under
+/// Rune's calling convention; this helper leaves their refcounts
+/// unchanged from the caller's view.
+extern "C" fn rune_runtime_weak_upgrade_or_vec(
+    w: *mut RuneVec,
+    default_v: *mut RuneVec,
+) -> *mut RuneVec {
+    unsafe {
+        if !w.is_null() && (*w).rc > 0 {
+            (*w).rc += 1;
+            return w;
+        }
+        // Dead — retain and return the default. The caller's
+        // `default` local still owns its original +1; the returned
+        // value gets its own +1 so they're both safely released.
+        rune_runtime_retain_vec(default_v);
+        default_v
     }
 }
 
@@ -919,6 +1025,26 @@ impl Codegen<JITModule> {
         builder.symbol("rune_release_str", rune_runtime_release_str as *const u8);
         builder.symbol("rune_retain_vec", rune_runtime_retain_vec as *const u8);
         builder.symbol("rune_release_vec", rune_runtime_release_vec as *const u8);
+        builder.symbol(
+            "rune_weak_downgrade_vec",
+            rune_runtime_weak_downgrade_vec as *const u8,
+        );
+        builder.symbol(
+            "rune_weak_retain_vec",
+            rune_runtime_weak_retain_vec as *const u8,
+        );
+        builder.symbol(
+            "rune_weak_release_vec",
+            rune_runtime_weak_release_vec as *const u8,
+        );
+        builder.symbol(
+            "rune_weak_upgrade_vec",
+            rune_runtime_weak_upgrade_vec as *const u8,
+        );
+        builder.symbol(
+            "rune_weak_upgrade_or_vec",
+            rune_runtime_weak_upgrade_or_vec as *const u8,
+        );
         builder.symbol("rune_struct_new", rune_runtime_struct_new as *const u8);
         builder.symbol("rune_struct_dealloc", rune_runtime_struct_dealloc as *const u8);
         builder.symbol("rune_enum_new", rune_runtime_enum_new as *const u8);
@@ -2729,6 +2855,7 @@ fn is_arc_type(
         Ty::Vec | Ty::Str => true,
         Ty::Struct(_, _) => true,
         Ty::Enum(sym, _) => enum_has_payload.contains(sym),
+        Ty::Weak(_) => true,
         _ => false,
     }
 }
@@ -2741,6 +2868,10 @@ fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> 
         ("release", Ty::Str) => "release_str",
         ("retain", Ty::Enum(_, _)) => "retain_enum",
         ("release", Ty::Enum(_, _)) => "release_enum",
+        // Weak<T> uses the weak-counted helpers per inner type.
+        // v0.x only supports Weak<Vec>.
+        ("retain", Ty::Weak(inner)) if matches!(**inner, Ty::Vec) => "weak_retain_vec",
+        ("release", Ty::Weak(inner)) if matches!(**inner, Ty::Vec) => "weak_release_vec",
         _ => {
             return Err(CodegenError(format!(
                 "no ARC helper for action `{}` on `{}`",
@@ -2768,6 +2899,10 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Vec => types::I64,
         // Unit-variant enums are stored as their i64 discriminant.
         Ty::Enum(_, _) => types::I64,
+        // Weak<T> is also a pointer to the same control block as
+        // the strong reference. The distinction lives in which
+        // retain/release helpers we call on it.
+        Ty::Weak(_) => types::I64,
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",
@@ -2795,7 +2930,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec | Ty::Enum(_, _) => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec | Ty::Enum(_, _) | Ty::Weak(_) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",
@@ -2917,6 +3052,35 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // *RuneVec
             ("rune_release_vec", sig)
+        }
+        "weak_downgrade_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_weak_downgrade_vec", sig)
+        }
+        "weak_retain_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_weak_retain_vec", sig)
+        }
+        "weak_release_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_weak_release_vec", sig)
+        }
+        "weak_upgrade_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_weak_upgrade_vec", sig)
+        }
+        "weak_upgrade_or_vec" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_weak_upgrade_or_vec", sig)
         }
         "struct_new" => {
             let mut sig = module.make_signature();

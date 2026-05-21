@@ -862,6 +862,10 @@ impl<'a> Lowerer<'a> {
         let dispatched = match (poly_name, arg_ty) {
             ("print", Some(Ty::Int(_))) => "print_i64",
             ("print", Some(Ty::Str)) => "print_str",
+            ("weak", Some(Ty::Vec)) => "weak_downgrade_vec",
+            ("upgrade_or", Some(Ty::Weak(inner))) if matches!(**inner, Ty::Vec) => {
+                "weak_upgrade_or_vec"
+            }
             _ => {
                 return HirExprKind::Unsupported(format!(
                     "no dispatch for polymorphic builtin `{}` with that argument type",
@@ -906,6 +910,7 @@ fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
             *s,
             args.iter().map(|t| apply_subst(t, subst)).collect(),
         ),
+        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst(inner, subst))),
         _ => ty.clone(),
     }
 }

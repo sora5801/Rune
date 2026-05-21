@@ -67,6 +67,12 @@ pub enum Ty {
     /// Opaque to the checker; the codegen path bails when one of these
     /// reaches it (monomorphization is step 2 of the generics roadmap).
     TypeVar(SymbolId),
+    /// `Weak<T>` — a non-owning reference to an ARC-managed value.
+    /// At runtime, the same pointer as the underlying value but
+    /// retain/release use the weak helpers. v0.x: only Weak<Vec> has
+    /// runtime support; other inner types are accepted by the
+    /// checker but error at codegen.
+    Weak(Box<Ty>),
     /// Diverging — `return`, `break`, `continue`.
     Never,
     /// Cascades silently; comparisons against `Error` succeed to avoid
@@ -158,6 +164,7 @@ impl Ty {
                 }
             }
             Ty::TypeVar(id) => format!("T#{}", id.0),
+            Ty::Weak(inner) => format!("Weak<{}>", inner.display()),
             Ty::Never => "!".into(),
             Ty::Error => "?".into(),
         }

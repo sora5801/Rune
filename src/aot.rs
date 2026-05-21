@@ -107,7 +107,8 @@ struct rune_vec {
     int64_t* ptr;
     int64_t  len;
     int64_t  cap;
-    int64_t  rc;     // ARC refcount; always >= 1 for heap (no Vec literals)
+    int64_t  rc;          // strong refcount
+    int64_t  weak_count;  // weak refs + 1 (strong refs share that 1)
 };
 
 struct rune_vec* rune_vec_new(void) {
@@ -116,6 +117,7 @@ struct rune_vec* rune_vec_new(void) {
     v->len = 0;
     v->cap = 0;
     v->rc = 1;
+    v->weak_count = 1;
     return v;
 }
 
@@ -161,12 +163,39 @@ void rune_retain_vec(struct rune_vec* v) {
     v->rc += 1;
 }
 
+void rune_weak_release_vec(struct rune_vec* v) {
+    if (v == NULL || v->weak_count == -1) return;
+    v->weak_count -= 1;
+    if (v->weak_count > 0) return;
+    free(v);
+}
+
 void rune_release_vec(struct rune_vec* v) {
     if (v == NULL || v->rc == -1) return;
     v->rc -= 1;
     if (v->rc > 0) return;
     if (v->ptr != NULL) free(v->ptr);
-    free(v);
+    v->ptr = (int64_t*)0;
+    v->cap = 0;
+    v->len = 0;
+    rune_weak_release_vec(v);
+}
+
+struct rune_vec* rune_weak_downgrade_vec(struct rune_vec* v) {
+    if (v == NULL || v->weak_count == -1) return v;
+    v->weak_count += 1;
+    return v;
+}
+
+void rune_weak_retain_vec(struct rune_vec* v) {
+    if (v == NULL || v->weak_count == -1) return;
+    v->weak_count += 1;
+}
+
+struct rune_vec* rune_weak_upgrade_vec(struct rune_vec* v) {
+    if (v == NULL || v->rc <= 0) return (struct rune_vec*)0;
+    v->rc += 1;
+    return v;
 }
 
 void rune_panic_no_match(void) {

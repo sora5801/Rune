@@ -452,6 +452,106 @@ The plumbing is uniform:
 - No user-side FFI yet — will land alongside an `extern "C"` keyword
   on function items.
 
+## Traits (design pass)
+
+**Status: Open.** Not implemented; sized for a multi-session feature
+of its own.
+
+The motivation: bounded generics. Today `fn print<T>(x: T)` can
+take any T, but the body can do nothing T-specific — there's no way
+to say "T must support `.fmt()`". Traits fix this by attaching a
+constraint:
+
+```rune
+trait Display {
+    fn fmt(self) -> str;
+}
+
+impl Display for Point {
+    fn fmt(self: Point) -> str { "(...)" }
+}
+
+fn show<T: Display>(x: T) -> str { x.fmt() }
+```
+
+Implementation sketch:
+
+1. **Parser**: `trait Name { fn ...; ... }` declares; `impl Trait
+   for Type { ... }` implements; `T: TraitName` (and `T: A + B`) at
+   generic bound sites.
+2. **Resolver**: `SymbolKind::Trait` and `SymbolKind::TraitImpl`. A
+   per-(trait, type) impl table.
+3. **Checker**: bounded generic params type-check the body using
+   the trait's declared method signatures. Calls on a bounded T
+   resolve to the trait method (signature-checked but not yet
+   dispatched).
+4. **Monomorphization**: at each call site, instantiate the generic
+   with a concrete type AND look up the trait impl for that type.
+   The specialized body has method calls rewritten to direct calls
+   into the impl's function.
+5. **Optional**: dynamic dispatch via vtables — `Box<dyn Display>`
+   etc. Not needed for the static case but useful for collections
+   of mixed types.
+
+The static-dispatch (monomorphized) path is the v0.x choice if/when
+this lands. Dynamic dispatch can come later.
+
+Blockers / open questions:
+- Coherence: is `impl<T> Display for Vec<T>` allowed if another
+  crate also impls `Display for Vec<i64>`? Rust's orphan rule
+  handles this; Rune doesn't have crates yet.
+- Trait inheritance / supertraits: `trait Ord: Eq { ... }`.
+- Associated types (`type Item`) and constants: deferred.
+
+## Stdlib (design pass)
+
+**Status: Open.** Hardcoded builtins today; a real stdlib needs
+traits + a module system.
+
+Current "stdlib" surface:
+- Primitive types and methods (`str.len`, `vec.push`, etc.).
+- Builtin `print` for i64 and str.
+- ARC primitives: `weak`, `upgrade_or`.
+
+What a v1 stdlib would look like:
+
+```rune
+// std::collections
+struct Vec<T> { ... }
+impl<T> Vec<T> {
+    fn new() -> Vec<T> { ... }
+    fn push(self, x: T) { ... }
+    fn len(self) -> i64 { ... }
+}
+
+struct HashMap<K: Hash + Eq, V> { ... }
+
+// std::option / std::result
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
+
+// std::io
+fn read_line() -> Result<str, IoError> { ... }
+```
+
+Blockers:
+1. **Traits.** `Vec<T>` is hardcoded to `i64` today because
+   we'd need ARC-aware traits to handle T's lifecycle generically.
+2. **Module system.** `use std::Vec;` requires a parser for paths,
+   a resolver that finds external items, a build system that knows
+   where the stdlib lives. None of this exists.
+3. **`?` operator** for ergonomic `Result` use. Easy syntactic
+   desugar once `Result` is the standard.
+
+Probable rollout order:
+- (a) Traits (probably 2-3 sessions).
+- (b) Convert builtin `Vec` to a user-written `Vec<T>` in the
+  stdlib.
+- (c) Module system (one big session).
+- (d) `?` operator (small once `Result` is generic).
+- (e) Grow stdlib incrementally — `HashMap`, `IO`, iterator
+  adapters, etc.
+
 ## Concurrency
 
 **Status: Open.** Deliberately deferred. Threads / async are a post-v0 concern.
@@ -501,3 +601,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | Generics step 2 — monomorphization | New `src/monomorphize.rs` pass runs between the lowerer and codegen. Each `Call` to a generic function infers concrete types from value arg types (positional unify: each `TypeVar(t)` on the param side binds to the arg's concrete). The pass clones the generic HirFn with type substitution applied to params, return type, and the entire body (`subst_ty` / `subst_block` / `subst_expr` recursive walk). Specialized functions get fresh `SymbolId`s allocated past the resolver's max sym and mangled names like `id$$i64` / `pair$$i64$$str`. The instantiation cache `(SymbolId, Vec<Ty>) → SymbolId` keys further requests. Bodies of specialized functions are walked for nested generic calls — the worklist drains transitively. Call sites in concrete functions are rewritten to point at the specialized sym before codegen. The original generic HirFns are removed from the module (their bodies still mention TypeVar and would fail codegen). `Ty::compatible` was relaxed to treat `TypeVar` as compatible with anything, so the checker accepts generic uses without needing trait constraints. Checker's `check_call` does light TypeVar substitution on the return type so the call's apparent result type is concrete. **Constraints:** functions only — generic structs/enums aren't specialized this session (see the next row for partial support); no turbofish, no traits, no HKT. |
 | 2026-05-20 | Generic struct field types (partial) | Generic structs (`struct Box<T> { value: T }`) parse, resolve, and check end-to-end. Construction (`Box { value: 5 }`) lowers correctly with the field stored at its 8-byte slot. Field access (`b.value`) compiles by treating unresolved `Ty::TypeVar` as `i64` in `compile_field_access` and `compile_field_assign` — works for all i64-shaped types (i64, str pointer, Vec pointer, struct pointer, enum descriptor pointer). **Limitations** (require carrying type args on `Ty::Struct` itself — bigger refactor): `+`/`-`/method calls on a `b.value` whose type is still `TypeVar` fail at the checker stage; passing a generic struct to a generic function can't infer T from `Ty::Struct(box_sym)` alone. Workaround: stick to i64-sized concrete fields or restructure to avoid post-access operations on TypeVar values. |
 | 2026-05-20 | Full generic struct + enum types | `Ty::Struct(SymbolId)` and `Ty::Enum(SymbolId)` grow into `Ty::Struct(SymbolId, Vec<Ty>)` and `Ty::Enum(SymbolId, Vec<Ty>)`. Type args are populated by the resolver from `Path::generic_args` at type position and inferred at construction sites: `Box { value: 5 }` produces `Ty::Struct(box_sym, [i64])`, `Some(5)` produces `Ty::Enum(option_sym, [i64])`. Field-access lowering substitutes the field's `TypeVar` using `build_struct_subst(struct_sym, use_args)`; match-arm payload bindings substitute using the scrutinee's enum args. The monomorphizer's `unify` recurses into `Struct/Enum` args so `unbox<T>(b: Box<T>)` infers T=i64 from `b: Box<i64>`. `Ty::compatible` treats `Struct/Enum` with matching syms as compatible regardless of args (variant-construction sites still emit `Vec::new()` for the placeholder). Resolutions gains `struct_generics` and `enum_generics` maps tracking each item's generic-param symbols. **What this unlocks**: `Option<T>`, `Result<T, E>`, method calls on generic struct fields (`b.value.len()`), arithmetic across generic fields, generic functions taking generic structs/enums. **What's still TODO**: nothing fundamental at this layer; subsequent work moves to `Weak<T>` (now buildable), traits/bounded generics, and stdlib-level types built on these primitives. |
+| 2026-05-20 | `Weak<T>` reference counting | Cycle-breaking weak refs. v0.x supports `Weak<Vec>` only; other inner types parse but error at codegen with a clear message. RuneVec grows `weak_count: i64` (40 bytes total). Initial state on `vec_new`: `rc=1`, `weak_count=1` — the strong refs collectively count as one weak. Four new runtime helpers: `rune_weak_downgrade_vec` (increments weak_count), `rune_weak_retain_vec` / `rune_weak_release_vec` for ARC-on-copy of Weak locals, `rune_weak_upgrade_vec` for the underlying try-promote, and the convenience `rune_weak_upgrade_or_vec(w, default)` that returns either a retained strong ref or a retained default. `rune_release_vec` was updated: when rc hits 0, dealloc the element array AND call `weak_release_vec` to drop the "all strong refs share one weak" slot — the descriptor only goes away when the last `Weak<Vec>` releases. New `Ty::Weak(Box<Ty>)`; new polymorphic builtins `weak(v) -> Weak<T>` and `upgrade_or(w, default) -> T`. `Weak` is a special builtin name the checker recognizes in `resolve_type` — `Weak<i64>` parses as `Ty::Weak(Box::new(Ty::Int(I64)))`. `is_arc_type` and `arc_helper_name` are extended for `Ty::Weak(_)` so scope-exit auto-release goes through the weak helpers, not the strong ones. **Limitation**: `Weak<Str>`, `Weak<Struct>`, `Weak<Enum>` rejected at checker. The control-block split for those types would mirror Vec; not done this session because the v0.x leak-tolerance argument from earlier sessions doesn't apply to weak refs (cycles require Weak, which requires control blocks per-type). |

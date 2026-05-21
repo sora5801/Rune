@@ -171,13 +171,14 @@ rune: linked with clang -> primes.exe
     gets +1. String literals use a `rc=-1` sentinel so the runtime
     helpers no-op on them. **ARC-on-copy** (let y = x retains) and
     **ARC for struct fields** (Vec / str fields participate, retain
-    on construct, release on drop) both work. Non-atomic (single-
-    threaded only); cycle-breaking weak refs are blocked on generics
-    (need `Option<T>`).
+    on construct, release on drop) both work. **`Weak<Vec>`** for
+    cycle breaking — control-block split with separate strong/weak
+    counts; `weak(v)` downgrades, `upgrade_or(w, default)` promotes
+    or falls back. Non-atomic (single-threaded only).
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 172 JIT codegen tests + 34 AOT tests.
+- 175 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -200,10 +201,14 @@ a clear error if reached.
 
 ## Roadmap
 
-1. `Weak<T>` for cycle breaking (now buildable on `Option<T>`)
-2. Traits / interfaces for bounded generics (`T: Display`)
+1. Traits / interfaces for bounded generics (`T: Display`) — design
+   pass in LANGUAGE.md; multi-session implementation ahead
+2. `Weak<Str>` / `Weak<Struct>` / `Weak<Enum>` — extend the
+   control-block split to other ARC types
 3. `?` operator desugared to Result matching
-4. Self-hosted bootstrap (long-term)
+4. Stdlib types (`Vec<T>`, `Option<T>`, `Result<T, E>`) — blocked
+   on traits + module system
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

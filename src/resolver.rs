@@ -234,6 +234,15 @@ impl Resolver {
 
     fn insert_builtins(&mut self) {
         let zero = Span::new(0, 0);
+        // Builtin sentinel for `Weak<T>` — the checker special-cases
+        // this name and reads the path's generic args to build
+        // `Ty::Weak(args[0])`. v0.x: only Weak<Vec> has runtime
+        // support; the checker rejects other inner types.
+        self.intern(
+            "Weak".to_string(),
+            zero,
+            SymbolKind::BuiltinType(Ty::Weak(Box::new(Ty::Error))),
+        );
         let builtins: &[(&str, Ty)] = &[
             ("bool", Ty::Bool),
             ("char", Ty::Char),
@@ -260,6 +269,19 @@ impl Resolver {
             "print".to_string(),
             zero,
             SymbolKind::PolyBuiltinFn("print"),
+        );
+        // Weak<T> primitives. Polymorphic over T; the lowerer
+        // dispatches to the per-type runtime helper. v0.x supports
+        // only Vec as the inner type.
+        self.intern(
+            "weak".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("weak"),
+        );
+        self.intern(
+            "upgrade_or".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("upgrade_or"),
         );
         // Explicit single-type variants stay available for users who want
         // them, and are the targets of `print`'s dispatch.
