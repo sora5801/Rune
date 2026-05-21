@@ -4,6 +4,8 @@
 //! `CheckResults` (for type tags), producing an HIR that's ready for
 //! codegen.
 
+use std::cell::Cell;
+
 use crate::ast;
 use crate::checker::CheckResults;
 use crate::hir::*;
@@ -13,11 +15,26 @@ use crate::ty::{IntTy, SymbolId, Ty};
 pub struct Lowerer<'a> {
     res: &'a Resolutions,
     check: &'a CheckResults,
+    /// Next fresh `SymbolId` for lowering-synthesized bindings (the
+    /// `?` desugar's match-arm bindings). Starts past every resolver
+    /// symbol so it can't collide with one.
+    next_sym: Cell<u32>,
 }
 
 impl<'a> Lowerer<'a> {
     pub fn new(res: &'a Resolutions, check: &'a CheckResults) -> Self {
-        Self { res, check }
+        Self {
+            res,
+            check,
+            next_sym: Cell::new(res.symbols.len() as u32),
+        }
+    }
+
+    /// Allocate a fresh `SymbolId` for a synthesized binding.
+    fn fresh_sym(&self) -> SymbolId {
+        let n = self.next_sym.get();
+        self.next_sym.set(n + 1);
+        SymbolId(n)
     }
 
     pub fn lower_module(&self, m: &ast::Module) -> HirModule {
@@ -436,7 +453,7 @@ impl<'a> Lowerer<'a> {
                     elem_ty,
                 }
             }
-            ast::Expr::Try { .. } => HirExprKind::Unsupported("`?` operator".into()),
+            ast::Expr::Try { expr, .. } => self.lower_try(expr),
             ast::Expr::Cast { expr, .. } => HirExprKind::Cast {
                 expr: Box::new(self.lower_expr(expr)),
             },
@@ -582,6 +599,80 @@ impl<'a> Lowerer<'a> {
             receiver: Box::new(recv_hir),
             offset: field.offset,
             field_ty: apply_subst(&field.ty, &subst),
+        }
+    }
+
+    /// Desugar `expr?` into a match:
+    ///   `match expr { Result::Ok(v) => v,`
+    ///   `             Result::Err(e) => return Result::Err(e) }`
+    /// The checker has already verified `expr` is a `Result` and the
+    /// enclosing function returns a `Result` with a matching error.
+    fn lower_try(&self, inner: &ast::Expr) -> HirExprKind {
+        let scrutinee = self.lower_expr(inner);
+        let (rsym, ok_ty, err_ty) = match &scrutinee.ty {
+            Ty::Enum(s, args) if args.len() == 2 => {
+                (*s, args[0].clone(), args[1].clone())
+            }
+            _ => return HirExprKind::Unsupported("`?` on a non-Result".into()),
+        };
+        // Read the Ok / Err discriminants off the enum rather than
+        // assuming declaration order.
+        let disc = |name: &str| -> Option<u32> {
+            self.res.enum_variants.get(&rsym)?.get(name).and_then(|&vs| {
+                match self.res.symbol(vs).kind {
+                    SymbolKind::EnumVariant { discriminant, .. } => {
+                        Some(discriminant)
+                    }
+                    _ => None,
+                }
+            })
+        };
+        let (Some(ok_disc), Some(err_disc)) = (disc("Ok"), disc("Err"))
+        else {
+            return HirExprKind::Unsupported(
+                "`?` target is not Result-shaped".into(),
+            );
+        };
+        let ok_bind = self.fresh_sym();
+        let err_bind = self.fresh_sym();
+        // `Ok(v) => v`
+        let ok_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: ok_disc,
+                bindings: vec![(ok_ty.clone(), Some(ok_bind))],
+            }],
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Local(ok_bind),
+                ty: ok_ty.clone(),
+            },
+        };
+        // `Err(e) => return Err(e)`
+        let err_value = HirExpr {
+            kind: HirExprKind::EnumPayloadCtor {
+                enum_sym: rsym,
+                discriminant: err_disc,
+                payloads: vec![HirExpr {
+                    kind: HirExprKind::Local(err_bind),
+                    ty: err_ty.clone(),
+                }],
+            },
+            ty: scrutinee.ty.clone(),
+        };
+        let err_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: err_disc,
+                bindings: vec![(err_ty.clone(), Some(err_bind))],
+            }],
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Return(Some(Box::new(err_value))),
+                ty: Ty::Never,
+            },
+        };
+        HirExprKind::Match {
+            scrutinee: Box::new(scrutinee),
+            arms: vec![ok_arm, err_arm],
         }
     }
 

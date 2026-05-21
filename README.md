@@ -112,7 +112,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 112 integration tests.
+- 116 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -187,6 +187,10 @@ rune: linked with clang -> primes.exe
     Non-exhaustive matches and unreachable arms are compile-time
     errors; a runtime `rune_panic_no_match` backstop stays wired as
     defense in depth.
+  - **`?` operator** — `expr?` propagates errors: the lowerer
+    desugars it to `match expr { Ok(v) => v, Err(e) => return Err(e) }`.
+    The checker requires a `Result`-shaped operand and an enclosing
+    function returning a matching `Result`.
   - **ARC reclamation (step 2 of the reclamation ladder).** Vec and
     concat/sliced str descriptors carry a refcount; codegen tracks
     "owned ARC locals" per scope and emits release calls at scope
@@ -201,7 +205,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 206 JIT codegen tests + 34 AOT tests.
+- 208 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -218,9 +222,9 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** `?` (try), returning/passing arrays across
-function boundaries. Most emit `Unsupported(msg)` at lowering with
-a clear error if reached.
+**Not yet codegen'd:** returning/passing arrays across function
+boundaries. Most emit `Unsupported(msg)` at lowering with a clear
+error if reached.
 
 ### Standard library — done
 
@@ -243,9 +247,9 @@ a clear error if reached.
 
 1. `dyn Trait` — dynamic dispatch via vtables
 2. Supertraits, associated types, generic impls
-3. `?` operator desugared to Result matching
-4. A `collections` module — `HashMap<K, V>`, an iterator protocol —
+3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
+4. `From`-based error conversion for `?`
 5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

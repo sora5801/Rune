@@ -1034,11 +1034,7 @@ impl<'r> Checker<'r> {
                 self.check_field_access(receiver, name, *span)
             }
             Expr::Index { receiver, index, span } => self.check_index(receiver, index, *span),
-            Expr::Try { expr, span } => {
-                self.check_expr(expr);
-                self.error(*span, "the `?` operator is not yet type-checked");
-                Ty::Error
-            }
+            Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Cast { expr, ty, span } => self.check_cast(expr, ty, *span),
             Expr::Array { elems, span } => self.check_array(elems, *span),
             Expr::Block(b) => self.check_block(b),
@@ -2188,6 +2184,70 @@ impl<'r> Checker<'r> {
         // type checks so we don't double-report on broken patterns.
         self.check_match_exhaustiveness(&st, arms, span);
         result_ty.unwrap_or(Ty::Unit)
+    }
+
+    /// `expr?` — `expr` must be a `Result`-shaped enum; the operator
+    /// yields the `Ok` payload type, and the enclosing function must
+    /// return a `Result` with a matching error type so a propagated
+    /// `Err` can be returned as-is.
+    fn check_try(&mut self, inner: &Expr, span: Span) -> Ty {
+        let inner_ty = self.check_expr(inner);
+        if inner_ty.is_error() {
+            return Ty::Error;
+        }
+        let result_shape = match &inner_ty {
+            Ty::Enum(s, args) if args.len() == 2 => {
+                let is_result = self
+                    .res
+                    .enum_variants
+                    .get(s)
+                    .map(|v| v.contains_key("Ok") && v.contains_key("Err"))
+                    .unwrap_or(false);
+                if is_result {
+                    Some((*s, args[0].clone(), args[1].clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some((rsym, ok_ty, err_ty)) = result_shape else {
+            self.error(
+                span,
+                format!(
+                    "the `?` operator requires a `Result`, but the operand \
+                     has type `{}`",
+                    inner_ty.display()
+                ),
+            );
+            return Ty::Error;
+        };
+        match &self.current_return {
+            Ty::Enum(s2, ret_args) if *s2 == rsym && ret_args.len() == 2 => {
+                if !ret_args[1].compatible(&err_ty) {
+                    self.error(
+                        span,
+                        format!(
+                            "`?` propagates an error of type `{}`, but the \
+                             enclosing function's `Result` error type is `{}`",
+                            err_ty.display(),
+                            ret_args[1].display()
+                        ),
+                    );
+                }
+            }
+            other => {
+                self.error(
+                    span,
+                    format!(
+                        "the `?` operator can only be used in a function \
+                         returning a `Result`, but this one returns `{}`",
+                        other.display()
+                    ),
+                );
+            }
+        }
+        ok_ty
     }
 
     fn check_return(&mut self, value: Option<&Expr>, span: Span) -> Ty {

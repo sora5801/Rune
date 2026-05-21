@@ -3055,3 +3055,47 @@ fn pub_use_reexport() {
     "#;
     assert_eq!(run_main(src), 55);
 }
+
+// ---- ? operator ----
+
+#[test]
+fn try_operator_ok_and_err() {
+    // `?` extracts an `Ok` value; on `Err` it returns early.
+    let src = r#"
+        fn parse(ok: bool) -> std::Result<i64, i64> {
+            if ok {
+                return std::Result::Ok(42);
+            }
+            std::Result::Err(7)
+        }
+        fn chain(ok: bool) -> std::Result<i64, i64> {
+            let v = parse(ok)?;
+            std::Result::Ok(v + 1)
+        }
+        fn main() -> i64 {
+            std::ok_or(chain(true), -1) * 1000 + std::ok_or(chain(false), -1)
+        }
+    "#;
+    // chain(true): 42 -> 43.  chain(false): Err(7) propagates -> -1.
+    assert_eq!(run_main(src), 42999);
+}
+
+#[test]
+fn try_chains_multiple() {
+    // Several `?` in one function — each desugars independently.
+    let src = r#"
+        fn ok_val(n: i64) -> std::Result<i64, i64> {
+            std::Result::Ok(n)
+        }
+        fn sum() -> std::Result<i64, i64> {
+            let a = ok_val(10)?;
+            let b = ok_val(20)?;
+            let c = ok_val(12)?;
+            std::Result::Ok(a + b + c)
+        }
+        fn main() -> i64 {
+            std::ok_or(sum(), -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}

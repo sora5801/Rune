@@ -1244,3 +1244,56 @@ fn pub_use_reexports_private_item() {
         fn main() -> i64 { m::secret() }
     "#);
 }
+
+// ---- ? operator ----
+
+#[test]
+fn try_typechecks_ok() {
+    check_ok(r#"
+        fn g() -> std::Result<i64, i64> { std::Result::Ok(1) }
+        fn h() -> std::Result<i64, i64> {
+            let x = g()?;
+            std::Result::Ok(x)
+        }
+    "#);
+}
+
+#[test]
+fn try_on_non_result_errors() {
+    check_has_error(
+        r#"
+        fn h() -> std::Result<i64, i64> {
+            let x = 5?;
+            std::Result::Ok(x)
+        }
+        "#,
+        "requires a `Result`",
+    );
+}
+
+#[test]
+fn try_in_non_result_fn_errors() {
+    check_has_error(
+        r#"
+        fn g() -> std::Result<i64, i64> { std::Result::Ok(1) }
+        fn main() -> i64 { g()? }
+        "#,
+        "returning a `Result`",
+    );
+}
+
+#[test]
+fn try_error_type_mismatch() {
+    // `?` propagates a `bool` error, but the function's error type
+    // is `i64`.
+    check_has_error(
+        r#"
+        fn g() -> std::Result<i64, bool> { std::Result::Ok(1) }
+        fn h() -> std::Result<i64, i64> {
+            let x = g()?;
+            std::Result::Ok(x)
+        }
+        "#,
+        "propagates an error",
+    );
+}

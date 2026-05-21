@@ -1076,11 +1076,32 @@ fn walk_block_collect_syms(b: &HirBlock, max: &mut u32) {
     }
 }
 
+/// Find the highest `SymbolId` reachable from an expression — every
+/// referenced sym and every binding sym, including match-arm pattern
+/// bindings. Must be exhaustive: the monomorphizer allocates fresh
+/// syms past this max, so a missed sym would risk a collision.
 fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
     use HirExprKind::*;
     match &e.kind {
-        Local(s) | Fn(s) | Assign { lhs: s, .. } | AssignOp { lhs: s, .. } => {
-            *max = (*max).max(s.0);
+        Lit(_) | EnumVariant { .. } | Unsupported(_) => {}
+        Local(s) | Fn(s) => *max = (*max).max(s.0),
+        Assign { lhs, rhs } => {
+            *max = (*max).max(lhs.0);
+            walk_expr_collect_syms(rhs, max);
+        }
+        AssignOp { lhs, rhs, .. } => {
+            *max = (*max).max(lhs.0);
+            walk_expr_collect_syms(rhs, max);
+        }
+        EnumPayloadCtor { payloads, .. } => {
+            for p in payloads {
+                walk_expr_collect_syms(p, max);
+            }
+        }
+        Unary { expr, .. } | Cast { expr } => walk_expr_collect_syms(expr, max),
+        Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
+            walk_expr_collect_syms(lhs, max);
+            walk_expr_collect_syms(rhs, max);
         }
         Call { callee, args } => {
             *max = (*max).max(callee.0);
@@ -1093,7 +1114,93 @@ fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
                 walk_expr_collect_syms(a, max);
             }
         }
+        MethodCall { receiver, args, .. } => {
+            walk_expr_collect_syms(receiver, max);
+            for a in args {
+                walk_expr_collect_syms(a, max);
+            }
+        }
+        StructLit { fields, .. } => {
+            for (_, v) in fields {
+                walk_expr_collect_syms(v, max);
+            }
+        }
+        FieldAccess { receiver, .. } => walk_expr_collect_syms(receiver, max),
+        FieldAssign { receiver, rhs, .. } => {
+            walk_expr_collect_syms(receiver, max);
+            walk_expr_collect_syms(rhs, max);
+        }
+        Array { elems, .. } => {
+            for el in elems {
+                walk_expr_collect_syms(el, max);
+            }
+        }
+        Index { array, index, .. } => {
+            walk_expr_collect_syms(array, max);
+            walk_expr_collect_syms(index, max);
+        }
+        StrByteIndex { str_val, index } => {
+            walk_expr_collect_syms(str_val, max);
+            walk_expr_collect_syms(index, max);
+        }
+        StrSlice { str_val, start, end, .. } => {
+            walk_expr_collect_syms(str_val, max);
+            walk_expr_collect_syms(start, max);
+            walk_expr_collect_syms(end, max);
+        }
         Block(b) => walk_block_collect_syms(b, max),
-        _ => {}
+        If { cond, then_b, else_b } => {
+            walk_expr_collect_syms(cond, max);
+            walk_block_collect_syms(then_b, max);
+            if let Some(eb) = else_b {
+                walk_expr_collect_syms(eb, max);
+            }
+        }
+        While { cond, body } => {
+            walk_expr_collect_syms(cond, max);
+            walk_block_collect_syms(body, max);
+        }
+        For { local, iter, body, .. } => {
+            if let Some(s) = local {
+                *max = (*max).max(s.0);
+            }
+            walk_expr_collect_syms(iter, max);
+            walk_block_collect_syms(body, max);
+        }
+        ForRange { local, start, end, body, .. } => {
+            if let Some(s) = local {
+                *max = (*max).max(s.0);
+            }
+            walk_expr_collect_syms(start, max);
+            walk_expr_collect_syms(end, max);
+            walk_block_collect_syms(body, max);
+        }
+        Match { scrutinee, arms } => {
+            walk_expr_collect_syms(scrutinee, max);
+            for arm in arms {
+                for p in &arm.patterns {
+                    match p {
+                        HirPattern::Bind(s) => *max = (*max).max(s.0),
+                        HirPattern::EnumPayload { bindings, .. } => {
+                            for (_, b) in bindings {
+                                if let Some(s) = b {
+                                    *max = (*max).max(s.0);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(g) = &arm.guard {
+                    walk_expr_collect_syms(g, max);
+                }
+                walk_expr_collect_syms(&arm.body, max);
+            }
+        }
+        Return(v) => {
+            if let Some(eb) = v {
+                walk_expr_collect_syms(eb, max);
+            }
+        }
     }
 }

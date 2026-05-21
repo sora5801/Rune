@@ -2749,9 +2749,18 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 self.builder.switch_to_block(guarded_body);
                 self.builder.seal_block(guarded_body);
             }
+            // A diverging arm body (`return`, ...) has type `Never`.
+            // `Return` codegen leaves a fresh unreachable block behind,
+            // so `is_filled()` reads false even though the arm yields
+            // no value and must not jump to the merge block.
+            let body_diverges = matches!(arm.body.ty, Ty::Never);
             let body_val = self.compile_expr(&arm.body)?;
             if !self.is_filled() {
-                if produces_value {
+                if body_diverges {
+                    // Terminate the unreachable trailing block so the
+                    // function verifies; it contributes no merge value.
+                    self.builder.ins().trap(TrapCode::user(2).unwrap());
+                } else if produces_value {
                     let v = body_val.ok_or_else(|| {
                         CodegenError("match arm produced no value".into())
                     })?;

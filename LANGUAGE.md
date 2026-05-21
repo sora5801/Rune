@@ -168,16 +168,20 @@ unbounded work in a single execution.
 
 ## Error handling
 
-**Status: Tentative.** Result + `?`, like Rust.
+**Status: Decided.** `Result` + `?`, like Rust. `std::Result<T, E>`
+is in the prelude (session 027); the `?` operator landed session 032.
 
 ```rune
-enum Result<T, E> { Ok(T), Err(E) }
-
-fn parse(s: str) -> Result<i32, ParseError> { ... }
-
-let n = parse(input)?;
+fn chain(ok: bool) -> std::Result<i64, i64> {
+    let v = parse(ok)?;          // Ok -> unwrap; Err -> return early
+    std::Result::Ok(v + 1)
+}
 ```
 
+- `expr?` requires `expr` to be a `Result`-shaped enum and the
+  enclosing function to return a `Result` with a matching error type.
+  It desugars (in the lowerer) to `match expr { Ok(v) => v, Err(e) =>
+  return Err(e) }`.
 - No exceptions.
 - No panics-as-control-flow.
 - A `panic` exists for unrecoverable bugs only (out-of-bounds, etc.).
@@ -616,7 +620,6 @@ Not everything is in the prelude:
   landed in session 029) rather than `include_str!`-embedding it.
 - A `collections` module — `HashMap`, an iterator trait — built on
   the now-generic `Vec<T>`.
-- `?` operator desugaring for `Result`.
 - More numeric/string helpers; lift the `Vec` element restrictions
   (`Vec<f64>`, `Vec<str>`).
 
@@ -677,3 +680,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | File-based modules | `mod name;` (no body) loads `name.rn` and splices its items in as an inline `mod name { ... }`. Expansion is a token-stream transformation (new `src/modules.rs`) that runs between lexing and parsing: `expand_modules` scans the token stream for `mod IDENT ;`, loads the file via a `loader` callback, lexes it, and rewrites the three tokens to `mod IDENT { <loaded tokens> }`. The parser, resolver, checker, and lowerer are entirely unchanged — they only ever see inline modules. Each loaded file is lexed into a fresh, disjoint slice of the global byte-offset space (token + lex-error spans shifted by a base offset past every prior file) so spans stay globally unique — the resolver and checker key `HashMap`s on `Span`, and two independently-lexed files would otherwise collide at low offsets. A `SourceMap` records each file's `label: start..end` range; the driver prints it as a note when a multi-file program has errors, since error offsets are now global. New `ModuleError` category for a missing file or an import cycle (a load-stack catches `a → b → a`). The driver's `loader` reads `<main-file-dir>/<name>.rn`; the test harnesses use an in-memory `(name, source)` map so multi-file tests need no temp files (`run_main_files`, `run_files`). v0.x: module files are flat — `mod foo;` always resolves to the main file's directory regardless of nesting depth; loaded modules see the prelude's `std::` items through the shared global namespace (the prelude is prepended to the main source only). **Not done**: nested module directories / per-file relative paths, visibility enforcement, `use` globs. 412 tests green (+7 from session 028: 4 codegen, 3 typecheck). |
 | 2026-05-21 | Module system polish | Three module-system features. **Nested directories**: `mod foo;` in the main file loads `foo.rn` beside it, and a `mod bar;` inside a loaded `foo.rn` loads `foo/bar.rn` — `modules.rs`'s expander threads a `/`-terminated directory prefix so module paths are `/`-joined. Because `mod` always descends, file modules form a tree — import cycles are now structurally impossible, so session 029's load-stack cycle check is replaced by a depth cap against a pathological loader. **`use` globs**: `use m::*;` aliases every visible direct item of `m` into the using module. New `UseDecl.glob` flag; `parse_use` parses the path by hand so a trailing `::*` doesn't trip `parse_path`; the resolver enumerates `scopes[0]` keys under the module's qualified prefix and aliases each with `entry().or_insert` so an explicit `use` or local item wins over a glob. **`pub` enforcement**: the resolver records per-symbol `(declaring module path, is_pub)` in an `item_vis` table; `is_visible(sym)` is `is_pub || current_path.starts_with(decl_module)` — a non-`pub` item is reachable only from its declaring module and that module's descendants. Checked in `resolve_path` (the final symbol of every path, plus the `Enum::Variant` fallback) and in `resolve_uses`; the glob filters by it too. Variants inherit the enum's visibility; builtins/locals are absent from the table and always visible. v0.x checks only the path's final symbol — an intermediate private module isn't caught. **Ripple**: every item in `std.rn` is now `pub` (the prelude's `mod std` is referenced cross-module from user code), and session 026's module tests gained `pub` on their cross-module items. 420 tests green (+8 from session 029: 2 codegen, 6 typecheck). |
 | 2026-05-21 | Module refinements: use-as, pub use, per-segment privacy | Three module-system refinements. **`use x as y`**: `UseDecl` gains `alias: Option<Ident>`; `parse_use` parses an optional `as ident` after a non-glob path; `resolve_uses` binds the import under the alias name instead of the path's last segment. **`pub use` re-exports**: `UseDecl` gains `vis: Visibility`; a `pub use` records its alias key in the resolver's `pub_reexport_keys` set, and a path that resolves to (or through) such a key skips the privacy check — so a module can re-export even an otherwise-private item under its own namespace. **Per-segment privacy**: `lookup_path` now returns the matched global-namespace key alongside the symbol; `check_path_visibility` walks every module prefix of that key — `a`, `a::b`, `a::b::c` — checking each with `is_visible`, so a private *intermediate* module is caught, not just a private final item (session 030 checked only the final symbol). The check runs in `resolve_path` (the direct-item branch and the `Enum::Variant` fallback's type path) and in `resolve_uses` (you can only `use` a path you can see); a `pub use` key short-circuits it. 427 tests green (+7 from session 030: 2 codegen, 5 typecheck). |
+| 2026-05-21 | `?` operator | `expr?` for ergonomic `Result` propagation. The parser already produced `ast::Expr::Try`; this session type-checks and lowers it. **Checker** `check_try`: the operand must be a `Result`-shaped enum — `Ty::Enum(s, [T, E])` with `Ok`/`Err` variants — and the enclosing function must return a `Result` with the same enum and a matching error type; `expr?` then has type `T`. **Lowerer** `lower_try` desugars it to `match expr { Ok(v) => v, Err(e) => return Err(e) }` — a `HirExprKind::Match` built directly, with fresh binding symbols allocated past the resolver's max via a `Cell<u32>` counter on the `Lowerer`. The resolver, monomorphizer, and codegen need no `?`-specific code — it's a desugar to existing constructs. Two supporting fixes: (1) the monomorphizer's `walk_expr_collect_syms` was incomplete (missed `Match`/`Return`/most expr kinds), so the synthetic binding syms weren't counted toward the fresh-sym base — rewritten to be exhaustive; (2) `compile_match` rejected a diverging arm — a `return` arm body leaves a fresh unreachable block so `is_filled()` reads false — now an arm whose body type is `Ty::Never` terminates that block with a trap and contributes no merge value (this also fixes any `match` with a `return` in an arm). **Not done**: `?` error-type *conversion* (a `From`-style coercion) — the propagated and declared error types must match exactly. 433 tests green (+6 from session 031: 2 codegen, 4 typecheck). |
