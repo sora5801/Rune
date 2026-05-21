@@ -2419,6 +2419,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             .builder
             .ins()
             .load(cty, MemFlags::new(), recv, offset as i32);
+        // An ARC field read produces a new owner of the value, so it
+        // gets its own +1 — independent of the field's. This makes a
+        // `Field` expression a genuine fresh-+1 producer, matching
+        // the fresh/borrowed (`Local`-vs-not) heuristic that `let`,
+        // call arguments, struct construction, and `return` rely on.
+        if is_arc_type(field_ty, self.struct_arc_fields, self.enum_has_payload) {
+            self.emit_arc_call("retain", field_ty, val)?;
+        }
         Ok(Some(val))
     }
 
@@ -2873,6 +2881,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let offset = self.builder.ins().imul(idx, esize_const);
         let elem_addr = self.builder.ins().iadd(arr_addr, offset);
         let val = self.builder.ins().load(elem_cty, MemFlags::new(), elem_addr, 0);
+        // An ARC element read produces a new owner — retain it, just
+        // as `compile_field_access` does for a struct field.
+        if is_arc_type(elem_ty, self.struct_arc_fields, self.enum_has_payload) {
+            self.emit_arc_call("retain", elem_ty, val)?;
+        }
         Ok(Some(val))
     }
 

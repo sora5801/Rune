@@ -3412,3 +3412,64 @@ fn call_arg_local_not_released() {
     // 10 + 10 + 10 = 30
     assert_eq!(run_main(src), 30);
 }
+
+#[test]
+fn field_read_retains() {
+    // `let got = h.v` reads an ARC struct field. The read retains,
+    // so `got` co-owns the Vec alongside the field and the original
+    // `inner` binding — three owners, three releases, one free.
+    // Without the retain the Vec is freed while `inner` still holds
+    // it: a double free at scope exit.
+    let src = r#"
+        struct Holder { v: Vec<i64> }
+        fn main() -> i64 {
+            let mut inner: Vec<i64> = vec_new();
+            inner.push(7);
+            let h = Holder { v: inner };
+            let got = h.v;
+            got.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn field_read_into_call() {
+    // A field read passed straight to a function. The read retains
+    // and the caller releases the argument after the call (session
+    // 036) — the two net out. Read twice: without the retain the
+    // first call's release would free a Vec the field still holds.
+    let src = r#"
+        struct Holder { v: Vec<i64> }
+        fn vlen(v: Vec<i64>) -> i64 { v.len() }
+        fn main() -> i64 {
+            let mut inner: Vec<i64> = vec_new();
+            inner.push(1);
+            inner.push(2);
+            let h = Holder { v: inner };
+            vlen(h.v) + vlen(h.v)
+        }
+    "#;
+    // 2 + 2 = 4
+    assert_eq!(run_main(src), 4);
+}
+
+#[test]
+fn index_read_retains() {
+    // `arr[1]` reads an ARC element of an array. Reading the same
+    // element into three bindings gives three owners; the read
+    // retains each time, so the three scope-exit releases don't
+    // free the struct out from under each other.
+    let src = r#"
+        struct Cell { n: i64 }
+        fn main() -> i64 {
+            let arr = [Cell { n: 4 }, Cell { n: 5 }, Cell { n: 6 }];
+            let a = arr[1];
+            let b = arr[1];
+            let c = arr[1];
+            a.n + b.n + c.n
+        }
+    "#;
+    // 5 + 5 + 5 = 15
+    assert_eq!(run_main(src), 15);
+}
