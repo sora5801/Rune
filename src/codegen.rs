@@ -1892,13 +1892,25 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             }
             HirExprKind::BuiltinCall { name, args } => self.compile_builtin_call(name, args),
             HirExprKind::MethodCall { receiver, method, args } => {
-                self.compile_method_call(receiver, method, args, &e.ty)
+                let recv_val = self
+                    .compile_expr(receiver)?
+                    .ok_or_else(|| CodegenError("method receiver produced no value".into()))?;
+                let result =
+                    self.compile_method_call(receiver, recv_val, method, args, &e.ty)?;
+                self.release_receiver_temp(receiver, recv_val)?;
+                Ok(result)
             }
             HirExprKind::DynBox { value, struct_sym, trait_sym } => {
                 self.compile_dyn_box(value, *struct_sym, *trait_sym)
             }
             HirExprKind::DynCall { receiver, trait_sym, method, args } => {
-                self.compile_dyn_call(receiver, *trait_sym, method, args, &e.ty)
+                let recv_val = self
+                    .compile_expr(receiver)?
+                    .ok_or_else(|| CodegenError("dyn receiver produced no value".into()))?;
+                let result =
+                    self.compile_dyn_call(recv_val, *trait_sym, method, args, &e.ty)?;
+                self.release_receiver_temp(receiver, recv_val)?;
+                Ok(result)
             }
             HirExprKind::StructLit { sym: _, fields, size } => {
                 self.compile_struct_lit(fields, *size)
@@ -2529,16 +2541,33 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         Ok(Some(self.builder.inst_results(inst)[0]))
     }
 
+    /// Release a method-call receiver that is a fresh ARC temporary —
+    /// anything but a borrowed `Local` read. A method only borrows
+    /// its receiver, so a fresh `expr.method()` receiver (a call
+    /// result, a field or index read, a `dyn` box) is the caller's
+    /// to reclaim once the call returns. The receiver-position mirror
+    /// of owned call arguments (session 036).
+    fn release_receiver_temp(
+        &mut self,
+        receiver: &HirExpr,
+        recv_val: Value,
+    ) -> Result<(), CodegenError> {
+        if is_arc_type(&receiver.ty, self.struct_arc_fields, self.enum_has_payload)
+            && !matches!(receiver.kind, HirExprKind::Local(_))
+        {
+            self.emit_arc_call("release", &receiver.ty, recv_val)?;
+        }
+        Ok(())
+    }
+
     fn compile_method_call(
         &mut self,
         receiver: &HirExpr,
+        recv_val: Value,
         method: &str,
         args: &[HirExpr],
         _ret_ty: &Ty,
     ) -> Result<Option<Value>, CodegenError> {
-        let recv_val = self
-            .compile_expr(receiver)?
-            .ok_or_else(|| CodegenError("method receiver produced no value".into()))?;
         // Compile args eagerly (preserves side effects in source order).
         // Arms that don't use them still get the IR emitted.
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
@@ -2730,15 +2759,13 @@ impl<'a, M: Module> FnCodegen<'a, M> {
     /// pointer and data pointer from the box and `call_indirect`.
     fn compile_dyn_call(
         &mut self,
-        receiver: &HirExpr,
+        recv_val: Value,
         trait_sym: SymbolId,
         method: &str,
         args: &[HirExpr],
         result_ty: &Ty,
     ) -> Result<Option<Value>, CodegenError> {
-        let cell = self
-            .compile_expr(receiver)?
-            .ok_or_else(|| CodegenError("dyn receiver produced no value".into()))?;
+        let cell = recv_val;
         let methods = self
             .trait_methods
             .get(&trait_sym)

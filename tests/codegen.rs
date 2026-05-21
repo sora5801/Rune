@@ -3473,3 +3473,81 @@ fn index_read_retains() {
     // 5 + 5 + 5 = 15
     assert_eq!(run_main(src), 15);
 }
+
+#[test]
+fn receiver_temp_released() {
+    // `triple().len()` — the receiver is a fresh ARC temporary the
+    // method only borrows. The caller reclaims it once the call
+    // returns; 200 iterations, a double free would crash.
+    let src = r#"
+        fn triple() -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(1);
+            v.push(2);
+            v.push(3);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                sum = sum + triple().len();
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * 3 = 600
+    assert_eq!(run_main(src), 600);
+}
+
+#[test]
+fn receiver_temp_dyn_call() {
+    // `shapes.get(i).area()` — `get` hands back a retained `dyn`
+    // box, which is the receiver of the `.area()` dynamic call. That
+    // box temporary is reclaimed once the call returns.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let mut total = 0;
+            let mut n = 0;
+            while n < 100 {
+                let mut shapes: Vec<dyn Shape> = vec_new();
+                shapes.push(Circle { r: 3 });
+                shapes.push(Circle { r: 4 });
+                let mut i = 0;
+                while i < shapes.len() {
+                    total = total + shapes.get(i).area();
+                    i = i + 1;
+                }
+                n = n + 1;
+            }
+            total
+        }
+    "#;
+    // 100 * (3*3 + 4*4) = 100 * 25 = 2500
+    assert_eq!(run_main(src), 2500);
+}
+
+#[test]
+fn receiver_local_not_released() {
+    // A `Local` receiver stays owned by its binding — calling
+    // methods on it must not release it. `v` is used as a receiver
+    // four times and remains valid throughout.
+    let src = r#"
+        fn main() -> i64 {
+            let mut v: Vec<i64> = vec_new();
+            v.push(10);
+            v.push(20);
+            v.len() + v.len() + v.get(0) + v.get(1)
+        }
+    "#;
+    // 2 + 2 + 10 + 20 = 34
+    assert_eq!(run_main(src), 34);
+}
