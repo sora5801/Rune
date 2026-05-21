@@ -50,6 +50,14 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
     })
 }
 
+/// Read a source file and prepend the standard prelude. The compile
+/// commands (check/run/build) use this so `std::` items are in scope.
+/// The debug commands (tokens/ast) use `read_source` directly so they
+/// reflect only the user's file.
+fn read_program_source(path: &str) -> Result<String, ExitCode> {
+    read_source(path).map(|s| rune::with_prelude(&s))
+}
+
 fn cmd_tokens(args: &[String]) -> ExitCode {
     let Some(path) = args.get(1) else {
         eprintln!("usage: rune tokens <file>");
@@ -102,7 +110,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         eprintln!("usage: rune check <file>");
         return ExitCode::from(2);
     };
-    let source = match read_source(path) {
+    let source = match read_program_source(path) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -127,7 +135,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         eprintln!("usage: rune run <file>");
         return ExitCode::from(2);
     };
-    let source = match read_source(path) {
+    let source = match read_program_source(path) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -187,7 +195,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let output_path = output_override
         .unwrap_or_else(|| derive_default_output_path(&input_path));
 
-    let source = match read_source(&input_path) {
+    let source = match read_program_source(&input_path) {
         Ok(s) => s,
         Err(code) => return code,
     };

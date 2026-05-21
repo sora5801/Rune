@@ -6,8 +6,8 @@ targeting native code via Cranelift.
 ## Status
 
 **Pre-alpha — full pipeline lex → parse → check → codegen, both JIT and AOT.**
-Arrays + for loops, host `print(i64)` builtin, and `--release` AOT mode all
-work. No heap allocator yet, no generics.
+Generics (monomorphized), traits, inline modules, ARC heap reclamation, and an
+embedded Rune-written standard library all work. `--release` AOT supported.
 
 ```
 $ rune build examples/hello_world.rn --release && ./hello_world.exe
@@ -103,7 +103,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 91 integration tests.
+- 94 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -189,7 +189,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 184 JIT codegen tests + 34 AOT tests.
+- 191 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -210,6 +210,23 @@ rune: linked with clang -> primes.exe
 function boundaries. Most emit `Unsupported(msg)` at lowering with
 a clear error if reached.
 
+### Standard library — done
+
+- A `mod std { ... }` prelude written in Rune itself (`src/std.rn`),
+  embedded into the compiler with `include_str!` and prepended to
+  every program. `std::` items are always in scope — no install step,
+  no search path; the prelude ships inside the compiler binary.
+- `std::Option<T>` (`Some` / `None`) and `std::Result<T, E>`
+  (`Ok` / `Err`).
+- Generic helpers over them: `unwrap_or`, `is_some`, `is_none`,
+  `ok_or`, `is_ok`, `is_err`.
+- Concrete i64 helpers: `min`, `max`, `abs`, `clamp`.
+- Generic helpers are zero-cost when unused — the monomorphizer drops
+  any specialization the program never calls.
+- The compile commands (`check`/`run`/`build`) prepend the prelude;
+  the debug commands (`tokens`/`ast`) don't, so their output reflects
+  only the user's file.
+
 ## Roadmap
 
 1. File-based modules (`mod name;` loading `name.rn`) +
@@ -217,7 +234,8 @@ a clear error if reached.
 2. `dyn Trait` — dynamic dispatch via vtables
 3. Supertraits, associated types, generic impls
 4. `?` operator desugared to Result matching
-5. Stdlib types (`Vec<T>`, `HashMap<K, V>`, iterator protocol)
+5. Generic `std::Vec<T>` / `HashMap<K, V>` / iterator protocol — the
+   prelude exists; collections still need generic ARC destructors
 6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

@@ -532,54 +532,70 @@ Still open:
 - **Conformance is arity-only** — full param-by-param type checking
   with `Self` substitution is a follow-up.
 
-## Stdlib (design pass)
+## Stdlib
 
-**Status: Open.** Hardcoded builtins today; a real stdlib needs
-traits + a module system.
+**Status: Decided (v0.x prelude).** The standard library is a `mod std
+{ ... }` written in Rune itself, stored at `src/std.rn`, embedded into
+the compiler with `include_str!` (`rune::PRELUDE`), and prepended to
+every program before lexing by `rune::with_prelude`. `std::` items are
+always in scope.
 
-Current "stdlib" surface:
-- Primitive types and methods (`str.len`, `vec.push`, etc.).
-- Builtin `print` for i64 and str.
-- ARC primitives: `weak`, `upgrade_or`.
+The two historical blockers — traits and a module system — both landed
+in earlier sessions, so the prelude is now plain Rune compiled by the
+exact same pipeline as user code. No special-casing.
 
-What a v1 stdlib would look like:
+### The v0.x prelude (`src/std.rn`)
 
 ```rune
-// std::collections
-struct Vec<T> { ... }
-impl<T> Vec<T> {
-    fn new() -> Vec<T> { ... }
-    fn push(self, x: T) { ... }
-    fn len(self) -> i64 { ... }
+mod std {
+    enum Option<T> { Some(T), None }
+    enum Result<T, E> { Ok(T), Err(E) }
+
+    fn unwrap_or<T>(o: Option<T>, default: T) -> T { ... }
+    fn is_some<T>(o: Option<T>) -> bool { ... }
+    fn is_none<T>(o: Option<T>) -> bool { ... }
+    fn ok_or<T, E>(r: Result<T, E>, default: T) -> T { ... }
+    fn is_ok<T, E>(r: Result<T, E>) -> bool { ... }
+    fn is_err<T, E>(r: Result<T, E>) -> bool { ... }
+
+    fn min(a: i64, b: i64) -> i64 { ... }
+    fn max(a: i64, b: i64) -> i64 { ... }
+    fn abs(x: i64) -> i64 { ... }
+    fn clamp(x: i64, lo: i64, hi: i64) -> i64 { ... }
 }
-
-struct HashMap<K: Hash + Eq, V> { ... }
-
-// std::option / std::result
-enum Option<T> { Some(T), None }
-enum Result<T, E> { Ok(T), Err(E) }
-
-// std::io
-fn read_line() -> Result<str, IoError> { ... }
 ```
 
-Blockers:
-1. **Traits.** `Vec<T>` is hardcoded to `i64` today because
-   we'd need ARC-aware traits to handle T's lifecycle generically.
-2. **Module system.** `use std::Vec;` requires a parser for paths,
-   a resolver that finds external items, a build system that knows
-   where the stdlib lives. None of this exists.
-3. **`?` operator** for ergonomic `Result` use. Easy syntactic
-   desugar once `Result` is the standard.
+The generic helpers are **zero-cost when unused**: the monomorphizer
+only emits the specializations a program actually calls and drops the
+generic originals, so a program that touches no `std::` generic pays
+nothing. The four concrete i64 helpers always compile in.
 
-Probable rollout order:
-- (a) Traits (probably 2-3 sessions).
-- (b) Convert builtin `Vec` to a user-written `Vec<T>` in the
-  stdlib.
-- (c) Module system (one big session).
-- (d) `?` operator (small once `Result` is generic).
-- (e) Grow stdlib incrementally — `HashMap`, `IO`, iterator
-  adapters, etc.
+### How it's wired
+
+`with_prelude(user_src)` returns `PRELUDE + "\n" + user_src` — one
+source string occupying a single span space. The compile commands
+(`check`/`run`/`build`) lex the combined string; the debug commands
+(`tokens`/`ast`) lex only the user file so their output reflects it
+faithfully. Byte offsets in errors that point at user code are shifted
+by the prelude's length — a known v0.x rough edge.
+
+### Still hardcoded
+
+Not everything is in the prelude:
+- `print` / `print_i64` / `print_str` — host builtins.
+- `Vec` — still the concrete i64-only builtin type. Promoting it to a
+  user-written generic `Vec<T>` in `mod std` needs ARC-aware generic
+  destructor handling first.
+- ARC primitives `weak` / `upgrade_or`.
+
+### What's next
+
+- A generic `Vec<T>` / `collections` module once generic ARC
+  destructors are sorted.
+- File-based modules, so an external stdlib can ship separately rather
+  than being embedded in the compiler binary.
+- `?` operator desugaring for `Result`.
+- More numeric/string helpers, an iterator trait.
 
 ## Concurrency
 
@@ -633,3 +649,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | `Weak<T>` reference counting | Cycle-breaking weak refs. v0.x supports `Weak<Vec>` only; other inner types parse but error at codegen with a clear message. RuneVec grows `weak_count: i64` (40 bytes total). Initial state on `vec_new`: `rc=1`, `weak_count=1` — the strong refs collectively count as one weak. Four new runtime helpers: `rune_weak_downgrade_vec` (increments weak_count), `rune_weak_retain_vec` / `rune_weak_release_vec` for ARC-on-copy of Weak locals, `rune_weak_upgrade_vec` for the underlying try-promote, and the convenience `rune_weak_upgrade_or_vec(w, default)` that returns either a retained strong ref or a retained default. `rune_release_vec` was updated: when rc hits 0, dealloc the element array AND call `weak_release_vec` to drop the "all strong refs share one weak" slot — the descriptor only goes away when the last `Weak<Vec>` releases. New `Ty::Weak(Box<Ty>)`; new polymorphic builtins `weak(v) -> Weak<T>` and `upgrade_or(w, default) -> T`. `Weak` is a special builtin name the checker recognizes in `resolve_type` — `Weak<i64>` parses as `Ty::Weak(Box::new(Ty::Int(I64)))`. `is_arc_type` and `arc_helper_name` are extended for `Ty::Weak(_)` so scope-exit auto-release goes through the weak helpers, not the strong ones. **Limitation**: `Weak<Str>`, `Weak<Struct>`, `Weak<Enum>` rejected at checker. The control-block split for those types would mirror Vec; not done this session because the v0.x leak-tolerance argument from earlier sessions doesn't apply to weak refs (cycles require Weak, which requires control blocks per-type). |
 | 2026-05-20 | Traits + bounded generics | Static-dispatch traits. New `trait` keyword; `ast::Item::Trait(TraitDecl)` holds method signatures (bodies-less); `ImplBlock` gains `trait_path: Option<Path>` so `impl Trait for Type` parses; `ast::GenericParam { name, bounds }` replaces the bare `Vec<Ident>` of generic params, parsing `<T: A + B>`. Resolver: `SymbolKind::Trait`; `Resolutions::trait_methods` (trait sym → sigs) and `generic_bounds` (param sym → bound trait syms); trait-impl methods register into the existing `impl_methods` table. Checker: `check_trait_impl_conformance` (every trait method has a matching impl, arity-checked); `trait_bound_method_sig` resolves `x.fmt()` where `x: T` and `T: Display` by searching `T`'s bounds. Monomorphizer: trait method calls on a generic receiver survive lowering as `HirExprKind::MethodCall`; after a generic fn is specialized for a concrete type, `resolve_method_calls` rewrites each `MethodCall` on a now-concrete struct/enum receiver into a direct `Call` (via `HirModule::impl_methods`). Codegen sees only `Call` for trait methods. **Static dispatch only** — no vtables, no `dyn Trait`. Open: supertraits, associated types, generic impls (`impl<T> Trait for Box<T>`), full param-type conformance (today arity-only). |
 | 2026-05-20 | Module system (inline) | Inline modules: `mod name { items... }`, nestable. New `mod`/`use` keywords; `ast::Item::Mod(ModDecl)` and `Item::Use(UseDecl)`. The resolver flattens everything into the global namespace under module-qualified keys (`a::b::f`) — no separate per-module map. `current_path: Vec<String>` tracks module nesting through all three resolver passes (declare, declare-impls, resolve-bodies) plus a new pass 1.7 that resolves `use` aliases. `lookup` for a bare name tries each enclosing module prefix longest-first then root; `lookup_path` resolves multi-segment paths absolutely then relative. `resolve_path` first tries the whole path as a qualified item, then falls back to `Enum::Variant` (the leading segments naming the enum, possibly module-qualified). Functions get module-mangled codegen names (`a__b__f`) so same-named functions in different modules do not clash as Cranelift symbols; root `main` keeps its bare name. Impl methods inside a module mangle with the module prefix too. Checker and lowerer recurse into `Item::Mod`. **Not done**: file-based modules (`mod name;` loading a file), visibility enforcement (`pub` is parsed but any item is reachable by qualified path), `use` globs / renaming. |
+| 2026-05-20 | Stdlib prelude | The standard library is a `mod std { ... }` written in Rune itself (`src/std.rn`), embedded into the compiler via `include_str!` as `rune::PRELUDE` and prepended to every program by `rune::with_prelude` before lexing. With traits and the module system already shipped, the prelude is plain Rune compiled by the same pipeline as user code — no special-casing. The compile commands (`check`/`run`/`build`) and both test harnesses (`run_main`, typecheck `run`) operate on the combined source; the debug commands (`tokens`/`ast`) stay on the user file only. v0.x prelude contents: `Option<T>` and `Result<T, E>` enums; generic helpers `unwrap_or` / `is_some` / `is_none` / `ok_or` / `is_ok` / `is_err`; concrete i64 helpers `min` / `max` / `abs` / `clamp`. The generic helpers are zero-cost when unused — the monomorphizer only emits called specializations and drops the generic originals — so a program that touches no `std::` generic pays nothing; the concrete helpers compile into every binary. **Monomorphizer fix shipped alongside**: `subst_expr_kind`'s `Match` arm cloned arm patterns without type-substituting them, so a specialized generic function's `match` arms kept `TypeVar(T)` binding types in `HirPattern::EnumPayload` and codegen rejected them (`type T#NN not supported`). New `subst_pattern` helper substitutes the binding `Ty`s through `subst_ty`. **Still hardcoded**: `print`, the i64-only builtin `Vec`, ARC primitives `weak`/`upgrade_or`. **Not done**: file-based modules for an external (non-embedded) stdlib, a generic `Vec<T>`, the `?` operator. Byte offsets in user-code errors are shifted by the prelude's length — a known rough edge. |

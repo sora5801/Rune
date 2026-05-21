@@ -1,8 +1,10 @@
 use rune::*;
 
 /// Compile `src` and JIT-call its `main() -> i64`, returning the value.
+/// The standard prelude is prepended so `std::` items are in scope.
 fn run_main(src: &str) -> i64 {
-    let (tokens, le) = Lexer::new(src).tokenize();
+    let src = with_prelude(src);
+    let (tokens, le) = Lexer::new(&src).tokenize();
     assert!(le.is_empty(), "lex errors: {:?}", le);
     let (module, pe) = Parser::new(tokens).parse_module();
     assert!(pe.is_empty(), "parse errors: {:?}", pe);
@@ -2706,4 +2708,90 @@ fn module_struct_and_enum() {
     "#;
     // 3 + 4 + 1 = 8
     assert_eq!(run_main(src), 8);
+}
+
+// ---- standard library (prelude) ----
+
+#[test]
+fn stdlib_min_max_abs() {
+    // The concrete i64 helpers compile into every binary.
+    let src = "fn main() -> i64 { std::min(3, 7) + std::max(3, 7) + std::abs(-5) }";
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn stdlib_clamp() {
+    // clamp(above) -> hi, clamp(below) -> lo, clamp(within) -> x.
+    let src = r#"
+        fn main() -> i64 {
+            std::clamp(50, 0, 10) + std::clamp(-3, 0, 10) + std::clamp(5, 0, 10)
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn stdlib_option_unwrap_or() {
+    // Generic std::unwrap_or<T> monomorphized at T = i64. Exercises
+    // the prelude's Option<T> and a match over a payload variant —
+    // the path that needs pattern type substitution after specialization.
+    let src = r#"
+        fn main() -> i64 {
+            let some = std::Option::Some(42);
+            let none: std::Option<i64> = std::Option::None;
+            std::unwrap_or(some, 0) + std::unwrap_or(none, -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
+fn stdlib_option_is_some_is_none() {
+    let src = r#"
+        fn main() -> i64 {
+            let some = std::Option::Some(7);
+            let none: std::Option<i64> = std::Option::None;
+            let a = if std::is_some(some) { 10 } else { 0 };
+            let b = if std::is_none(none) { 1 } else { 0 };
+            a + b
+        }
+    "#;
+    assert_eq!(run_main(src), 11);
+}
+
+#[test]
+fn stdlib_result_ok_or() {
+    let src = r#"
+        fn main() -> i64 {
+            let ok: std::Result<i64, i64> = std::Result::Ok(7);
+            let err: std::Result<i64, i64> = std::Result::Err(99);
+            std::ok_or(ok, 0) + std::ok_or(err, -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn stdlib_result_is_ok_is_err() {
+    let src = r#"
+        fn main() -> i64 {
+            let ok: std::Result<i64, i64> = std::Result::Ok(1);
+            let err: std::Result<i64, i64> = std::Result::Err(2);
+            let a = if std::is_ok(ok) { 100 } else { 0 };
+            let b = if std::is_err(err) { 5 } else { 0 };
+            a + b
+        }
+    "#;
+    assert_eq!(run_main(src), 105);
+}
+
+#[test]
+fn stdlib_use_import_generic() {
+    // `use` brings a generic prelude fn into root scope; the bare
+    // call still monomorphizes.
+    let src = r#"
+        use std::unwrap_or;
+        fn main() -> i64 { unwrap_or(std::Option::Some(5), 0) }
+    "#;
+    assert_eq!(run_main(src), 5);
 }

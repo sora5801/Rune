@@ -1,0 +1,90 @@
+/* Rune standard prelude.
+
+   This module is written in Rune itself and embedded into the
+   compiler (via include_str!). It is prepended to every program
+   before resolution, so `std::` items are always in scope.
+
+   Generic functions here are zero-cost when unused — the
+   monomorphizer only emits the specializations a program actually
+   calls, and drops the generic originals. The handful of concrete
+   helpers (min/max/abs/clamp) compile into every binary. */
+mod std {
+    /* The optional type — `Some(value)` or `None`. */
+    enum Option<T> { Some(T), None }
+
+    /* The result type — `Ok(value)` or `Err(error)`. */
+    enum Result<T, E> { Ok(T), Err(E) }
+
+    /* Return the contained value, or `default` when the Option is
+       None. */
+    fn unwrap_or<T>(o: Option<T>, default: T) -> T {
+        match o {
+            Option::Some(x) => x,
+            Option::None => default,
+        }
+    }
+
+    /* True when the Option holds a value. */
+    fn is_some<T>(o: Option<T>) -> bool {
+        match o {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    /* True when the Option is empty. */
+    fn is_none<T>(o: Option<T>) -> bool {
+        match o {
+            Option::Some(_) => false,
+            Option::None => true,
+        }
+    }
+
+    /* Return the Ok value, or `default` when the Result is Err. */
+    fn ok_or<T, E>(r: Result<T, E>, default: T) -> T {
+        match r {
+            Result::Ok(x) => x,
+            Result::Err(_) => default,
+        }
+    }
+
+    /* True when the Result holds an Ok value. */
+    fn is_ok<T, E>(r: Result<T, E>) -> bool {
+        match r {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    /* True when the Result holds an Err value. */
+    fn is_err<T, E>(r: Result<T, E>) -> bool {
+        match r {
+            Result::Ok(_) => false,
+            Result::Err(_) => true,
+        }
+    }
+
+    /* The smaller of two i64 values. */
+    fn min(a: i64, b: i64) -> i64 {
+        if a < b { a } else { b }
+    }
+
+    /* The larger of two i64 values. */
+    fn max(a: i64, b: i64) -> i64 {
+        if a > b { a } else { b }
+    }
+
+    /* Absolute value of an i64. */
+    fn abs(x: i64) -> i64 {
+        if x < 0 { -x } else { x }
+    }
+
+    /* Clamp `x` into the inclusive range `[lo, hi]`. */
+    fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
+        if x < lo {
+            lo
+        } else {
+            if x > hi { hi } else { x }
+        }
+    }
+}

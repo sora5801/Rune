@@ -1,7 +1,8 @@
 use rune::*;
 
 fn run(src: &str) -> (Vec<LexError>, Vec<ParseError>, Vec<ResolveError>, Vec<TypeError>) {
-    let (tokens, le) = Lexer::new(src).tokenize();
+    let src = with_prelude(src);
+    let (tokens, le) = Lexer::new(&src).tokenize();
     let (module, pe) = Parser::new(tokens).parse_module();
     let (res, re) = Resolver::new().resolve_module(&module);
     let cr = Checker::new(&res).check_module(&module);
@@ -989,4 +990,27 @@ fn range_pattern_in_or_typechecks() {
         }
         "#,
     );
+}
+
+// ---- standard library (prelude) ----
+
+#[test]
+fn stdlib_min_rejects_non_int() {
+    // std::min has a concrete i64 signature; a str arg is rejected.
+    check_has_error(r#"fn main() -> i64 { std::min("a", "b") }"#, "i64");
+}
+
+#[test]
+fn stdlib_item_must_be_qualified() {
+    // Prelude items live under `std::`; a bare reference is unresolved.
+    check_has_error("fn main() -> i64 { min(1, 2) }", "unresolved name `min`");
+}
+
+#[test]
+fn stdlib_option_unwrap_or_typechecks() {
+    check_ok(r#"
+        fn main() -> i64 {
+            std::unwrap_or(std::Option::Some(1), 0)
+        }
+    "#);
 }

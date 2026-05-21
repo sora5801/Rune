@@ -364,6 +364,26 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
     }
 }
 
+/// Substitute type variables inside a pattern. Only `EnumPayload`
+/// carries `Ty`s (the binding types); every other pattern variant is
+/// type-free and clones unchanged. Without this, a specialized
+/// function's match arms keep `TypeVar(T)` binding types and codegen
+/// rejects them.
+fn subst_pattern(p: &HirPattern, subst: &HashMap<SymbolId, Ty>) -> HirPattern {
+    match p {
+        HirPattern::EnumPayload { discriminant, bindings } => {
+            HirPattern::EnumPayload {
+                discriminant: *discriminant,
+                bindings: bindings
+                    .iter()
+                    .map(|(ty, b)| (subst_ty(ty, subst), *b))
+                    .collect(),
+            }
+        }
+        _ => p.clone(),
+    }
+}
+
 fn subst_block(b: &HirBlock, subst: &HashMap<SymbolId, Ty>) -> HirBlock {
     HirBlock {
         stmts: b.stmts.iter().map(|s| subst_stmt(s, subst)).collect(),
@@ -508,7 +528,11 @@ fn subst_expr_kind(k: &HirExprKind, subst: &HashMap<SymbolId, Ty>) -> HirExprKin
             arms: arms
                 .iter()
                 .map(|a| HirMatchArm {
-                    patterns: a.patterns.clone(),
+                    patterns: a
+                        .patterns
+                        .iter()
+                        .map(|p| subst_pattern(p, subst))
+                        .collect(),
                     guard: a.guard.as_ref().map(|g| subst_expr(g, subst)),
                     body: subst_expr(&a.body, subst),
                 })
