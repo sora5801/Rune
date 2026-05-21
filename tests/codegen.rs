@@ -3628,3 +3628,95 @@ fn print_arg_temp_released() {
     // "abcd".len()
     assert_eq!(run_main(src), 4);
 }
+
+#[test]
+fn match_scrutinee_temp_released() {
+    // `match make_bag(..) { .. }` — the scrutinee is a fresh enum
+    // temporary. Once the arm bodies (whose bindings borrow into it)
+    // are done, the match releases it at the merge point. 200
+    // iterations; a double free would crash.
+    let src = r#"
+        enum Bag { Full(Vec<i64>), Empty }
+        fn make_bag(k: i64) -> Bag {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            Bag::Full(v)
+        }
+        fn main() -> i64 {
+            let mut acc = 0;
+            let mut n = 0;
+            while n < 200 {
+                acc = acc + match make_bag(4) {
+                    Bag::Full(x) => x.get(0),
+                    Bag::Empty => 0,
+                };
+                n = n + 1;
+            }
+            acc
+        }
+    "#;
+    // 200 * 4 = 800
+    assert_eq!(run_main(src), 800);
+}
+
+#[test]
+fn match_scrutinee_payload_escapes() {
+    // The payload escapes the match (`Bag::Full(x) => x`) and the
+    // scrutinee is a temporary. The escaped payload is retained, the
+    // scrutinee released — both at the merge — and they net out.
+    let src = r#"
+        enum Bag { Full(Vec<i64>), Empty }
+        fn make_bag(k: i64) -> Bag {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            Bag::Full(v)
+        }
+        fn main() -> i64 {
+            let mut acc = 0;
+            let mut n = 0;
+            while n < 200 {
+                let got: Vec<i64> = match make_bag(6) {
+                    Bag::Full(x) => x,
+                    Bag::Empty => vec_new(),
+                };
+                acc = acc + got.get(0);
+                n = n + 1;
+            }
+            acc
+        }
+    "#;
+    // 200 * 6 = 1200
+    assert_eq!(run_main(src), 1200);
+}
+
+#[test]
+fn match_scrutinee_returning_arm() {
+    // An arm that `return`s diverges before the merge — the
+    // scrutinee temporary is reclaimed on the way out by
+    // `release_all_arc_locals`, not the merge-point release.
+    let src = r#"
+        enum Bag { Full(Vec<i64>), Empty }
+        fn make_bag(k: i64) -> Bag {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            Bag::Full(v)
+        }
+        fn first_or_return(k: i64) -> i64 {
+            match make_bag(k) {
+                Bag::Full(x) => return x.get(0),
+                Bag::Empty => 0,
+            }
+        }
+        fn main() -> i64 {
+            let mut acc = 0;
+            let mut n = 0;
+            while n < 200 {
+                acc = acc + first_or_return(9);
+                n = n + 1;
+            }
+            acc
+        }
+    "#;
+    // 200 * 9 = 1800
+    assert_eq!(run_main(src), 1800);
+}

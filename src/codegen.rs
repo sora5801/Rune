@@ -3068,6 +3068,23 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let scrutinee_val = self
             .compile_expr(scrutinee)?
             .ok_or_else(|| CodegenError("match scrutinee produced no value".into()))?;
+        // A fresh ARC scrutinee temporary is owned by the match: arm
+        // bindings borrow into it, so it must outlive the arm bodies.
+        // Scope-track it so it is released at the merge block, and by
+        // `release_all_arc_locals` if an arm diverges via `return`.
+        let scrut_snapshot = self.arc_locals.len();
+        let scrut_temp = is_arc_type(
+            &scrutinee.ty,
+            self.struct_arc_fields,
+            self.enum_has_payload,
+        ) && !matches!(scrutinee.kind, HirExprKind::Local(_));
+        if scrut_temp {
+            let cty = cranelift_type(&scrutinee.ty)?;
+            let var = self.alloc_var();
+            self.builder.declare_var(var, cty);
+            self.builder.def_var(var, scrutinee_val);
+            self.arc_locals.push((var, scrutinee.ty.clone()));
+        }
 
         let merge_blk = self.builder.create_block();
         let produces_value = !matches!(result_ty, Ty::Unit | Ty::Never);
@@ -3191,11 +3208,19 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         self.builder.switch_to_block(merge_blk);
         self.builder.seal_block(merge_blk);
-        if produces_value {
-            Ok(Some(self.builder.block_params(merge_blk)[0]))
+        let result = if produces_value {
+            Some(self.builder.block_params(merge_blk)[0])
         } else {
-            Ok(None)
+            None
+        };
+        // Release the scrutinee temporary — the arm bindings that
+        // borrowed into it are now dead. A `return`-diverging arm
+        // reclaimed it already via `release_all_arc_locals`.
+        if scrut_temp {
+            self.release_arc_locals_to(scrut_snapshot)?;
+            self.arc_locals.truncate(scrut_snapshot);
         }
+        Ok(result)
     }
 
     fn compile_pattern_check(

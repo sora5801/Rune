@@ -251,8 +251,8 @@ error if reached.
 
 ## Roadmap
 
-1. `dyn` coercion at struct-literal fields and enum-variant
-   payloads; match-scrutinee temporaries
+1. ARC for array elements; `dyn` coercion at struct-literal fields
+   and enum-variant payloads
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
