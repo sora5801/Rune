@@ -3551,3 +3551,80 @@ fn receiver_local_not_released() {
     // 2 + 2 + 10 + 20 = 34
     assert_eq!(run_main(src), 34);
 }
+
+#[test]
+fn enum_payload_escape_retained() {
+    // `match b { Bag::Full(x) => x }` yields an extracted enum
+    // payload — a borrowed binding. The match retains it on the way
+    // out so the result co-owns the Vec with the enum and the
+    // original binding. Without that retain the Vec is freed three
+    // ways at scope exit: a double free.
+    let src = r#"
+        enum Bag { Full(Vec<i64>), Empty }
+        fn unwrap_bag(b: Bag) -> Vec<i64> {
+            match b {
+                Bag::Full(x) => x,
+                Bag::Empty => vec_new(),
+            }
+        }
+        fn main() -> i64 {
+            let mut total = 0;
+            let mut n = 0;
+            while n < 200 {
+                let mut inner: Vec<i64> = vec_new();
+                inner.push(21);
+                let b: Bag = Bag::Full(inner);
+                let got: Vec<i64> = unwrap_bag(b);
+                total = total + got.get(0);
+                n = n + 1;
+            }
+            total
+        }
+    "#;
+    // 200 * 21 = 4200
+    assert_eq!(run_main(src), 4200);
+}
+
+#[test]
+fn discarded_statement_temp_released() {
+    // `make();` discards a fresh ARC value — the caller reclaims it.
+    // 200 iterations; a discarded `Local` (`keep;`) must be left
+    // alone, so `keep` stays valid for the final read.
+    let src = r#"
+        fn make() -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(9);
+            v
+        }
+        fn main() -> i64 {
+            let mut n = 0;
+            while n < 200 {
+                make();
+                n = n + 1;
+            }
+            let mut keep: Vec<i64> = vec_new();
+            keep.push(5);
+            keep;
+            keep.get(0)
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn print_arg_temp_released() {
+    // `print` only borrows its argument, so a fresh string passed to
+    // it (`"ef" + "gh"`) is reclaimed after the call. A `Local`
+    // argument (`s`) is left alone — passed twice and still valid.
+    let src = r#"
+        fn main() -> i64 {
+            let s: str = "ab" + "cd";
+            print(s);
+            print(s);
+            print("ef" + "gh");
+            s.len()
+        }
+    "#;
+    // "abcd".len()
+    assert_eq!(run_main(src), 4);
+}

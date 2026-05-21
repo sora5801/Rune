@@ -1710,7 +1710,21 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             }
             HirStmt::Expr(e, has_semi) => {
                 let v = self.compile_expr(e)?;
-                if *has_semi { Ok(None) } else { Ok(v) }
+                if *has_semi {
+                    // A discarded expression statement whose value is
+                    // a fresh ARC temporary (not a borrowed `Local`)
+                    // owns a +1 nobody will reclaim — release it.
+                    if let Some(val) = v {
+                        if is_arc_type(&e.ty, self.struct_arc_fields, self.enum_has_payload)
+                            && !matches!(e.kind, HirExprKind::Local(_))
+                        {
+                            self.emit_arc_call("release", &e.ty, val)?;
+                        }
+                    }
+                    Ok(None)
+                } else {
+                    Ok(v)
+                }
             }
         }
     }
@@ -2838,7 +2852,22 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
         let inst = self.builder.ins().call(local_func, &arg_vals);
         let results = self.builder.inst_results(inst);
-        if results.is_empty() { Ok(None) } else { Ok(Some(results[0])) }
+        let result = if results.is_empty() { None } else { Some(results[0]) };
+        // Owned arguments for borrowing builtins: `print` only reads
+        // its argument, so a fresh ARC temporary handed to it (a
+        // string concat, a field read) is the caller's to reclaim.
+        // `weak` / `upgrade_or` are excluded — they alias their
+        // argument's control block, so releasing it would dangle.
+        if name == "print_str" {
+            for (a, &v) in args.iter().zip(&arg_vals) {
+                if is_arc_type(&a.ty, self.struct_arc_fields, self.enum_has_payload)
+                    && !matches!(a.kind, HirExprKind::Local(_))
+                {
+                    self.emit_arc_call("release", &a.ty, v)?;
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn ensure_runtime_func(&mut self, name: &str) -> Result<FuncId, CodegenError> {
@@ -3128,6 +3157,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     let v = body_val.ok_or_else(|| {
                         CodegenError("match arm produced no value".into())
                     })?;
+                    // Tail-escape retain: an arm body that is a
+                    // borrowed `Local` — most often an extracted enum
+                    // payload (`Some(x) => x`) — must be retained so
+                    // the match value carries its own +1. The arm
+                    // analog of `compile_block`'s tail-escape rule.
+                    if let HirExprKind::Local(_) = &arm.body.kind {
+                        if is_arc_type(
+                            &arm.body.ty,
+                            self.struct_arc_fields,
+                            self.enum_has_payload,
+                        ) {
+                            self.emit_arc_call("retain", &arm.body.ty, v)?;
+                        }
+                    }
                     self.builder.ins().jump(merge_blk, &[v]);
                 } else {
                     self.builder.ins().jump(merge_blk, &[]);
