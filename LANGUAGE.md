@@ -452,14 +452,15 @@ The plumbing is uniform:
 - No user-side FFI yet — will land alongside an `extern "C"` keyword
   on function items.
 
-## Traits (design pass)
+## Traits (bounded generics)
 
-**Status: Open.** Not implemented; sized for a multi-session feature
-of its own.
+**Status: Decided.** Landed 2026-05-20 — static dispatch via
+monomorphization. Dynamic dispatch (`dyn Trait`), supertraits,
+associated types, and generic impls (`impl<T> Trait for Box<T>`)
+remain open.
 
-The motivation: bounded generics. Today `fn print<T>(x: T)` can
-take any T, but the body can do nothing T-specific — there's no way
-to say "T must support `.fmt()`". Traits fix this by attaching a
+The motivation: bounded generics. A plain `fn id<T>(x: T)` takes
+any T but the body can do nothing T-specific. Traits attach a
 constraint:
 
 ```rune
@@ -474,34 +475,44 @@ impl Display for Point {
 fn show<T: Display>(x: T) -> str { x.fmt() }
 ```
 
-Implementation sketch:
+How it works (as implemented):
 
-1. **Parser**: `trait Name { fn ...; ... }` declares; `impl Trait
-   for Type { ... }` implements; `T: TraitName` (and `T: A + B`) at
-   generic bound sites.
-2. **Resolver**: `SymbolKind::Trait` and `SymbolKind::TraitImpl`. A
-   per-(trait, type) impl table.
-3. **Checker**: bounded generic params type-check the body using
-   the trait's declared method signatures. Calls on a bounded T
-   resolve to the trait method (signature-checked but not yet
-   dispatched).
-4. **Monomorphization**: at each call site, instantiate the generic
-   with a concrete type AND look up the trait impl for that type.
-   The specialized body has method calls rewritten to direct calls
-   into the impl's function.
-5. **Optional**: dynamic dispatch via vtables — `Box<dyn Display>`
-   etc. Not needed for the static case but useful for collections
-   of mixed types.
+1. **Parser**: `trait Name { fn sig; ... }` declares method
+   *signatures* (no bodies); `impl Trait for Type { ... }` provides
+   them; `<T: TraitName>` / `<T: A + B>` at generic-param sites.
+   `ast::GenericParam { name, bounds }`.
+2. **Resolver**: `SymbolKind::Trait`. `Resolutions::trait_methods`
+   maps trait sym → declared signatures; `generic_bounds` maps a
+   generic param sym → its bound trait syms. Trait-impl methods
+   register into the same `impl_methods` table as inherent methods.
+3. **Checker**: `check_trait_impl_conformance` verifies every trait
+   method has a matching impl (arity-checked). A method call on a
+   bounded generic receiver (`x.fmt()` where `x: T`, `T: Display`)
+   resolves through `trait_bound_method_sig`, which finds the
+   method in one of `T`'s bounds.
+4. **Monomorphization**: trait method calls on a generic receiver
+   stay as `HirExprKind::MethodCall` through lowering (the receiver
+   type is still `TypeVar`). After a generic function is specialized
+   for a concrete type, `resolve_method_calls` rewrites each
+   `MethodCall` whose receiver is now a concrete struct/enum into a
+   direct `Call` into the impl method (looked up in
+   `HirModule::impl_methods`).
+5. Codegen sees only `Call` for trait methods — never a generic
+   `MethodCall`. Builtin method calls (`str.len()` etc.) remain
+   `MethodCall` and dispatch as before.
 
-The static-dispatch (monomorphized) path is the v0.x choice if/when
-this lands. Dynamic dispatch can come later.
+**Static dispatch only.** No vtables; every trait call is resolved
+to a concrete function by monomorphization. Calling a generic
+function with N distinct types produces N specializations.
 
-Blockers / open questions:
-- Coherence: is `impl<T> Display for Vec<T>` allowed if another
-  crate also impls `Display for Vec<i64>`? Rust's orphan rule
-  handles this; Rune doesn't have crates yet.
-- Trait inheritance / supertraits: `trait Ord: Eq { ... }`.
-- Associated types (`type Item`) and constants: deferred.
+Still open:
+- **Dynamic dispatch** (`dyn Trait`, trait objects) — needs vtables.
+- **Supertraits** (`trait Ord: Eq`).
+- **Associated types** / constants.
+- **Generic impls** (`impl<T> Display for Box<T>`) — today only
+  concrete-type impls (`impl Display for Point`) are supported.
+- **Conformance is arity-only** — full param-by-param type checking
+  with `Self` substitution is a follow-up.
 
 ## Stdlib (design pass)
 
@@ -602,3 +613,4 @@ Rune. Far off; shouldn't influence near-term decisions.
 | 2026-05-20 | Generic struct field types (partial) | Generic structs (`struct Box<T> { value: T }`) parse, resolve, and check end-to-end. Construction (`Box { value: 5 }`) lowers correctly with the field stored at its 8-byte slot. Field access (`b.value`) compiles by treating unresolved `Ty::TypeVar` as `i64` in `compile_field_access` and `compile_field_assign` — works for all i64-shaped types (i64, str pointer, Vec pointer, struct pointer, enum descriptor pointer). **Limitations** (require carrying type args on `Ty::Struct` itself — bigger refactor): `+`/`-`/method calls on a `b.value` whose type is still `TypeVar` fail at the checker stage; passing a generic struct to a generic function can't infer T from `Ty::Struct(box_sym)` alone. Workaround: stick to i64-sized concrete fields or restructure to avoid post-access operations on TypeVar values. |
 | 2026-05-20 | Full generic struct + enum types | `Ty::Struct(SymbolId)` and `Ty::Enum(SymbolId)` grow into `Ty::Struct(SymbolId, Vec<Ty>)` and `Ty::Enum(SymbolId, Vec<Ty>)`. Type args are populated by the resolver from `Path::generic_args` at type position and inferred at construction sites: `Box { value: 5 }` produces `Ty::Struct(box_sym, [i64])`, `Some(5)` produces `Ty::Enum(option_sym, [i64])`. Field-access lowering substitutes the field's `TypeVar` using `build_struct_subst(struct_sym, use_args)`; match-arm payload bindings substitute using the scrutinee's enum args. The monomorphizer's `unify` recurses into `Struct/Enum` args so `unbox<T>(b: Box<T>)` infers T=i64 from `b: Box<i64>`. `Ty::compatible` treats `Struct/Enum` with matching syms as compatible regardless of args (variant-construction sites still emit `Vec::new()` for the placeholder). Resolutions gains `struct_generics` and `enum_generics` maps tracking each item's generic-param symbols. **What this unlocks**: `Option<T>`, `Result<T, E>`, method calls on generic struct fields (`b.value.len()`), arithmetic across generic fields, generic functions taking generic structs/enums. **What's still TODO**: nothing fundamental at this layer; subsequent work moves to `Weak<T>` (now buildable), traits/bounded generics, and stdlib-level types built on these primitives. |
 | 2026-05-20 | `Weak<T>` reference counting | Cycle-breaking weak refs. v0.x supports `Weak<Vec>` only; other inner types parse but error at codegen with a clear message. RuneVec grows `weak_count: i64` (40 bytes total). Initial state on `vec_new`: `rc=1`, `weak_count=1` — the strong refs collectively count as one weak. Four new runtime helpers: `rune_weak_downgrade_vec` (increments weak_count), `rune_weak_retain_vec` / `rune_weak_release_vec` for ARC-on-copy of Weak locals, `rune_weak_upgrade_vec` for the underlying try-promote, and the convenience `rune_weak_upgrade_or_vec(w, default)` that returns either a retained strong ref or a retained default. `rune_release_vec` was updated: when rc hits 0, dealloc the element array AND call `weak_release_vec` to drop the "all strong refs share one weak" slot — the descriptor only goes away when the last `Weak<Vec>` releases. New `Ty::Weak(Box<Ty>)`; new polymorphic builtins `weak(v) -> Weak<T>` and `upgrade_or(w, default) -> T`. `Weak` is a special builtin name the checker recognizes in `resolve_type` — `Weak<i64>` parses as `Ty::Weak(Box::new(Ty::Int(I64)))`. `is_arc_type` and `arc_helper_name` are extended for `Ty::Weak(_)` so scope-exit auto-release goes through the weak helpers, not the strong ones. **Limitation**: `Weak<Str>`, `Weak<Struct>`, `Weak<Enum>` rejected at checker. The control-block split for those types would mirror Vec; not done this session because the v0.x leak-tolerance argument from earlier sessions doesn't apply to weak refs (cycles require Weak, which requires control blocks per-type). |
+| 2026-05-20 | Traits + bounded generics | Static-dispatch traits. New `trait` keyword; `ast::Item::Trait(TraitDecl)` holds method signatures (bodies-less); `ImplBlock` gains `trait_path: Option<Path>` so `impl Trait for Type` parses; `ast::GenericParam { name, bounds }` replaces the bare `Vec<Ident>` of generic params, parsing `<T: A + B>`. Resolver: `SymbolKind::Trait`; `Resolutions::trait_methods` (trait sym → sigs) and `generic_bounds` (param sym → bound trait syms); trait-impl methods register into the existing `impl_methods` table. Checker: `check_trait_impl_conformance` (every trait method has a matching impl, arity-checked); `trait_bound_method_sig` resolves `x.fmt()` where `x: T` and `T: Display` by searching `T`'s bounds. Monomorphizer: trait method calls on a generic receiver survive lowering as `HirExprKind::MethodCall`; after a generic fn is specialized for a concrete type, `resolve_method_calls` rewrites each `MethodCall` on a now-concrete struct/enum receiver into a direct `Call` (via `HirModule::impl_methods`). Codegen sees only `Call` for trait methods. **Static dispatch only** — no vtables, no `dyn Trait`. Open: supertraits, associated types, generic impls (`impl<T> Trait for Box<T>`), full param-type conformance (today arity-only). |

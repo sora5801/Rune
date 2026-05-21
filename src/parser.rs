@@ -171,6 +171,7 @@ impl Parser {
             TokenKind::Enum => Ok(Item::Enum(self.parse_enum(vis, start)?)),
             TokenKind::Const => Ok(Item::Const(self.parse_const(vis, start)?)),
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl(start)?)),
+            TokenKind::Trait => Ok(Item::Trait(self.parse_trait(vis, start)?)),
             _ => {
                 let span = self.peek_span();
                 Err(ParseError {
@@ -207,9 +208,9 @@ impl Parser {
         Ok(FnDecl { vis, name, generics, params, return_type, body, span: Span::new(start, end) })
     }
 
-    /// Parse `<T>` / `<T, U>` after an item's name. Returns an empty
-    /// Vec if no generic params are present.
-    fn parse_optional_generic_params(&mut self) -> ParseResult<Vec<Ident>> {
+    /// Parse `<T>` / `<T, U>` / `<T: Display>` / `<T: A + B>` after an
+    /// item's name. Returns an empty Vec if no generic params present.
+    fn parse_optional_generic_params(&mut self) -> ParseResult<Vec<GenericParam>> {
         if !self.check(&TokenKind::Lt) {
             return Ok(Vec::new());
         }
@@ -217,7 +218,18 @@ impl Parser {
         let mut params = Vec::new();
         if !self.check(&TokenKind::Gt) {
             loop {
-                params.push(self.expect_ident()?);
+                let name = self.expect_ident()?;
+                let mut bounds = Vec::new();
+                if self.eat(&TokenKind::Colon) {
+                    // One or more `+`-separated trait bounds.
+                    loop {
+                        bounds.push(self.expect_ident()?);
+                        if !self.eat(&TokenKind::Plus) {
+                            break;
+                        }
+                    }
+                }
+                params.push(GenericParam { name, bounds });
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -309,7 +321,15 @@ impl Parser {
 
     fn parse_impl(&mut self, start: usize) -> ParseResult<ImplBlock> {
         self.expect(&TokenKind::Impl, "`impl`")?;
-        let type_path = self.parse_path()?;
+        // `impl Path { ... }` is an inherent impl; `impl Path for Path
+        // { ... }` is a trait impl. Parse the first path, then peek
+        // for `for` to disambiguate.
+        let first = self.parse_path()?;
+        let (trait_path, type_path) = if self.eat_keyword("for") {
+            (Some(first), self.parse_path()?)
+        } else {
+            (None, first)
+        };
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
@@ -321,7 +341,59 @@ impl Parser {
         }
         let rb = self.expect(&TokenKind::RBrace, "`}`")?;
         Ok(ImplBlock {
+            trait_path,
             type_path,
+            methods,
+            span: Span::new(start, rb.span.end),
+        })
+    }
+
+    /// `for` is not a reserved keyword usable as an item connector
+    /// elsewhere, so we match the existing `For` token directly.
+    fn eat_keyword(&mut self, kw: &str) -> bool {
+        if kw == "for" && matches!(self.peek(), TokenKind::For) {
+            self.bump();
+            return true;
+        }
+        false
+    }
+
+    fn parse_trait(&mut self, vis: Visibility, start: usize) -> ParseResult<TraitDecl> {
+        self.expect(&TokenKind::Trait, "`trait`")?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+            // A trait method is a signature: `fn name(params) -> ret;`
+            let m_start = self.peek_span().start;
+            self.expect(&TokenKind::Fn, "`fn`")?;
+            let m_name = self.expect_ident()?;
+            self.expect(&TokenKind::LParen, "`(`")?;
+            let mut params = Vec::new();
+            while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                params.push(self.parse_param()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RParen, "`)`")?;
+            let return_type = if self.eat(&TokenKind::Arrow) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            let semi = self.expect(&TokenKind::Semi, "`;`")?;
+            methods.push(TraitMethodSig {
+                name: m_name,
+                params,
+                return_type,
+                span: Span::new(m_start, semi.span.end),
+            });
+        }
+        let rb = self.expect(&TokenKind::RBrace, "`}`")?;
+        Ok(TraitDecl {
+            vis,
+            name,
             methods,
             span: Span::new(start, rb.span.end),
         })

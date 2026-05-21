@@ -50,7 +50,8 @@ rune: linked with clang -> primes.exe
 
 ### Parser — done
 
-- Items: `fn`, `struct`, `enum`, `const` (with optional `pub`)
+- Items: `fn`, `struct`, `enum`, `const`, `trait`, `impl` /
+  `impl Trait for Type` (with optional `pub`)
 - Statements: `let`, expression statements, items inside blocks
 - Expressions: literals, paths, parenthesized, unary, all binary operators
   with Pratt precedence, assignment and compound assignment, postfix
@@ -68,8 +69,14 @@ rune: linked with clang -> primes.exe
   (`id$$i64`, `pair$$i64$$str`). `Ty::Struct` and `Ty::Enum` carry
   type args, so `Box<i64>`, `Option<T>`, `Result<T, E>` etc. all
   work end-to-end.
+- **Traits + bounded generics**: `trait Display { fn fmt(...); }`,
+  `impl Display for Point { ... }`, `fn show<T: Display>(x: T)`.
+  Static dispatch — trait method calls in a bounded-generic body
+  are resolved per-specialization by the monomorphizer.
+- Generic type parameters with optional trait bounds
+  (`<T>`, `<T: Display>`, `<T: A + B>`)
 - Error recovery at item-starting keywords
-- 47 integration tests
+- 51 integration tests
 
 ### Resolver — done
 
@@ -178,7 +185,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 175 JIT codegen tests + 34 AOT tests.
+- 178 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -201,14 +208,13 @@ a clear error if reached.
 
 ## Roadmap
 
-1. Traits / interfaces for bounded generics (`T: Display`) — design
-   pass in LANGUAGE.md; multi-session implementation ahead
-2. `Weak<Str>` / `Weak<Struct>` / `Weak<Enum>` — extend the
-   control-block split to other ARC types
-3. `?` operator desugared to Result matching
-4. Stdlib types (`Vec<T>`, `Option<T>`, `Result<T, E>`) — blocked
-   on traits + module system
-5. Self-hosted bootstrap (long-term)
+1. `dyn Trait` — dynamic dispatch via vtables
+2. Supertraits, associated types, generic impls
+   (`impl<T> Trait for Box<T>`)
+3. Module system (`use std::*`) — unblocks the stdlib
+4. `?` operator desugared to Result matching
+5. Stdlib types (`Vec<T>`, `HashMap<K, V>`, iterator protocol)
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -114,6 +114,20 @@ impl<'r> Checker<'r> {
                         self.fn_signatures.insert(method.name.span, sig);
                     }
                 }
+                Item::Trait(t) => {
+                    // Resolve each trait method signature's types so
+                    // `type_resolutions` has entries before any fn
+                    // body (which may call a bounded-generic method)
+                    // is checked in pass 2.
+                    for m in &t.methods {
+                        for p in &m.params {
+                            self.resolve_type(&p.ty);
+                        }
+                        if let Some(rt) = &m.return_type {
+                            self.resolve_type(rt);
+                        }
+                    }
+                }
                 Item::Struct(_) | Item::Enum(_) => {}
             }
         }
@@ -212,10 +226,52 @@ impl<'r> Checker<'r> {
                 for method in &i.methods {
                     self.check_fn(method);
                 }
+                self.check_trait_impl_conformance(i);
             }
-            Item::Struct(_) | Item::Enum(_) => {
-                // Field/variant types were resolved by the resolver and
-                // signatures aren't needed yet — nothing to check here.
+            Item::Struct(_) | Item::Enum(_) | Item::Trait(_) => {
+                // Field/variant types were resolved by the resolver;
+                // trait method signature types are resolved in pass 1b.
+            }
+        }
+    }
+
+    /// For an `impl Trait for Type`, verify every trait method has a
+    /// matching impl and that arities line up. Signature equality is
+    /// checked loosely (arity only) in v0.x — full param-by-param
+    /// type conformance with `Self` substitution is a follow-up.
+    fn check_trait_impl_conformance(&mut self, i: &ImplBlock) {
+        let Some(trait_path) = &i.trait_path else { return };
+        let Some(&trait_sym) = self.res.path_to_sym.get(&trait_path.span) else {
+            return;
+        };
+        let Some(trait_sigs) = self.res.trait_methods.get(&trait_sym).cloned() else {
+            return;
+        };
+        for sig in &trait_sigs {
+            match i.methods.iter().find(|m| m.name.name == sig.name.name) {
+                None => {
+                    self.error(
+                        i.span,
+                        format!(
+                            "impl is missing method `{}` required by the trait",
+                            sig.name.name
+                        ),
+                    );
+                }
+                Some(m) => {
+                    if m.params.len() != sig.params.len() {
+                        self.error(
+                            m.name.span,
+                            format!(
+                                "method `{}` has {} parameter(s) but the trait \
+                                 declares {}",
+                                sig.name.name,
+                                m.params.len(),
+                                sig.params.len()
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -1025,7 +1081,8 @@ impl<'r> Checker<'r> {
             SymbolKind::BuiltinType(_)
             | SymbolKind::Struct
             | SymbolKind::Enum
-            | SymbolKind::TypeParam => {
+            | SymbolKind::TypeParam
+            | SymbolKind::Trait => {
                 self.error(p.span, format!("`{}` is a type, not a value", name));
                 Ty::Error
             }
@@ -1251,7 +1308,8 @@ impl<'r> Checker<'r> {
                     SymbolKind::BuiltinType(_)
                     | SymbolKind::Struct
                     | SymbolKind::Enum
-                    | SymbolKind::TypeParam => {
+                    | SymbolKind::TypeParam
+                    | SymbolKind::Trait => {
                         self.error(span, format!("cannot assign to type `{}`", name));
                     }
                     SymbolKind::EnumVariant { .. } => {
@@ -1676,6 +1734,38 @@ impl<'r> Checker<'r> {
         apply_subst(&field.ty, &subst)
     }
 
+    /// Resolve a method call where the receiver is a bounded generic
+    /// parameter (`x: T` with `T: SomeTrait`). The method must be
+    /// declared by one of `T`'s trait bounds. The returned signature
+    /// drops the explicit `self` parameter to match `MethodSig`'s
+    /// "externally visible" convention.
+    fn trait_bound_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+        let Ty::TypeVar(tvar) = recv else { return None };
+        let bounds = self.res.generic_bounds.get(tvar)?;
+        for &trait_sym in bounds {
+            let methods = self.res.trait_methods.get(&trait_sym)?;
+            if let Some(m) = methods.iter().find(|m| m.name.name == name) {
+                // Skip the leading `self` param; resolve the rest.
+                let mut params: Vec<Ty> = Vec::new();
+                for p in m.params.iter().skip(1) {
+                    params.push(
+                        self.type_resolutions
+                            .get(&p.ty.span())
+                            .cloned()
+                            .unwrap_or(Ty::Error),
+                    );
+                }
+                let ret = m
+                    .return_type
+                    .as_ref()
+                    .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
+                    .unwrap_or(Ty::Unit);
+                return Some(MethodSig { params, ret });
+            }
+        }
+        None
+    }
+
     fn check_method_call(
         &mut self,
         receiver: &Expr,
@@ -1686,7 +1776,8 @@ impl<'r> Checker<'r> {
         let recv_ty = self.check_expr(receiver);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
         let sig = resolve_method(&recv_ty, &method.name)
-            .or_else(|| self.user_method_sig(&recv_ty, &method.name));
+            .or_else(|| self.user_method_sig(&recv_ty, &method.name))
+            .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name));
         let Some(sig) = sig else {
             if !recv_ty.is_error() {
                 self.error(

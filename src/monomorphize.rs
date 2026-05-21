@@ -124,6 +124,13 @@ impl MonoState {
         for f in &mut self.concrete {
             rewrite_calls(&mut f.body, &self.cache, &self.generics);
         }
+        // Resolve trait/inherent method calls whose receiver type is
+        // now concrete (e.g., `x.fmt()` inside a `<T: Display>` body
+        // that has been specialized for a concrete struct). Builtin
+        // method calls on Vec/str/arrays are left alone for codegen.
+        for f in &mut self.concrete {
+            resolve_method_calls(&mut f.body, &module.impl_methods);
+        }
         // Final module is just the concrete (originals + specializations).
         module.items = self
             .concrete
@@ -642,6 +649,145 @@ fn rewrite_calls_in_expr(
             }
         }
         _ => {}
+    }
+}
+
+/// Rewrite `MethodCall` expressions whose receiver type is a
+/// concrete struct/enum with a matching impl method into direct
+/// `Call`s. After monomorphization a `<T: Display>` body has its
+/// `T` substituted, so `x.fmt()` now has a concrete receiver.
+/// Builtin method calls (Vec/str/array) have no impl-method entry
+/// and are left for codegen.
+fn resolve_method_calls(
+    b: &mut HirBlock,
+    impl_methods: &HashMap<(SymbolId, String), SymbolId>,
+) {
+    for s in &mut b.stmts {
+        match s {
+            HirStmt::Let(l) => {
+                if let Some(init) = &mut l.init {
+                    resolve_method_calls_in_expr(init, impl_methods);
+                }
+            }
+            HirStmt::Expr(e, _) => resolve_method_calls_in_expr(e, impl_methods),
+        }
+    }
+}
+
+fn resolve_method_calls_in_expr(
+    e: &mut HirExpr,
+    impl_methods: &HashMap<(SymbolId, String), SymbolId>,
+) {
+    use HirExprKind::*;
+    // Recurse into children first.
+    match &mut e.kind {
+        Unary { expr, .. } | Cast { expr } => {
+            resolve_method_calls_in_expr(expr, impl_methods)
+        }
+        Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
+            resolve_method_calls_in_expr(lhs, impl_methods);
+            resolve_method_calls_in_expr(rhs, impl_methods);
+        }
+        Assign { rhs, .. } | AssignOp { rhs, .. } => {
+            resolve_method_calls_in_expr(rhs, impl_methods)
+        }
+        Call { args, .. } | BuiltinCall { args, .. } => {
+            for a in args {
+                resolve_method_calls_in_expr(a, impl_methods);
+            }
+        }
+        MethodCall { receiver, args, .. } => {
+            resolve_method_calls_in_expr(receiver, impl_methods);
+            for a in args {
+                resolve_method_calls_in_expr(a, impl_methods);
+            }
+        }
+        EnumPayloadCtor { payloads, .. } => {
+            for p in payloads {
+                resolve_method_calls_in_expr(p, impl_methods);
+            }
+        }
+        StructLit { fields, .. } => {
+            for (_, v) in fields {
+                resolve_method_calls_in_expr(v, impl_methods);
+            }
+        }
+        FieldAccess { receiver, .. } => {
+            resolve_method_calls_in_expr(receiver, impl_methods)
+        }
+        FieldAssign { receiver, rhs, .. } => {
+            resolve_method_calls_in_expr(receiver, impl_methods);
+            resolve_method_calls_in_expr(rhs, impl_methods);
+        }
+        Array { elems, .. } => {
+            for el in elems {
+                resolve_method_calls_in_expr(el, impl_methods);
+            }
+        }
+        Index { array, index, .. } => {
+            resolve_method_calls_in_expr(array, impl_methods);
+            resolve_method_calls_in_expr(index, impl_methods);
+        }
+        StrByteIndex { str_val, index } => {
+            resolve_method_calls_in_expr(str_val, impl_methods);
+            resolve_method_calls_in_expr(index, impl_methods);
+        }
+        StrSlice { str_val, start, end, .. } => {
+            resolve_method_calls_in_expr(str_val, impl_methods);
+            resolve_method_calls_in_expr(start, impl_methods);
+            resolve_method_calls_in_expr(end, impl_methods);
+        }
+        Block(b) => resolve_method_calls(b, impl_methods),
+        If { cond, then_b, else_b } => {
+            resolve_method_calls_in_expr(cond, impl_methods);
+            resolve_method_calls(then_b, impl_methods);
+            if let Some(e) = else_b {
+                resolve_method_calls_in_expr(e, impl_methods);
+            }
+        }
+        While { cond, body } => {
+            resolve_method_calls_in_expr(cond, impl_methods);
+            resolve_method_calls(body, impl_methods);
+        }
+        For { iter, body, .. } => {
+            resolve_method_calls_in_expr(iter, impl_methods);
+            resolve_method_calls(body, impl_methods);
+        }
+        ForRange { start, end, body, .. } => {
+            resolve_method_calls_in_expr(start, impl_methods);
+            resolve_method_calls_in_expr(end, impl_methods);
+            resolve_method_calls(body, impl_methods);
+        }
+        Match { scrutinee, arms } => {
+            resolve_method_calls_in_expr(scrutinee, impl_methods);
+            for arm in arms {
+                if let Some(g) = &mut arm.guard {
+                    resolve_method_calls_in_expr(g, impl_methods);
+                }
+                resolve_method_calls_in_expr(&mut arm.body, impl_methods);
+            }
+        }
+        Return(v) => {
+            if let Some(v) = v {
+                resolve_method_calls_in_expr(v, impl_methods);
+            }
+        }
+        _ => {}
+    }
+    // Now try to rewrite this node if it's a resolvable MethodCall.
+    if let MethodCall { receiver, method, args } = &e.kind {
+        let recv_sym = match &receiver.ty {
+            Ty::Struct(s, _) | Ty::Enum(s, _) => Some(*s),
+            _ => None,
+        };
+        if let Some(s) = recv_sym {
+            if let Some(&fn_sym) = impl_methods.get(&(s, method.clone())) {
+                let mut call_args = Vec::with_capacity(args.len() + 1);
+                call_args.push((**receiver).clone());
+                call_args.extend(args.iter().cloned());
+                e.kind = Call { callee: fn_sym, args: call_args };
+            }
+        }
     }
 }
 

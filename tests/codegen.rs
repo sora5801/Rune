@@ -2249,6 +2249,83 @@ fn generics_option_i64() {
     assert_eq!(run_main(src), 41);
 }
 
+// ---- traits + bounded generics ----
+
+#[test]
+fn trait_impl_concrete_method_call() {
+    // A trait impl on a concrete type — the method call resolves
+    // directly via the impl_methods table, no generics involved.
+    let src = r#"
+        trait Magnitude {
+            fn mag_sq(self: Point) -> i64;
+        }
+        struct Point { x: i64, y: i64 }
+        impl Magnitude for Point {
+            fn mag_sq(self: Point) -> i64 {
+                self.x * self.x + self.y * self.y
+            }
+        }
+        fn main() -> i64 {
+            let p = Point { x: 3, y: 4 };
+            p.mag_sq()
+        }
+    "#;
+    assert_eq!(run_main(src), 25);
+}
+
+#[test]
+fn trait_bounded_generic_static_dispatch() {
+    // The bounded generic `describe<T: Sized>` calls `x.size()`;
+    // monomorphization specializes it for Point and rewrites the
+    // method call to Point's impl.
+    let src = r#"
+        trait Sized {
+            fn size(self: Point) -> i64;
+        }
+        struct Point { x: i64, y: i64 }
+        impl Sized for Point {
+            fn size(self: Point) -> i64 { 16 }
+        }
+        fn describe<T: Sized>(x: T) -> i64 {
+            x.size()
+        }
+        fn main() -> i64 {
+            let p = Point { x: 1, y: 2 };
+            describe(p)
+        }
+    "#;
+    assert_eq!(run_main(src), 16);
+}
+
+#[test]
+fn trait_bounded_generic_two_impls() {
+    // Same bounded generic, two implementing types — two
+    // specializations, each dispatching to the right impl.
+    let src = r#"
+        trait Tag {
+            fn tag(self: A) -> i64;
+        }
+        struct A { v: i64 }
+        struct B { v: i64 }
+        impl Tag for A {
+            fn tag(self: A) -> i64 { 1 }
+        }
+        impl Tag for B {
+            fn tag(self: B) -> i64 { 2 }
+        }
+        fn id_tag<T: Tag>(x: T) -> i64 {
+            x.tag()
+        }
+        fn main() -> i64 {
+            let a = A { v: 0 };
+            let b = B { v: 0 };
+            id_tag(a) * 10 + id_tag(b)
+        }
+    "#;
+    // 1*10 + 2 = 12
+    assert_eq!(run_main(src), 12);
+}
+
 // ---- Weak<T> reference counting ----
 
 #[test]

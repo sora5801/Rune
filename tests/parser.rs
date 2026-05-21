@@ -382,7 +382,7 @@ fn parses_generic_fn_decl() {
     let m = parse_ok("fn id<T>(x: T) -> T { x }");
     let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
     assert_eq!(f.generics.len(), 1);
-    assert_eq!(f.generics[0].name, "T");
+    assert_eq!(f.generics[0].name.name, "T");
 }
 
 #[test]
@@ -418,4 +418,39 @@ fn parses_generic_type_arg_in_type_position() {
 fn comparison_lt_still_parses() {
     // `x < 2` must still parse as comparison, not a generic-args attempt.
     parse_ok("fn t() -> bool { let x = 1; x < 2 }");
+}
+
+// ---- traits ----
+
+#[test]
+fn parses_trait_decl() {
+    let m = parse_ok("trait Display { fn fmt(self: Point) -> str; }");
+    let Item::Trait(t) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(t.name.name, "Display");
+    assert_eq!(t.methods.len(), 1);
+    assert_eq!(t.methods[0].name.name, "fmt");
+}
+
+#[test]
+fn parses_trait_impl() {
+    let m = parse_ok(
+        "struct Point { x: i64 } impl Display for Point { fn fmt(self: Point) -> str { \"p\" } }",
+    );
+    let Item::Impl(i) = m.items.into_iter().nth(1).unwrap() else { panic!() };
+    assert!(i.trait_path.is_some());
+}
+
+#[test]
+fn parses_bounded_generic() {
+    let m = parse_ok("fn show<T: Display>(x: T) -> str { \"\" }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(f.generics[0].bounds.len(), 1);
+    assert_eq!(f.generics[0].bounds[0].name, "Display");
+}
+
+#[test]
+fn parses_multi_bound_generic() {
+    let m = parse_ok("fn show<T: A + B>(x: T) -> i64 { 0 }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(f.generics[0].bounds.len(), 2);
 }

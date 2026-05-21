@@ -52,6 +52,10 @@ pub enum SymbolKind {
     /// Codegen rejects functions whose body still mentions any
     /// `TypeParam`; that's what makes "generics step 1" parser-only.
     TypeParam,
+    /// A trait declaration. Carries no codegen weight — traits are a
+    /// compile-time-only construct; method dispatch is resolved
+    /// statically via monomorphization.
+    Trait,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +94,13 @@ pub struct Resolutions {
     pub struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
     /// Same for enums.
     pub enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Declared method signatures per trait — keyed by trait sym.
+    /// The checker uses these for impl conformance + bounded-generic
+    /// method-call resolution.
+    pub trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    /// Generic-param symbol → trait-bound symbols. `<T: Display>`
+    /// records `T_sym → [Display_sym]`.
+    pub generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
     /// Enums that have at least one payload-bearing variant. These use
     /// a heap-allocated `{ tag, payload, rc }` descriptor at runtime
     /// instead of the plain i64 discriminant used by tag-only enums.
@@ -132,6 +143,8 @@ pub struct Resolver {
     enum_has_payload: std::collections::HashSet<SymbolId>,
     struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
     enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
+    trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
     errors: Vec<ResolveError>,
 }
 
@@ -153,6 +166,8 @@ impl Resolver {
             enum_has_payload: std::collections::HashSet::new(),
             struct_generics: HashMap::new(),
             enum_generics: HashMap::new(),
+            trait_methods: HashMap::new(),
+            generic_bounds: HashMap::new(),
             errors: Vec::new(),
         };
         r.insert_builtins();
@@ -187,6 +202,8 @@ impl Resolver {
                 enum_has_payload: self.enum_has_payload,
                 struct_generics: self.struct_generics,
                 enum_generics: self.enum_generics,
+                trait_methods: self.trait_methods,
+                generic_bounds: self.generic_bounds,
             },
             self.errors,
         )
@@ -207,6 +224,22 @@ impl Resolver {
                 i.type_path.span,
             );
             return;
+        }
+        // For a trait impl, resolve the trait path so the checker can
+        // validate the impl against the trait's declared signatures.
+        if let Some(trait_path) = &i.trait_path {
+            self.resolve_path(trait_path);
+            if let Some(&tsym) = self.path_to_sym.get(&trait_path.span) {
+                if !matches!(self.symbols[tsym.0 as usize].kind, SymbolKind::Trait) {
+                    self.error(
+                        format!(
+                            "`{}` is not a trait",
+                            self.symbols[tsym.0 as usize].name
+                        ),
+                        trait_path.span,
+                    );
+                }
+            }
         }
         let struct_name = self.symbols[struct_sym.0 as usize].name.clone();
         for method in &i.methods {
@@ -357,6 +390,7 @@ impl Resolver {
             Item::Struct(s) => (&s.name, SymbolKind::Struct),
             Item::Enum(e) => (&e.name, SymbolKind::Enum),
             Item::Const(c) => (&c.name, SymbolKind::Const),
+            Item::Trait(t) => (&t.name, SymbolKind::Trait),
             // Impl blocks contribute methods, not a top-level name.
             // Methods are declared by a separate pass after all structs
             // are known. See `declare_impl`.
@@ -414,6 +448,12 @@ impl Resolver {
                 self.enum_has_payload.insert(id);
             }
         }
+
+        // For traits, stash the method signatures so the checker can
+        // validate impls and resolve bounded-generic method calls.
+        if let Item::Trait(t) = item {
+            self.trait_methods.insert(id, t.methods.clone());
+        }
     }
 
     // ---- pass 2: resolve bodies ----
@@ -429,14 +469,48 @@ impl Resolver {
                     self.resolve_fn(method);
                 }
             }
+            Item::Trait(t) => {
+                // Resolve the parameter / return types of each trait
+                // method signature so `Self` and any referenced types
+                // bind. The bodies don't exist (signatures only).
+                for m in &t.methods {
+                    self.enter_scope();
+                    for p in &m.params {
+                        self.resolve_type(&p.ty);
+                    }
+                    if let Some(rt) = &m.return_type {
+                        self.resolve_type(rt);
+                    }
+                    self.exit_scope();
+                }
+            }
         }
     }
 
     fn resolve_fn(&mut self, f: &FnDecl) {
         self.enter_scope();
         for g in &f.generics {
-            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
-            self.decl_to_sym.insert(g.span, id);
+            let id = self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.name.span, id);
+            // Resolve each `T: Bound` to the bound trait's symbol.
+            let mut bound_syms: Vec<SymbolId> = Vec::new();
+            for b in &g.bounds {
+                if let Some(bsym) = self.lookup(&b.name) {
+                    if matches!(self.symbols[bsym.0 as usize].kind, SymbolKind::Trait) {
+                        bound_syms.push(bsym);
+                    } else {
+                        self.error(
+                            format!("`{}` is not a trait", b.name),
+                            b.span,
+                        );
+                    }
+                } else {
+                    self.error(format!("unresolved trait `{}`", b.name), b.span);
+                }
+            }
+            if !bound_syms.is_empty() {
+                self.generic_bounds.insert(id, bound_syms);
+            }
         }
         for p in &f.params {
             self.resolve_type(&p.ty);
@@ -454,8 +528,8 @@ impl Resolver {
         self.enter_scope();
         let mut gen_syms: Vec<SymbolId> = Vec::with_capacity(s.generics.len());
         for g in &s.generics {
-            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
-            self.decl_to_sym.insert(g.span, id);
+            let id = self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.name.span, id);
             gen_syms.push(id);
         }
         if !gen_syms.is_empty() {
@@ -473,8 +547,8 @@ impl Resolver {
         self.enter_scope();
         let mut gen_syms: Vec<SymbolId> = Vec::with_capacity(e.generics.len());
         for g in &e.generics {
-            let id = self.intern(g.name.clone(), g.span, SymbolKind::TypeParam);
-            self.decl_to_sym.insert(g.span, id);
+            let id = self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.name.span, id);
             gen_syms.push(id);
         }
         if !gen_syms.is_empty() {

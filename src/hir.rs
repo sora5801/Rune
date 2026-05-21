@@ -31,6 +31,11 @@ pub struct HirModule {
     /// types; for v0.x single-field, each inner Vec has 0 or 1
     /// entries. Only populated for enums in `enum_has_payload`.
     pub enum_payload_tys: HashMap<SymbolId, Vec<Vec<Ty>>>,
+    /// `(type_sym, method_name) → impl-method fn sym`. Covers both
+    /// inherent and trait-impl methods. The monomorphizer uses this
+    /// to rewrite trait method calls on a now-concrete receiver
+    /// (`x.fmt()` inside a `<T: Display>` body) into direct calls.
+    pub impl_methods: HashMap<(SymbolId, String), SymbolId>,
 }
 
 #[derive(Debug, Clone)]

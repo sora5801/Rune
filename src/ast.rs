@@ -29,22 +29,54 @@ pub enum Item {
     Enum(EnumDecl),
     Const(ConstDecl),
     Impl(ImplBlock),
+    Trait(TraitDecl),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
+    /// `Some(trait_path)` for `impl Trait for Type`, `None` for an
+    /// inherent `impl Type`.
+    pub trait_path: Option<Path>,
     pub type_path: Path,
     pub methods: Vec<FnDecl>,
     pub span: Span,
+}
+
+/// A trait declaration: a set of method *signatures* (no bodies).
+/// Implementing types provide bodies via `impl Trait for Type`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDecl {
+    pub vis: Visibility,
+    pub name: Ident,
+    pub methods: Vec<TraitMethodSig>,
+    pub span: Span,
+}
+
+/// A method signature inside a trait declaration. Shares the shape
+/// of `FnDecl` minus the body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethodSig {
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub span: Span,
+}
+
+/// A generic type parameter with optional trait bounds.
+/// `<T>` has empty bounds; `<T: Display>` / `<T: A + B>` populate them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenericParam {
+    pub name: Ident,
+    pub bounds: Vec<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub vis: Visibility,
     pub name: Ident,
-    /// Generic type parameters, e.g. `<T>` in `fn id<T>(x: T) -> T`.
-    /// Empty for non-generic functions.
-    pub generics: Vec<Ident>,
+    /// Generic type parameters, e.g. `<T>` in `fn id<T>(x: T) -> T`
+    /// or `<T: Display>` for bounded generics. Empty for non-generic.
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: Block,
@@ -62,7 +94,7 @@ pub struct Param {
 pub struct StructDecl {
     pub vis: Visibility,
     pub name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<Field>,
     pub span: Span,
 }
@@ -79,7 +111,7 @@ pub struct Field {
 pub struct EnumDecl {
     pub vis: Visibility,
     pub name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub variants: Vec<Variant>,
     pub span: Span,
 }

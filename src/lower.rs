@@ -132,6 +132,7 @@ impl<'a> Lowerer<'a> {
             struct_sizes,
             enum_has_payload,
             enum_payload_tys,
+            impl_methods: self.res.impl_methods.clone(),
         }
     }
 
@@ -164,7 +165,7 @@ impl<'a> Lowerer<'a> {
         let generics: Vec<SymbolId> = f
             .generics
             .iter()
-            .filter_map(|g| self.res.decl_to_sym.get(&g.span).copied())
+            .filter_map(|g| self.res.decl_to_sym.get(&g.name.span).copied())
             .collect();
         HirFn { sym, name, generics, params, ret_ty, body }
     }
