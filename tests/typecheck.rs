@@ -1341,3 +1341,39 @@ fn dyn_of_non_trait_rejected() {
         "is not a trait",
     );
 }
+
+#[test]
+fn vec_of_dyn_typechecks() {
+    // `Vec<dyn Shape>` is a valid element type, and a struct that
+    // implements the trait coerces at the `push` argument position.
+    check_ok(r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Circle { r: i64 }
+        impl Shape for Circle { fn area(self: Circle) -> i64 { self.r } }
+        fn main() -> i64 {
+            let mut shapes: Vec<dyn Shape> = vec_new();
+            shapes.push(Circle { r: 1 });
+            shapes.get(0).area()
+        }
+    "#);
+}
+
+#[test]
+fn vec_of_dyn_rejects_non_impl() {
+    // Pushing a struct that doesn't implement the trait into a
+    // `Vec<dyn Shape>` is rejected — no coercion is available.
+    check_has_error(
+        r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Circle { r: i64 }
+        impl Shape for Circle { fn area(self: Circle) -> i64 { self.r } }
+        struct NotShape { x: i64 }
+        fn main() -> i64 {
+            let mut shapes: Vec<dyn Shape> = vec_new();
+            shapes.push(NotShape { x: 1 });
+            0
+        }
+        "#,
+        "argument 1",
+    );
+}

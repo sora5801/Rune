@@ -911,7 +911,7 @@ fn mangle_ty(t: &Ty) -> String {
 /// refcount and need a release on drop.
 fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -> bool {
     match t {
-        Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) => true,
+        Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_) => true,
         Ty::Enum(s, _) => enum_has_payload.contains(s),
         _ => false,
     }

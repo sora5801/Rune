@@ -78,7 +78,8 @@ rune: linked with clang -> primes.exe
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
   it carries a refcount and a drop slot, so a `dyn` local reclaims
-  itself and the value it wraps at scope exit.
+  itself and the value it wraps at scope exit. `Vec<dyn Trait>`
+  collects trait objects of different concrete types.
 - **Modules**: inline `mod name { items... }` (nestable) and
   file-based `mod name;` (loads `name.rn`; nested — `mod bar;` inside
   `foo.rn` loads `foo/bar.rn`). `use a::b::c;` imports, `use x as y;`
@@ -250,8 +251,8 @@ error if reached.
 
 ## Roadmap
 
-1. `Vec<dyn T>` — `dyn` coercion at method-argument positions, for
-   heterogeneous trait-object collections
+1. Owned call arguments — release ARC argument temporaries after the
+   call, closing the last v0.x leak class
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`

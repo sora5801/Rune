@@ -3238,3 +3238,101 @@ fn dyn_box_from_local_retains_data() {
     // 7*7 + 7 = 56
     assert_eq!(run_main(src), 56);
 }
+
+#[test]
+fn vec_of_dyn_dispatch() {
+    // A heterogeneous `Vec<dyn Shape>` — two concrete types in one
+    // collection. `push` coerces the struct argument to a trait
+    // object; `get` hands one back; `.area()` dispatches per element.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        struct Square { side: i64 }
+        impl Shape for Square {
+            fn area(self: Square) -> i64 { self.side * self.side }
+        }
+        fn main() -> i64 {
+            let mut shapes: Vec<dyn Shape> = vec_new();
+            shapes.push(Circle { r: 10 });
+            shapes.push(Square { side: 5 });
+            let mut total = 0;
+            let mut i = 0;
+            while i < shapes.len() {
+                let s: dyn Shape = shapes.get(i);
+                total = total + s.area();
+                i = i + 1;
+            }
+            total
+        }
+    "#;
+    // 10*10 + 5*5 = 125
+    assert_eq!(run_main(src), 125);
+}
+
+#[test]
+fn vec_of_dyn_reclaimed() {
+    // 200 iterations each build a fresh `Vec<dyn Shape>`, push two
+    // boxed shapes, and drop it at the block end. Releasing the Vec
+    // walks its elements (`__rune_release_vec$dyn`), dropping each
+    // box and the concrete struct it wraps — a double free crashes.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        struct Square { side: i64 }
+        impl Shape for Square {
+            fn area(self: Square) -> i64 { self.side * self.side }
+        }
+        fn main() -> i64 {
+            let mut n = 0;
+            let mut total = 0;
+            while n < 200 {
+                let mut shapes: Vec<dyn Shape> = vec_new();
+                shapes.push(Circle { r: 2 });
+                shapes.push(Square { side: 3 });
+                let a: dyn Shape = shapes.get(0);
+                let b: dyn Shape = shapes.get(1);
+                total = total + a.area() + b.area();
+                n = n + 1;
+            }
+            total
+        }
+    "#;
+    // 200 * (2*2 + 3*3) = 200 * 13 = 2600
+    assert_eq!(run_main(src), 2600);
+}
+
+#[test]
+fn vec_of_dyn_push_existing_dyn() {
+    // Pushing a value that is *already* a `dyn` local (not a struct
+    // coerced at the call site): a borrowed element, so `push`
+    // retains it — the box ends up owned by both the local and the
+    // Vec slot, and both releases net out.
+    let src = r#"
+        trait Shape {
+            fn area(self: dyn Shape) -> i64;
+        }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        fn main() -> i64 {
+            let c: dyn Shape = Circle { r: 6 };
+            let mut shapes: Vec<dyn Shape> = vec_new();
+            shapes.push(c);
+            let s: dyn Shape = shapes.get(0);
+            s.area()
+        }
+    "#;
+    // 6*6 = 36
+    assert_eq!(run_main(src), 36);
+}

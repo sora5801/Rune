@@ -240,8 +240,9 @@ impl<'r> Checker<'r> {
                                     format!(
                                         "`Vec<{}>` is not supported in v0.x — the \
                                          element type must fit an 8-byte slot \
-                                         (integers, bool, char, structs, enums, or \
-                                         a nested Vec; not str, floats, or arrays)",
+                                         (integers, bool, char, structs, enums, \
+                                         trait objects, or a nested Vec; not str, \
+                                         floats, or arrays)",
                                         elem.display()
                                     ),
                                 );
@@ -1928,7 +1929,11 @@ impl<'r> Checker<'r> {
             return sig.ret;
         }
         for (i, (p, a)) in sig.params.iter().zip(&arg_tys).enumerate() {
-            if !a.compatible(p) {
+            // `check_assignable`, not bare `compatible`: a concrete
+            // struct argument coerces to a `dyn Trait` parameter (e.g.
+            // `v.push(Circle { .. })` on a `Vec<dyn Shape>`), and the
+            // coercion is recorded for the lowerer.
+            if !self.check_assignable(args[i].span(), a, p) {
                 self.error(
                     args[i].span(),
                     format!(
@@ -2462,7 +2467,8 @@ fn is_printable(t: &Ty) -> bool {
 
 /// Whether `T` is a valid `Vec<T>` element type in v0.x. Vec stores
 /// elements in 8-byte slots, so the element must be i64-or-smaller
-/// scalar or a pointer-shaped type. `str` is a 16-byte stack
+/// scalar or a pointer-shaped type (a struct, enum, nested Vec, or
+/// trait object — all 8-byte pointers). `str` is a 16-byte stack
 /// descriptor (can't fit, and storing its pointer would dangle);
 /// floats and arrays are deferred. `TypeVar` is allowed — a generic
 /// `Vec<T>` is validated once monomorphization makes `T` concrete.
@@ -2475,6 +2481,7 @@ fn vec_element_supported(ty: &Ty) -> bool {
             | Ty::Struct(_, _)
             | Ty::Enum(_, _)
             | Ty::Vec(_)
+            | Ty::Dyn(_)
             | Ty::TypeVar(_)
             | Ty::Error
     )
