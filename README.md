@@ -65,8 +65,9 @@ rune: linked with clang -> primes.exe
 - Types: paths with optional generic args, nestable — a `>>` token
   is split so `Vec<Vec<i64>>` / `Weak<Vec<i64>>` parse (`Vec<i64>`,
   `Result<i64, str>`, `Vec<Vec<i64>>`)
-- Generic type parameters on `fn`/`struct`/`enum` items. Generic
-  functions are monomorphized per concrete instantiation
+- Generic type parameters on `fn`/`struct`/`enum`/`impl` items.
+  Generic functions — and the methods of an `impl<T> Foo<T>` — are
+  monomorphized per concrete instantiation
   (`id$$i64`, `pair$$i64$$str`). `Ty::Struct` and `Ty::Enum` carry
   type args, so `Box<i64>`, `Option<T>`, `Result<T, E>` etc. all
   work end-to-end.
@@ -118,7 +119,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 125 integration tests.
+- 126 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -212,7 +213,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 243 JIT codegen tests + 40 AOT tests.
+- 246 JIT codegen tests + 40 AOT tests.
 
 ### AOT executables — done
 
@@ -253,11 +254,11 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Supertraits, associated types, generic impls
+1. Associated types and supertraits
 2. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
 3. `From`-based error conversion for `?`
-5. Self-hosted bootstrap (long-term)
+4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

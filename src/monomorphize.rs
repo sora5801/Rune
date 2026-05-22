@@ -76,24 +76,17 @@ impl MonoState {
         // vs concrete there. This shim runs the worklist after that.)
     }
 
-    fn finish(mut self, module: &mut HirModule) {
-        // Split items into generics and concrete.
-        let items = std::mem::take(&mut module.items);
-        for item in items {
-            let HirItem::Fn(f) = item;
-            if !f.generics.is_empty() {
-                self.generics.insert(f.sym, f);
-            } else {
-                self.concrete.push(f);
-            }
-        }
-        // Walk every concrete function's body for calls to generics.
+    /// Collect generic-call requests across every concrete function,
+    /// drain the worklist into specialized functions, then rewrite
+    /// call sites to point at them. Idempotent: `cache` skips any
+    /// `(sym, args)` already specialized, so a second invocation only
+    /// handles calls that surfaced since the first (e.g. `MethodCall`s
+    /// `resolve_method_calls` rewrote into `Call`s on generic methods).
+    fn specialize_pending(&mut self) {
         let concrete_clone = self.concrete.clone();
         for f in &concrete_clone {
             self.collect_requests_in_block(&f.body);
         }
-        // Drain the worklist, producing specialized fns and queueing
-        // any further requests their bodies surface.
         while let Some((sym, args)) = self.worklist.pop() {
             if self.cache.contains_key(&(sym, args.clone())) {
                 continue;
@@ -124,6 +117,22 @@ impl MonoState {
         for f in &mut self.concrete {
             rewrite_calls(&mut f.body, &self.cache, &self.generics);
         }
+    }
+
+    fn finish(mut self, module: &mut HirModule) {
+        // Split items into generics and concrete.
+        let items = std::mem::take(&mut module.items);
+        for item in items {
+            let HirItem::Fn(f) = item;
+            if !f.generics.is_empty() {
+                self.generics.insert(f.sym, f);
+            } else {
+                self.concrete.push(f);
+            }
+        }
+        // Specialize every generic call reachable from the concrete
+        // functions.
+        self.specialize_pending();
         // Resolve trait/inherent method calls whose receiver type is
         // now concrete (e.g., `x.fmt()` inside a `<T: Display>` body
         // that has been specialized for a concrete struct). Builtin
@@ -131,6 +140,10 @@ impl MonoState {
         for f in &mut self.concrete {
             resolve_method_calls(&mut f.body, &module.impl_methods);
         }
+        // A method call just rewritten into a `Call` on a *generic*
+        // method (a generic `impl`) needs another specialization
+        // pass. Idempotent — `cache` skips everything already done.
+        self.specialize_pending();
         // Final module is just the concrete (originals + specializations).
         module.items = self
             .concrete

@@ -61,6 +61,11 @@ pub struct UseDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
+    /// `<T>` parameters for a generic impl (`impl<T> Foo<T>`). Empty
+    /// for a non-generic impl. The parser also prepends these into
+    /// each method's own `generics`, so an impl method is just a
+    /// generic function.
+    pub generics: Vec<GenericParam>,
     /// `Some(trait_path)` for `impl Trait for Type`, `None` for an
     /// inherent `impl Type`.
     pub trait_path: Option<Path>,

@@ -1713,10 +1713,18 @@ impl<'r> Checker<'r> {
         let fn_ty = self.fn_signatures.get(&method_span)?;
         let Ty::Fn { params, ret } = fn_ty else { return None };
         // Drop the `self` parameter from the externally-visible sig.
-        let (_self_ty, rest) = params.split_first()?;
+        let (self_ty, rest) = params.split_first()?;
+        // For a generic-impl method (`impl<T> Box<T>`), bind the
+        // impl's type params from the concrete receiver: unify the
+        // declared `self` type (`Box<T>`) against the actual receiver
+        // (`Box<i64>`), then substitute through the rest of the sig.
+        // For a non-generic method this leaves the signature as-is.
+        let mut subst: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
+        unify_typevars(self_ty, recv, &mut subst);
         Some(MethodSig {
-            params: rest.to_vec(),
-            ret: (**ret).clone(),
+            params: rest.iter().map(|p| apply_subst(p, &subst)).collect(),
+            ret: apply_subst(ret, &subst),
         })
     }
 

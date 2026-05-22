@@ -1441,3 +1441,18 @@ fn dyn_field_non_implementor_rejected() {
         "shape",
     );
 }
+
+#[test]
+fn generic_impl_typechecks() {
+    check_ok(r#"
+        struct Box<T> { val: T }
+        impl<T> Box<T> {
+            fn get(self: Box<T>) -> T { self.val }
+            fn replace(self: Box<T>, v: T) -> Box<T> { Box { val: v } }
+        }
+        fn main() -> i64 {
+            let b: Box<i64> = Box { val: 5 };
+            b.get()
+        }
+    "#);
+}

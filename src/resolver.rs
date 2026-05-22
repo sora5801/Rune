@@ -385,7 +385,17 @@ impl Resolver {
     }
 
     fn declare_impl(&mut self, i: &ImplBlock) {
+        // The impl's `<T>` must be in scope while resolving the type
+        // path — `resolve_path` recurses into generic args, so
+        // `Foo<T>` would otherwise report `T` unresolved. This scope
+        // is transient; `resolve_fn` interns the real per-method
+        // symbols when it walks each method's (merged) generics.
+        self.enter_scope();
+        for g in &i.generics {
+            self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+        }
         self.resolve_path(&i.type_path);
+        self.exit_scope();
         let Some(&struct_sym) = self.path_to_sym.get(&i.type_path.span) else {
             return;
         };
@@ -873,8 +883,22 @@ impl Resolver {
     fn resolve_fn(&mut self, f: &FnDecl) {
         self.enter_scope();
         for g in &f.generics {
-            let id = self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
-            self.decl_to_sym.insert(g.name.span, id);
+            // A generic-impl method carries the impl's `<T>` (merged
+            // in by the parser). The first method of the impl to
+            // resolve interns that param; later methods reuse the
+            // same symbol — keyed by span — so every method agrees
+            // on which `SymbolId` the impl's `T` is.
+            let id = if let Some(&existing) = self.decl_to_sym.get(&g.name.span) {
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(g.name.name.clone(), existing);
+                existing
+            } else {
+                let id = self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+                self.decl_to_sym.insert(g.name.span, id);
+                id
+            };
             // Resolve each `T: Bound` to the bound trait's symbol.
             let mut bound_syms: Vec<SymbolId> = Vec::new();
             for b in &g.bounds {

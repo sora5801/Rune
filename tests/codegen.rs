@@ -4008,3 +4008,68 @@ fn dyn_enum_payload() {
     // 200 * 25 = 5000
     assert_eq!(run_main(src), 5000);
 }
+
+#[test]
+fn generic_impl_inherent_method() {
+    // `impl<T> Box<T>` — a method on a generic struct. The method is
+    // generic over the impl's `T`; `get` specializes once per
+    // instantiation (`Box<i64>` and `Box<bool>`).
+    let src = r#"
+        struct Box<T> { val: T }
+        impl<T> Box<T> {
+            fn get(self: Box<T>) -> T { self.val }
+        }
+        fn main() -> i64 {
+            let bi: Box<i64> = Box { val: 30 };
+            let bb: Box<bool> = Box { val: true };
+            let ok: bool = bb.get();
+            if ok { bi.get() + 12 } else { bi.get() }
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generic_impl_multiple_methods() {
+    // Several methods in one generic impl all share the impl's `T`,
+    // and a method may take extra (non-generic) parameters.
+    let src = r#"
+        struct Pair<T> { a: T, b: T }
+        impl<T> Pair<T> {
+            fn first(self: Pair<T>) -> T { self.a }
+            fn second(self: Pair<T>) -> T { self.b }
+            fn shifted(self: Pair<T>, by: i64) -> i64 { by }
+        }
+        fn main() -> i64 {
+            let p: Pair<i64> = Pair { a: 15, b: 20 };
+            p.first() + p.second() + p.shifted(7)
+        }
+    "#;
+    // 15 + 20 + 7 = 42
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generic_impl_trait_bound() {
+    // A trait `impl<T>` on a generic struct, called both directly
+    // and through a `<U: Tagged>` generic function — the latter
+    // forces a second specialization pass (the method call is
+    // rewritten to a `Call` only after `apply` is specialized).
+    let src = r#"
+        trait Tagged { fn tag(self: dyn Tagged) -> i64; }
+        struct Holder<T> { item: T, n: i64 }
+        impl<T> Tagged for Holder<T> {
+            fn tag(self: Holder<T>) -> i64 { self.n }
+        }
+        fn apply<U: Tagged>(x: U) -> i64 {
+            x.tag()
+        }
+        fn main() -> i64 {
+            let h: Holder<i64> = Holder { item: 1, n: 17 };
+            let hb: Holder<bool> = Holder { item: true, n: 25 };
+            h.tag() + apply(hb)
+        }
+    "#;
+    // 17 + 25 = 42
+    assert_eq!(run_main(src), 42);
+}

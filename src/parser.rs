@@ -354,12 +354,14 @@ impl Parser {
 
     fn parse_impl(&mut self, start: usize) -> ParseResult<ImplBlock> {
         self.expect(&TokenKind::Impl, "`impl`")?;
+        // `impl<T> ...` — type parameters of a generic impl.
+        let generics = self.parse_optional_generic_params()?;
         // `impl Path { ... }` is an inherent impl; `impl Path for Path
         // { ... }` is a trait impl. Parse the first path, then peek
         // for `for` to disambiguate.
-        let first = self.parse_path()?;
+        let first = self.parse_type_path()?;
         let (trait_path, type_path) = if self.eat_keyword("for") {
-            (Some(first), self.parse_path()?)
+            (Some(first), self.parse_type_path()?)
         } else {
             (None, first)
         };
@@ -369,16 +371,38 @@ impl Parser {
             // No visibility on impl methods (`pub` ignored if present today).
             let _ = self.eat(&TokenKind::Pub);
             let fn_start = self.peek_span().start;
-            let method = self.parse_fn(Visibility::Private, fn_start)?;
+            let mut method = self.parse_fn(Visibility::Private, fn_start)?;
+            // A generic impl's `<T>` are type parameters of every
+            // method — prepend them so each method resolves and
+            // monomorphizes as a plain generic function.
+            if !generics.is_empty() {
+                let mut merged = generics.clone();
+                merged.extend(method.generics);
+                method.generics = merged;
+            }
             methods.push(method);
         }
         let rb = self.expect(&TokenKind::RBrace, "`}`")?;
         Ok(ImplBlock {
+            generics,
             trait_path,
             type_path,
             methods,
             span: Span::new(start, rb.span.end),
         })
+    }
+
+    /// Parse a path that may carry generic args (`Foo<T>`) at an
+    /// `impl` header position. `parse_path` alone stops at the `<`.
+    fn parse_type_path(&mut self) -> ParseResult<Path> {
+        let span = self.peek_span();
+        match self.parse_type()? {
+            Type::Path(p) => Ok(p),
+            _ => Err(ParseError {
+                message: "expected a type name after `impl`".to_string(),
+                span,
+            }),
+        }
     }
 
     /// `for` is not a reserved keyword usable as an item connector
