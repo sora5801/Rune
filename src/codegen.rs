@@ -332,7 +332,7 @@ impl<M: Module> Codegen<M> {
         builder.switch_to_block(dealloc_blk);
         builder.seal_block(dealloc_blk);
         // Reuse the struct dealloc helper — it handles any
-        // `field_size+8` heap block. `enum_dealloc` is now redundant.
+        // `field_size+8` heap block.
         let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
         let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
         let size_const = builder.ins().iconst(types::I64, field_size as i64);
@@ -3167,8 +3167,6 @@ fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> 
         ("release", Ty::Vec(_)) => "release_vec",
         ("retain", Ty::Str) => "retain_str",
         ("release", Ty::Str) => "release_str",
-        ("retain", Ty::Enum(_, _)) => "retain_enum",
-        ("release", Ty::Enum(_, _)) => "release_enum",
         // Weak<T> uses the weak-counted helpers per inner type.
         // v0.x only supports Weak<Vec>.
         ("retain", Ty::Weak(inner)) if matches!(**inner, Ty::Vec(_)) => "weak_retain_vec",
@@ -3405,28 +3403,6 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64)); // ptr
             sig.params.push(AbiParam::new(types::I64)); // size
             ("rune_struct_dealloc", sig)
-        }
-        "enum_new" => {
-            let mut sig = module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // tag
-            sig.params.push(AbiParam::new(types::I64)); // payload
-            sig.returns.push(AbiParam::new(types::I64));
-            ("rune_enum_new", sig)
-        }
-        "retain_enum" => {
-            let mut sig = module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            ("rune_retain_enum", sig)
-        }
-        "release_enum" => {
-            let mut sig = module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            ("rune_release_enum", sig)
-        }
-        "enum_dealloc" => {
-            let mut sig = module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            ("rune_enum_dealloc", sig)
         }
         "panic_no_match" => {
             // () -> never; same trap-after-call shape as panic_bounds.
