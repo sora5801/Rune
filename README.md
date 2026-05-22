@@ -118,7 +118,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 119 integration tests.
+- 121 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -211,7 +211,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 211 JIT codegen tests + 34 AOT tests.
+- 235 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -251,8 +251,8 @@ error if reached.
 
 ## Roadmap
 
-1. ARC for array elements; `dyn` coercion at struct-literal fields
-   and enum-variant payloads
+1. Array-typed struct fields and enum payloads; `dyn` coercion at
+   struct-literal fields and enum-variant payloads
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`

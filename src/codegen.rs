@@ -908,6 +908,22 @@ impl<M: Module> Codegen<M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
+        // Arrays: release every element slot. The array is a stack
+        // slot with no refcount of its own.
+        if let Ty::Array(elem, n) = ty {
+            let elem_cty = cranelift_type(elem)?;
+            let esize = elem_size(elem)? as i32;
+            for i in 0..*n {
+                let ev = builder.ins().load(
+                    elem_cty,
+                    MemFlags::new(),
+                    value,
+                    (i as i32) * esize,
+                );
+                self.emit_release_field(builder, elem, ev)?;
+            }
+            return Ok(());
+        }
         // Nested struct or payload enum: call its synthesized release.
         if let Ty::Struct(sym, _) = ty {
             let func_id = *self
@@ -1524,6 +1540,23 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
+        // Arrays carry no refcount of their own — the array is a
+        // stack slot. Retaining or releasing one walks its element
+        // slots and applies the action to each.
+        if let Ty::Array(elem, n) = ty {
+            let elem_cty = cranelift_type(elem)?;
+            let esize = elem_size(elem)? as i32;
+            for i in 0..*n {
+                let ev = self.builder.ins().load(
+                    elem_cty,
+                    MemFlags::new(),
+                    value,
+                    (i as i32) * esize,
+                );
+                self.emit_arc_call(action, elem, ev)?;
+            }
+            return Ok(());
+        }
         // Struct values: inline retain (rc++) or call the synthesized
         // per-struct release function (which does rc--, walks ARC
         // fields, and dealloc's at zero).
@@ -2899,6 +2932,14 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             let v = self
                 .compile_expr(elem)?
                 .ok_or_else(|| CodegenError("array element produced no value".into()))?;
+            // A borrowed `Local` element gives the array slot a
+            // second owner — retain it; a fresh producer transfers
+            // its +1 straight into the slot.
+            if is_arc_type(elem_ty, self.struct_arc_fields, self.enum_has_payload) {
+                if let HirExprKind::Local(_) = &elem.kind {
+                    self.emit_arc_call("retain", elem_ty, v)?;
+                }
+            }
             let offset = (i as i32) * (esize as i32);
             self.builder.ins().stack_store(v, slot, offset);
         }
@@ -3515,6 +3556,9 @@ fn is_arc_type(
         // A trait object is a heap box reclaimed by ARC; its release
         // also drops the boxed concrete value.
         Ty::Dyn(_) => true,
+        // An array is ARC-managed iff its elements are — the array
+        // itself is a stack slot, but its element slots own refs.
+        Ty::Array(elem, _) => is_arc_type(elem, _struct_arc_fields, enum_has_payload),
         _ => false,
     }
 }

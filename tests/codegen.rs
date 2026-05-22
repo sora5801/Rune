@@ -3720,3 +3720,84 @@ fn match_scrutinee_returning_arm() {
     // 200 * 9 = 1800
     assert_eq!(run_main(src), 1800);
 }
+
+#[test]
+fn array_elements_released() {
+    // An array of fresh ARC elements — each `Vec` is reclaimed when
+    // the array local leaves scope. 200 iterations; a leak would
+    // grow unbounded, a double free would crash.
+    let src = r#"
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let arr = [make(1), make(2), make(3)];
+                sum = sum + arr[0].get(0) + arr[1].get(0) + arr[2].get(0);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (1 + 2 + 3) = 1200
+    assert_eq!(run_main(src), 1200);
+}
+
+#[test]
+fn array_of_borrowed_local() {
+    // `[shared, shared]` stores a borrowed `Local` in two element
+    // slots — each slot retains, so the array owns two refs. Scope
+    // exit releases both, then the binding releases the last: no
+    // double free.
+    let src = r#"
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let shared: Vec<i64> = make(7);
+                let arr = [shared, shared];
+                sum = sum + arr[0].get(0) + arr[1].get(0);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (7 + 7) = 2800
+    assert_eq!(run_main(src), 2800);
+}
+
+#[test]
+fn array_copy_retains() {
+    // `let b = a` copies the array pointer — both bindings alias the
+    // same slot. The copy retains every element so each binding's
+    // scope-exit release is balanced.
+    let src = r#"
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let a = [make(4), make(5)];
+                let b = a;
+                sum = sum + a[0].get(0) + b[1].get(0);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (4 + 5) = 1800
+    assert_eq!(run_main(src), 1800);
+}
