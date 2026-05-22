@@ -137,6 +137,7 @@ impl<'a> Lowerer<'a> {
             impl_methods: self.res.impl_methods.clone(),
             // Filled by the monomorphizer once every type is concrete.
             vec_arc_elem_tys: Vec::new(),
+            array_tys: Vec::new(),
             trait_methods: self
                 .res
                 .trait_methods
@@ -1020,10 +1021,10 @@ impl<'a> Lowerer<'a> {
 }
 
 /// Whether a struct field type takes part in the per-struct ARC
-/// release walk: a `Vec` / `Str`, an ARC-bearing struct, or a
-/// (possibly nested) array of such. Mirrors the conservative shape
-/// of `struct_arc_fields` — enums, `Weak`, and `dyn` fields are not
-/// walked yet.
+/// release walk: a `Vec` / `Str`, an ARC-bearing struct, or any
+/// array (a heap array is a refcounted block regardless of element
+/// type). Mirrors the conservative shape of `struct_arc_fields` —
+/// enums, `Weak`, and `dyn` fields are not walked yet.
 fn field_ty_is_arc(
     ty: &Ty,
     known: &std::collections::HashMap<SymbolId, Vec<(u32, Ty)>>,
@@ -1031,7 +1032,7 @@ fn field_ty_is_arc(
     match ty {
         Ty::Vec(_) | Ty::Str => true,
         Ty::Struct(inner, _) => known.contains_key(inner),
-        Ty::Array(elem, _) => field_ty_is_arc(elem, known),
+        Ty::Array(_, _) => true,
         _ => false,
     }
 }

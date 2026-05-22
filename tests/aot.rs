@@ -40,6 +40,7 @@ fn build_exe(src: &str, obj: &PathBuf, exe: &PathBuf) -> Result<(), String> {
         return Err(format!("type errors: {:?}", cr.errors));
     }
     let mut hir = Lowerer::new(&res, &cr).lower_module(&module);
+    monomorphize_module(&mut hir);
     let bytes = aot::build_object(&mut hir, "test", OptLevel::None)
         .map_err(|e| e.to_string())?;
     std::fs::write(obj, &bytes).map_err(|e| format!("write obj: {}", e))?;

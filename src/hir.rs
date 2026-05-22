@@ -44,6 +44,12 @@ pub struct HirModule {
     /// `Vec` whose elements are themselves ARC-managed reclaims them
     /// when its strong count hits zero.
     pub vec_arc_elem_tys: Vec<Ty>,
+    /// Distinct fixed-size array types (`[T; N]`) used anywhere in
+    /// the program. A heap array is a refcounted block, so codegen
+    /// synthesizes one release function (`__rune_release_array$<ty>`)
+    /// per distinct array type. Transitively closed — `[[S; 2]; 3]`
+    /// contributes both itself and `[S; 2]`.
+    pub array_tys: Vec<Ty>,
     /// Per-trait ordered method names. Codegen uses the order to lay
     /// out a trait object's method-pointer table and to find a
     /// method's slot for an indirect call.

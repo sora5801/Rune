@@ -76,6 +76,10 @@ pub struct Codegen<M: Module> {
     /// box decrements its rc and, at zero, drops the boxed data
     /// through the box's drop slot and frees the box.
     dyn_release_funcs: HashMap<SymbolId, FuncId>,
+    /// FuncId of the synthesized release function per distinct array
+    /// type. A heap array is a refcounted block; its release walks
+    /// the ARC elements and frees the block at zero.
+    array_release_funcs: HashMap<Ty, FuncId>,
 }
 
 /// Layout of a Rune string descriptor, mirrored on both sides of the
@@ -668,6 +672,19 @@ impl<M: Module> Codegen<M> {
                 .map_err(|e| CodegenError(e.to_string()))?;
             self.dyn_release_funcs.insert(trait_sym, id);
         }
+        // Pass 0 (cont.): declare a release function per distinct
+        // array type. A heap array is a refcounted block; its release
+        // walks the ARC elements and frees the block at zero.
+        for array_ty in &hir.array_tys {
+            let name = format!("__rune_release_array${}", mangle_ty_name(array_ty));
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.array_release_funcs.insert(array_ty.clone(), id);
+        }
         // Pass 1: declare all functions so forward calls resolve.
         for item in &hir.items {
             let HirItem::Fn(f) = item;
@@ -696,6 +713,9 @@ impl<M: Module> Codegen<M> {
         }
         for (&sym, &func_id) in &self.dyn_release_funcs.clone() {
             self.define_dyn_release(sym, func_id)?;
+        }
+        for (array_ty, &func_id) in &self.array_release_funcs.clone() {
+            self.define_array_release(array_ty, func_id)?;
         }
         Ok(())
     }
@@ -899,6 +919,74 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
+    /// Build a heap array's release function. Layout: `N` element
+    /// slots (`elem_size` bytes each) then the rc, at the 8-aligned
+    /// `array_field_size`. Decrement rc; at zero release each ARC
+    /// element, then `rune_struct_dealloc`.
+    fn define_array_release(
+        &mut self,
+        array_ty: &Ty,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let Ty::Array(elem, n) = array_ty else {
+            return Err(CodegenError("define_array_release: not an array".into()));
+        };
+        let esize = elem_size(elem)? as i32;
+        let field_size = array_field_size(elem, *n)?;
+        let elem_arc =
+            is_arc_type(elem, &self.struct_arc_fields, &self.enum_has_payload);
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let ptr = builder.block_params(entry)[0];
+        let rc = builder.ins().load(types::I64, MemFlags::new(), ptr, field_size);
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_rc = builder.ins().isub(rc, one);
+        builder.ins().store(MemFlags::new(), new_rc, ptr, field_size);
+        let zero = builder.ins().iconst(types::I64, 0);
+        let alive = builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThan, new_rc, zero);
+        let do_free = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(alive, done, &[], do_free, &[]);
+        builder.switch_to_block(do_free);
+        builder.seal_block(do_free);
+        if elem_arc {
+            let elem_cty = cranelift_type(elem)?;
+            for i in 0..*n {
+                let ev = builder.ins().load(
+                    elem_cty,
+                    MemFlags::new(),
+                    ptr,
+                    (i as i32) * esize,
+                );
+                self.emit_release_field(&mut builder, elem, ev)?;
+            }
+        }
+        let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
+        let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
+        let size_const = builder.ins().iconst(types::I64, field_size as i64);
+        builder.ins().call(dealloc_local, &[ptr, size_const]);
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
     /// Helper to emit a release call from inside a synthesized
     /// struct-release function. Mirrors `FnCodegen::emit_arc_call`
     /// but operates on a free-standing FunctionBuilder.
@@ -908,20 +996,14 @@ impl<M: Module> Codegen<M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
-        // Arrays: release every element slot. The array is a stack
-        // slot with no refcount of its own.
-        if let Ty::Array(elem, n) = ty {
-            let elem_cty = cranelift_type(elem)?;
-            let esize = elem_size(elem)? as i32;
-            for i in 0..*n {
-                let ev = builder.ins().load(
-                    elem_cty,
-                    MemFlags::new(),
-                    value,
-                    (i as i32) * esize,
-                );
-                self.emit_release_field(builder, elem, ev)?;
-            }
+        // A heap array — call its synthesized per-type release.
+        if let Ty::Array(..) = ty {
+            let func_id = *self
+                .array_release_funcs
+                .get(ty)
+                .ok_or_else(|| CodegenError("missing array release fn".into()))?;
+            let local = self.module.declare_func_in_func(func_id, builder.func);
+            builder.ins().call(local, &[value]);
             return Ok(());
         }
         // Nested struct or payload enum: call its synthesized release.
@@ -1192,6 +1274,7 @@ impl<M: Module> Codegen<M> {
             trait_methods: &self.trait_methods,
             impl_methods: &self.impl_methods,
             dyn_release_funcs: &self.dyn_release_funcs,
+            array_release_funcs: &self.array_release_funcs,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -1319,6 +1402,7 @@ impl Codegen<JITModule> {
             trait_methods: HashMap::new(),
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
+            array_release_funcs: HashMap::new(),
         })
     }
 
@@ -1377,6 +1461,7 @@ impl Codegen<ObjectModule> {
             trait_methods: HashMap::new(),
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
+            array_release_funcs: HashMap::new(),
         })
     }
 
@@ -1456,6 +1541,7 @@ struct FnCodegen<'a, M: Module> {
     trait_methods: &'a HashMap<SymbolId, Vec<String>>,
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
+    array_release_funcs: &'a HashMap<Ty, FuncId>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -1540,22 +1626,44 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         ty: &Ty,
         value: Value,
     ) -> Result<(), CodegenError> {
-        // Arrays carry no refcount of their own — the array is a
-        // stack slot. Retaining or releasing one walks its element
-        // slots and applies the action to each.
+        // A heap array is a refcounted block: retain bumps the rc at
+        // its trailing slot; release dispatches to the synthesized
+        // per-array-type release (walks ARC elements, frees at zero).
         if let Ty::Array(elem, n) = ty {
-            let elem_cty = cranelift_type(elem)?;
-            let esize = elem_size(elem)? as i32;
-            for i in 0..*n {
-                let ev = self.builder.ins().load(
-                    elem_cty,
-                    MemFlags::new(),
-                    value,
-                    (i as i32) * esize,
-                );
-                self.emit_arc_call(action, elem, ev)?;
+            match action {
+                "retain" => {
+                    let off = array_field_size(elem, *n)?;
+                    let rc = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        value,
+                        off,
+                    );
+                    let one = self.builder.ins().iconst(types::I64, 1);
+                    let new_rc = self.builder.ins().iadd(rc, one);
+                    self.builder.ins().store(
+                        MemFlags::new(),
+                        new_rc,
+                        value,
+                        off,
+                    );
+                    return Ok(());
+                }
+                "release" => {
+                    let func_id = *self
+                        .array_release_funcs
+                        .get(ty)
+                        .ok_or_else(|| {
+                            CodegenError("missing array release fn".into())
+                        })?;
+                    let local = self
+                        .module
+                        .declare_func_in_func(func_id, self.builder.func);
+                    self.builder.ins().call(local, &[value]);
+                    return Ok(());
+                }
+                _ => {}
             }
-            return Ok(());
         }
         // Struct values: inline retain (rc++) or call the synthesized
         // per-struct release function (which does rc--, walks ARC
@@ -2917,35 +3025,36 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         elems: &[HirExpr],
         elem_ty: &Ty,
     ) -> Result<Option<Value>, CodegenError> {
-        let elem_cty = cranelift_type(elem_ty)?;
-        let esize = elem_size(elem_ty)?;
         if elems.is_empty() {
             return Err(CodegenError("empty arrays not yet supported".into()));
         }
-        let total_size = (elems.len() as u32) * esize;
-        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            total_size,
-            3,
-        ));
+        let esize = elem_size(elem_ty)? as i32;
+        // A heap block: `N` element slots followed by a trailing rc,
+        // allocated and rc-initialized to 1 by `rune_struct_new`.
+        // Heap-allocated so the array can outlive the frame that
+        // built it — returned, or stored in a struct that escapes.
+        let field_size = array_field_size(elem_ty, elems.len())?;
+        let new_id = self.ensure_runtime_func("struct_new")?;
+        let new_local = self.module.declare_func_in_func(new_id, self.builder.func);
+        let size_v = self.builder.ins().iconst(types::I64, field_size as i64);
+        let inst = self.builder.ins().call(new_local, &[size_v]);
+        let base = self.builder.inst_results(inst)[0];
         for (i, elem) in elems.iter().enumerate() {
             let v = self
                 .compile_expr(elem)?
                 .ok_or_else(|| CodegenError("array element produced no value".into()))?;
-            // A borrowed `Local` element gives the array slot a
-            // second owner — retain it; a fresh producer transfers
-            // its +1 straight into the slot.
+            // A borrowed `Local` element gives the array a second
+            // owner — retain it; a fresh producer transfers its +1.
             if is_arc_type(elem_ty, self.struct_arc_fields, self.enum_has_payload) {
                 if let HirExprKind::Local(_) = &elem.kind {
                     self.emit_arc_call("retain", elem_ty, v)?;
                 }
             }
-            let offset = (i as i32) * (esize as i32);
-            self.builder.ins().stack_store(v, slot, offset);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), v, base, (i as i32) * esize);
         }
-        let _ = elem_cty; // suppress unused
-        let addr = self.builder.ins().stack_addr(types::I64, slot, 0);
-        Ok(Some(addr))
+        Ok(Some(base))
     }
 
     fn compile_index(
@@ -3556,9 +3665,8 @@ fn is_arc_type(
         // A trait object is a heap box reclaimed by ARC; its release
         // also drops the boxed concrete value.
         Ty::Dyn(_) => true,
-        // An array is ARC-managed iff its elements are — the array
-        // itself is a stack slot, but its element slots own refs.
-        Ty::Array(elem, _) => is_arc_type(elem, _struct_arc_fields, enum_has_payload),
+        // A heap array is a refcounted block in its own right.
+        Ty::Array(_, _) => true,
         _ => false,
     }
 }
@@ -3644,6 +3752,14 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
             )));
         }
     })
+}
+
+/// The element-area size of a heap array `[elem; n]`, rounded up to
+/// 8 bytes so the trailing rc word (stored at this offset by
+/// `rune_struct_new`) stays 8-aligned even for narrow elements.
+fn array_field_size(elem: &Ty, n: usize) -> Result<i32, CodegenError> {
+    let raw = (n as i32) * (elem_size(elem)? as i32);
+    Ok((raw + 7) & !7)
 }
 
 fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, CodegenError> {

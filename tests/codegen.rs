@@ -3877,3 +3877,74 @@ fn enum_array_payload_arc() {
     // 200 * (6 + 8) = 2800
     assert_eq!(run_main(src), 2800);
 }
+
+#[test]
+fn array_returned_by_value() {
+    // A heap array escapes the frame that built it — `make_ints`
+    // returns an array, and indexing it in the caller is sound.
+    // With stack arrays this read a dead frame.
+    let src = r#"
+        fn make_ints() -> [i64; 3] {
+            [11, 22, 33]
+        }
+        fn main() -> i64 {
+            let a = make_ints();
+            a[0] + a[1] + a[2]
+        }
+    "#;
+    assert_eq!(run_main(src), 66);
+}
+
+#[test]
+fn struct_with_array_escapes() {
+    // A struct field of array type, the struct returned by value.
+    // The array lives on the heap, so `p.xs` stays valid after
+    // `make_pair` returns. 200 iterations exercises alloc/free.
+    let src = r#"
+        struct Pair { xs: [i64; 2], tag: i64 }
+        fn make_pair(k: i64) -> Pair {
+            Pair { xs: [k, k + 1], tag: k * 10 }
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let p = make_pair(3);
+                sum = sum + p.xs[0] + p.xs[1] + p.tag;
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (3 + 4 + 30) = 7400
+    assert_eq!(run_main(src), 7400);
+}
+
+#[test]
+fn heap_array_of_vecs_returned() {
+    // An array of ARC elements returned by value. Releasing the
+    // heap array walks its elements, reclaiming each Vec — 200
+    // iterations, a leak or double free would show.
+    let src = r#"
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn make_vecs(k: i64) -> [Vec<i64>; 2] {
+            [make(k), make(k + 1)]
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let vs = make_vecs(8);
+                sum = sum + vs[0].get(0) + vs[1].get(0);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (8 + 9) = 3400
+    assert_eq!(run_main(src), 3400);
+}

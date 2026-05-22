@@ -140,6 +140,7 @@ impl MonoState {
         // Every type is concrete now — gather the ARC-managed `Vec<T>`
         // element types so codegen can synthesize per-element release.
         module.vec_arc_elem_tys = collect_vec_arc_elems(module);
+        module.array_tys = collect_array_tys(module);
     }
 
     fn collect_requests_in_block(&mut self, b: &HirBlock) {
@@ -912,6 +913,7 @@ fn mangle_ty(t: &Ty) -> String {
 fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -> bool {
     match t {
         Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_) => true,
+        Ty::Array(_, _) => true,
         Ty::Enum(s, _) => enum_has_payload.contains(s),
         _ => false,
     }
@@ -966,6 +968,53 @@ fn collect_vec_arc_elems(module: &HirModule) -> Vec<Ty> {
         for v in variants {
             for t in v {
                 scan_ty_for_vec_elems(t, ehp, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Record every fixed-size array type `[T; N]` reachable from `ty`,
+/// transitively (`[[S; 2]; 3]` records both itself and `[S; 2]`).
+fn scan_ty_for_arrays(ty: &Ty, out: &mut Vec<Ty>) {
+    match ty {
+        Ty::Array(elem, _) => {
+            if !out.contains(ty) {
+                out.push(ty.clone());
+            }
+            scan_ty_for_arrays(elem, out);
+        }
+        Ty::Vec(e) | Ty::Weak(e) => scan_ty_for_arrays(e, out),
+        Ty::Struct(_, args) | Ty::Enum(_, args) => {
+            for a in args {
+                scan_ty_for_arrays(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Distinct array types used anywhere in the (fully monomorphized)
+/// module — every heap array needs a synthesized release function.
+fn collect_array_tys(module: &HirModule) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new();
+    for item in &module.items {
+        let HirItem::Fn(f) = item;
+        for p in &f.params {
+            scan_ty_for_arrays(&p.ty, &mut out);
+        }
+        scan_ty_for_arrays(&f.ret_ty, &mut out);
+        walk_tys_block(&f.body, &mut |t| scan_ty_for_arrays(t, &mut out));
+    }
+    for fields in module.struct_arc_fields.values() {
+        for (_, t) in fields {
+            scan_ty_for_arrays(t, &mut out);
+        }
+    }
+    for variants in module.enum_payload_tys.values() {
+        for v in variants {
+            for t in v {
+                scan_ty_for_arrays(t, &mut out);
             }
         }
     }

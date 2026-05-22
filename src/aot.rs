@@ -202,6 +202,19 @@ void rune_panic_no_match(void) {
     fprintf(stderr, "rune: no match arm matched\n");
     exit(1);
 }
+
+// Heap block of `size` field bytes + an 8-byte trailing rc (set to
+// 1). Backs structs, payload enums, dyn boxes, and heap arrays.
+void* rune_struct_new(int64_t size) {
+    char* p = (char*)malloc((size_t)size + 8);
+    *(int64_t*)(p + size) = 1;
+    return p;
+}
+
+void rune_struct_dealloc(void* p, int64_t size) {
+    (void)size;
+    if (p) free(p);
+}
 "#;
 
 /// Compile a Rune module to a native object file (returned as bytes).

@@ -135,9 +135,10 @@ rune: linked with clang -> primes.exe
     assignment.
   - Rune-to-Rune function calls (forward references, recursion, mutual
     recursion), early `return`.
-  - **Array literals** stack-allocated via Cranelift `StackSlot`,
-    **indexing** via address arithmetic + `load`, **`for x in arr`**
-    desugared to a counter-based while loop.
+  - **Array literals** heap-allocated as refcounted blocks (escape-
+    safe — returnable, struct-storable), **indexing** via address
+    arithmetic + `load`, **`for x in arr`** desugared to a
+    counter-based while loop.
   - **String literals** as a 16-byte (ptr, len) descriptor — bytes in
     the object's data section, descriptor on the function's stack.
     **`==`/`!=`** for strings via runtime `rune_str_eq`.
@@ -211,7 +212,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 238 JIT codegen tests + 34 AOT tests.
+- 241 JIT codegen tests + 34 AOT tests.
 
 ### AOT executables — done
 
@@ -228,9 +229,8 @@ rune: linked with clang -> primes.exe
 - Output: `<input-stem>.exe` on Windows, `<input-stem>` elsewhere.
   `-o <path>` overrides.
 
-**Not yet codegen'd:** returning/passing arrays across function
-boundaries. Most emit `Unsupported(msg)` at lowering with a clear
-error if reached.
+**Not yet codegen'd:** any construct without a backend lowering
+emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ### Standard library — done
 
@@ -251,7 +251,7 @@ error if reached.
 
 ## Roadmap
 
-1. Heap-allocated arrays (escape-safe); `dyn` coercion at
+1. Complete the AOT runtime (enum ARC functions); `dyn` coercion at
    struct-literal fields and enum-variant payloads
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
