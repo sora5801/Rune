@@ -198,6 +198,17 @@ struct rune_vec* rune_weak_upgrade_vec(struct rune_vec* v) {
     return v;
 }
 
+struct rune_vec* rune_weak_upgrade_or_vec(struct rune_vec* w, struct rune_vec* def) {
+    if (w != NULL && w->rc > 0) {
+        w->rc += 1;
+        return w;
+    }
+    // The weak target is dead — return the default, retained so the
+    // caller owns its own strong reference.
+    rune_retain_vec(def);
+    return def;
+}
+
 void rune_panic_no_match(void) {
     fprintf(stderr, "rune: no match arm matched\n");
     exit(1);

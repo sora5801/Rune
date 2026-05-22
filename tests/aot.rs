@@ -560,3 +560,96 @@ fn string_byte_index_out_of_bounds_aborts() {
 // reliable way to construct an AOT test that hits the runtime
 // backstop. The compile-time error cases are exercised in
 // `tests/typecheck.rs::match_*`.
+
+// ---- heap-ARC types end to end through the linker ----
+//
+// These exercise the heap allocators and synthesized release
+// functions in AOT — the coverage whose absence let the runtime
+// drift incomplete.
+
+#[test]
+fn aot_payload_enum() {
+    let src = r#"
+        enum Opt { Some(i64), None }
+        fn main() -> i64 {
+            let o: Opt = Opt::Some(42);
+            match o {
+                Opt::Some(x) => x,
+                Opt::None => 0,
+            }
+        }
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn aot_vec_push_get() {
+    let src = r#"
+        fn main() -> i64 {
+            let mut v: Vec<i64> = vec_new();
+            v.push(10);
+            v.push(20);
+            v.push(30);
+            v.get(0) + v.get(1) + v.get(2) + v.len()
+        }
+    "#;
+    assert_eq!(build_and_run(src), 63);
+}
+
+#[test]
+fn aot_struct_fields() {
+    let src = r#"
+        struct Point { x: i64, y: i64 }
+        fn main() -> i64 {
+            let p: Point = Point { x: 15, y: 27 };
+            p.x + p.y
+        }
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn aot_dyn_dispatch() {
+    let src = r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Sq { s: i64 }
+        impl Shape for Sq {
+            fn area(self: Sq) -> i64 { self.s * self.s }
+        }
+        fn describe(sh: dyn Shape) -> i64 { sh.area() }
+        fn main() -> i64 {
+            describe(Sq { s: 8 })
+        }
+    "#;
+    assert_eq!(build_and_run(src), 64);
+}
+
+#[test]
+fn aot_weak_upgrade_or() {
+    // `upgrade_or` lowers to `rune_weak_upgrade_or_vec` — the one
+    // runtime function the AOT C runtime had been missing.
+    let src = r#"
+        fn main() -> i64 {
+            let mut v: Vec<i64> = vec_new();
+            v.push(7);
+            let w: Weak<Vec<i64>> = weak(v);
+            let mut d: Vec<i64> = vec_new();
+            d.push(99);
+            let u: Vec<i64> = upgrade_or(w, d);
+            u.get(0)
+        }
+    "#;
+    assert_eq!(build_and_run(src), 7);
+}
+
+#[test]
+fn aot_generic_identity() {
+    // Exercises monomorphization in the AOT pipeline.
+    let src = r#"
+        fn id<T>(x: T) -> T { x }
+        fn main() -> i64 {
+            id(40) + id(2)
+        }
+    "#;
+    assert_eq!(build_and_run(src), 42);
+}

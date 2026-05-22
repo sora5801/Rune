@@ -212,7 +212,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 241 JIT codegen tests + 34 AOT tests.
+- 241 JIT codegen tests + 40 AOT tests.
 
 ### AOT executables — done
 
@@ -251,8 +251,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Complete the AOT runtime (enum ARC functions); `dyn` coercion at
-   struct-literal fields and enum-variant payloads
+1. `dyn` coercion at struct-literal fields and enum-variant
+   payloads; a single-source runtime (no C/Rust transcription)
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
