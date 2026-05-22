@@ -82,531 +82,38 @@ pub struct Codegen<M: Module> {
     array_release_funcs: HashMap<Ty, FuncId>,
 }
 
-/// Layout of a Rune string descriptor, mirrored on both sides of the
-/// codegen/runtime boundary. 24 bytes, 8-byte aligned.
-///
-/// `rc` is the ARC refcount. Stack-allocated descriptors (string
-/// literals) use the sentinel value `-1` to mean "never reclaim";
-/// heap-allocated descriptors start at `1` and dealloc on `0`.
-#[repr(C)]
-struct RuneStr {
-    ptr: *const u8,
-    len: i64,
-    rc: i64,
-}
-
-/// Host implementation of `print(i64)` for JIT mode.
-extern "C" fn rune_runtime_print_i64(x: i64) {
-    println!("{}", x);
-}
-
-/// Vec descriptor: `{ ptr, len, cap, rc, weak_count }` — 40 bytes.
-/// Strong refs collectively count as one weak. When the strong rc
-/// drops to 0 the element array is dealloc'd; the descriptor itself
-/// sticks around until the last `Weak<Vec>` releases (weak_count
-/// reaches 0).
-#[repr(C)]
-struct RuneVec {
-    ptr: *mut i64,
-    len: i64,
-    cap: i64,
-    rc: i64,
-    weak_count: i64,
-}
-
-extern "C" fn rune_runtime_vec_new() -> *mut RuneVec {
-    use std::alloc::{alloc, Layout};
-    unsafe {
-        let v = alloc(Layout::new::<RuneVec>()) as *mut RuneVec;
-        (*v).ptr = std::ptr::null_mut();
-        (*v).len = 0;
-        (*v).cap = 0;
-        (*v).rc = 1;
-        (*v).weak_count = 1;
-        v
-    }
-}
-
-extern "C" fn rune_runtime_vec_push(v: *mut RuneVec, x: i64) {
-    use std::alloc::{alloc, realloc, Layout};
-    unsafe {
-        let v = &mut *v;
-        if v.len == v.cap {
-            let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 };
-            let new_size = (new_cap as usize) * std::mem::size_of::<i64>();
-            let new_layout = Layout::from_size_align(new_size, 8).unwrap();
-            let new_ptr = if v.cap == 0 {
-                alloc(new_layout) as *mut i64
-            } else {
-                let old_size = (v.cap as usize) * std::mem::size_of::<i64>();
-                let old_layout = Layout::from_size_align(old_size, 8).unwrap();
-                realloc(v.ptr as *mut u8, old_layout, new_size) as *mut i64
-            };
-            v.ptr = new_ptr;
-            v.cap = new_cap;
-        }
-        *v.ptr.add(v.len as usize) = x;
-        v.len += 1;
-    }
-}
-
-extern "C" fn rune_runtime_vec_get(v: *const RuneVec, i: i64) -> i64 {
-    unsafe {
-        let v = &*v;
-        if i < 0 || i >= v.len {
-            return 0; // no panic — clamp-ish for v0.x
-        }
-        *v.ptr.add(i as usize)
-    }
-}
-
-extern "C" fn rune_runtime_vec_len(v: *const RuneVec) -> i64 {
-    unsafe { (*v).len }
-}
-
-/// Host implementation of `print_str(str)` for JIT mode.
-extern "C" fn rune_runtime_print_str(s: *const RuneStr) {
-    unsafe {
-        let s = &*s;
-        if s.len == 0 {
-            println!();
-            return;
-        }
-        // Rune source literals are UTF-8 by construction.
-        let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
-        let text = std::str::from_utf8_unchecked(slice);
-        println!("{}", text);
-    }
-}
-
-/// Host implementation of string equality for JIT mode. Returns 1 if equal,
-/// 0 otherwise.
-extern "C" fn rune_runtime_str_eq(a: *const RuneStr, b: *const RuneStr) -> i8 {
-    unsafe {
-        let a = &*a;
-        let b = &*b;
-        if a.len != b.len {
-            return 0;
-        }
-        // Empty strings: lengths match, contents trivially equal. Skip
-        // from_raw_parts (its safety precondition rejects null even for
-        // zero-length slices).
-        if a.len == 0 {
-            return 1;
-        }
-        let aa = std::slice::from_raw_parts(a.ptr, a.len as usize);
-        let bb = std::slice::from_raw_parts(b.ptr, b.len as usize);
-        if aa == bb { 1 } else { 0 }
-    }
-}
-
-unsafe fn rune_str_bytes<'a>(s: *const RuneStr) -> &'a [u8] {
-    if s.is_null() { return &[]; }
-    unsafe {
-        let s = &*s;
-        if s.len <= 0 { return &[]; }
-        std::slice::from_raw_parts(s.ptr, s.len as usize)
-    }
-}
-
-extern "C" fn rune_runtime_str_starts_with(s: *const RuneStr, prefix: *const RuneStr) -> i8 {
-    unsafe {
-        let s = rune_str_bytes(s);
-        let prefix = rune_str_bytes(prefix);
-        if s.starts_with(prefix) { 1 } else { 0 }
-    }
-}
-
-extern "C" fn rune_runtime_str_ends_with(s: *const RuneStr, suffix: *const RuneStr) -> i8 {
-    unsafe {
-        let s = rune_str_bytes(s);
-        let suffix = rune_str_bytes(suffix);
-        if s.ends_with(suffix) { 1 } else { 0 }
-    }
-}
-
-extern "C" fn rune_runtime_str_contains(s: *const RuneStr, needle: *const RuneStr) -> i8 {
-    unsafe {
-        let s = rune_str_bytes(s);
-        let needle = rune_str_bytes(needle);
-        if needle.is_empty() {
-            return 1; // matches Rust's `&str::contains` convention
-        }
-        if needle.len() > s.len() { return 0; }
-        for window in s.windows(needle.len()) {
-            if window == needle { return 1; }
-        }
-        0
-    }
-}
-
-/// Host implementation of `s[a..b]` for JIT mode. Clamps out-of-range
-/// indices instead of panicking (consistent with current "no bounds
-/// checks" stance). Heap-allocates; never freed.
-extern "C" fn rune_runtime_str_slice(
-    s: *const RuneStr,
-    start: i64,
-    end: i64,
-) -> *mut RuneStr {
-    use std::alloc::{alloc, Layout};
-    unsafe {
-        let s = &*s;
-        let start = start.max(0).min(s.len);
-        let end = end.max(start).min(s.len);
-        let new_len = end - start;
-        let desc = alloc(Layout::new::<RuneStr>()) as *mut RuneStr;
-        (*desc).rc = 1;
-        if new_len == 0 {
-            (*desc).ptr = std::ptr::null();
-            (*desc).len = 0;
-            return desc;
-        }
-        let bytes = alloc(Layout::from_size_align(new_len as usize, 1).unwrap());
-        std::ptr::copy_nonoverlapping(
-            s.ptr.add(start as usize),
-            bytes,
-            new_len as usize,
-        );
-        (*desc).ptr = bytes;
-        (*desc).len = new_len;
-        desc
-    }
-}
-
-/// Aborts the running program with an index-out-of-range message.
-/// Used for runtime bounds checks on `arr[i]` and `s[i]`.
-extern "C" fn rune_runtime_panic_bounds(idx: i64, len: i64) -> ! {
-    eprintln!("rune: index {} out of range for length {}", idx, len);
-    std::process::exit(1);
-}
-
-/// Called when a `match` expression's sequential pattern check falls
-/// off the end without any arm matching. v0.x doesn't enforce
-/// exhaustiveness statically, so this is the runtime backstop.
-extern "C" fn rune_runtime_panic_no_match() -> ! {
-    eprintln!("rune: no match arm matched");
-    std::process::exit(1);
-}
-
-/// Increment the refcount of a heap-allocated string descriptor.
-/// No-op on the rc=-1 sentinel used by literal strings (stack
-/// descriptors). Null is also a no-op for defensive safety.
-extern "C" fn rune_runtime_retain_str(s: *mut RuneStr) {
-    unsafe {
-        if s.is_null() {
-            return;
-        }
-        let rc = (*s).rc;
-        if rc == -1 {
-            return;
-        }
-        (*s).rc = rc + 1;
-    }
-}
-
-/// Decrement the refcount of a string descriptor. Deallocates when
-/// the count hits zero. No-op on the sentinel.
-extern "C" fn rune_runtime_release_str(s: *mut RuneStr) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if s.is_null() {
-            return;
-        }
-        let rc = (*s).rc;
-        if rc == -1 {
-            return;
-        }
-        let new_rc = rc - 1;
-        (*s).rc = new_rc;
-        if new_rc > 0 {
-            return;
-        }
-        let s_ref = &*s;
-        if s_ref.len > 0 && !s_ref.ptr.is_null() {
-            // Bytes were allocated with alignment 1 in str_concat / str_slice.
-            let bytes_layout =
-                Layout::from_size_align(s_ref.len as usize, 1).unwrap();
-            dealloc(s_ref.ptr as *mut u8, bytes_layout);
-        }
-        let desc_layout = Layout::new::<RuneStr>();
-        dealloc(s as *mut u8, desc_layout);
-    }
-}
-
-/// Layout of a payload-bearing enum value. 24 bytes, 8-byte aligned.
-/// Used for any enum that has at least one payload variant; unit
-/// variants of such enums still allocate this layout with payload=0.
-#[repr(C)]
-struct RuneEnum {
-    tag: i64,
-    payload: i64,
-    rc: i64,
-}
-
-/// Heap-allocate a Rune struct descriptor of `size` bytes + 8 bytes
-/// for the ARC refcount stored at offset `size`. Field bytes are
-/// uninitialized — the caller (`compile_struct_lit`) stores each
-/// field into its offset. The rc field starts at 1; release dec's it
-/// and `rune_struct_dealloc` reclaims memory when rc hits zero.
-extern "C" fn rune_runtime_struct_new(size: i64) -> *mut u8 {
-    use std::alloc::{alloc, Layout};
-    unsafe {
-        let total = size as usize + 8;
-        let layout = Layout::from_size_align(total, 8).unwrap();
-        let p = alloc(layout);
-        // Initialize rc=1 at offset `size`.
-        let rc_ptr = p.add(size as usize) as *mut i64;
-        *rc_ptr = 1;
-        p
-    }
-}
-
-/// Free a Rune struct descriptor previously allocated by
-/// `rune_struct_new`. `size` is the field area in bytes; the actual
-/// allocation is `size + 8` (rc at the end).
-extern "C" fn rune_runtime_struct_dealloc(p: *mut u8, size: i64) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if p.is_null() {
-            return;
-        }
-        let total = size as usize + 8;
-        let layout = Layout::from_size_align(total, 8).unwrap();
-        dealloc(p, layout);
-    }
-}
-
-extern "C" fn rune_runtime_enum_new(tag: i64, payload: i64) -> *mut RuneEnum {
-    use std::alloc::{alloc, Layout};
-    unsafe {
-        let p = alloc(Layout::new::<RuneEnum>()) as *mut RuneEnum;
-        (*p).tag = tag;
-        (*p).payload = payload;
-        (*p).rc = 1;
-        p
-    }
-}
-
-/// Free a payload-bearing enum descriptor previously allocated by
-/// `rune_enum_new`. Caller is responsible for releasing the payload
-/// first — this helper only frees the descriptor itself. Used by the
-/// per-enum synthesized release function.
-extern "C" fn rune_runtime_enum_dealloc(p: *mut RuneEnum) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if p.is_null() {
-            return;
-        }
-        dealloc(p as *mut u8, Layout::new::<RuneEnum>());
-    }
-}
-
-extern "C" fn rune_runtime_retain_enum(p: *mut RuneEnum) {
-    unsafe {
-        if p.is_null() {
-            return;
-        }
-        let rc = (*p).rc;
-        if rc == -1 {
-            return;
-        }
-        (*p).rc = rc + 1;
-    }
-}
-
-extern "C" fn rune_runtime_release_enum(p: *mut RuneEnum) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if p.is_null() {
-            return;
-        }
-        let rc = (*p).rc;
-        if rc == -1 {
-            return;
-        }
-        let new_rc = rc - 1;
-        (*p).rc = new_rc;
-        if new_rc > 0 {
-            return;
-        }
-        // Payload is NOT released here. v0.x: enum-payload ARC for
-        // ARC-managed payload types (Vec, Str, ...) is deferred — if
-        // you stuff a Vec into an Ok and the Ok drops, the Vec leaks
-        // unless the payload is destructured out first.
-        dealloc(p as *mut u8, Layout::new::<RuneEnum>());
-    }
-}
-
-extern "C" fn rune_runtime_retain_vec(v: *mut RuneVec) {
-    unsafe {
-        if v.is_null() {
-            return;
-        }
-        let rc = (*v).rc;
-        if rc == -1 {
-            return;
-        }
-        (*v).rc = rc + 1;
-    }
-}
-
-extern "C" fn rune_runtime_release_vec(v: *mut RuneVec) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if v.is_null() {
-            return;
-        }
-        let rc = (*v).rc;
-        if rc == -1 {
-            return;
-        }
-        let new_rc = rc - 1;
-        (*v).rc = new_rc;
-        if new_rc > 0 {
-            return;
-        }
-        // Strong count hit zero: dealloc the element array. The
-        // descriptor itself stays alive until the last Weak releases
-        // (via release_weak_vec below, called once now to drop the
-        // "all strong refs = 1 weak" share).
-        let v_ref = &*v;
-        if v_ref.cap > 0 && !v_ref.ptr.is_null() {
-            let elems_layout = Layout::array::<i64>(v_ref.cap as usize).unwrap();
-            dealloc(v_ref.ptr as *mut u8, elems_layout);
-            // Mark elements as freed so accidental accesses fail
-            // loudly and weak upgrade(after-zero) returns null.
-            (*v).ptr = std::ptr::null_mut();
-            (*v).cap = 0;
-            (*v).len = 0;
-        }
-        rune_runtime_weak_release_vec(v);
-    }
-}
-
-/// Create a Weak<Vec> pointing at the same descriptor. Bumps the
-/// weak count. Returns the same pointer — at runtime a Weak and a
-/// strong reference are the same i64 value; they differ only in
-/// which retain/release helpers are called on them.
-extern "C" fn rune_runtime_weak_downgrade_vec(v: *mut RuneVec) -> *mut RuneVec {
-    unsafe {
-        if v.is_null() {
-            return v;
-        }
-        let wc = (*v).weak_count;
-        if wc == -1 {
-            return v;
-        }
-        (*v).weak_count = wc + 1;
-        v
-    }
-}
-
-/// Retain a Weak<Vec> (used when copying a Weak local). Symmetric
-/// with weak_release. Doesn't touch the strong rc.
-extern "C" fn rune_runtime_weak_retain_vec(v: *mut RuneVec) {
-    unsafe {
-        if v.is_null() {
-            return;
-        }
-        let wc = (*v).weak_count;
-        if wc == -1 {
-            return;
-        }
-        (*v).weak_count = wc + 1;
-    }
-}
-
-/// Release a Weak<Vec>. Drops the weak count; when it reaches 0
-/// (and the strong count has already reached 0), free the descriptor
-/// itself.
-extern "C" fn rune_runtime_weak_release_vec(v: *mut RuneVec) {
-    use std::alloc::{dealloc, Layout};
-    unsafe {
-        if v.is_null() {
-            return;
-        }
-        let wc = (*v).weak_count;
-        if wc == -1 {
-            return;
-        }
-        let new_wc = wc - 1;
-        (*v).weak_count = new_wc;
-        if new_wc > 0 {
-            return;
-        }
-        let desc_layout = Layout::new::<RuneVec>();
-        dealloc(v as *mut u8, desc_layout);
-    }
-}
-
-/// Try to promote a Weak<Vec> back to a strong reference. Returns
-/// the same pointer with strong rc++ if the value is still alive
-/// (rc > 0); returns null otherwise. The caller uses the result to
-/// build an Option<Vec> at the language level.
-extern "C" fn rune_runtime_weak_upgrade_vec(v: *mut RuneVec) -> *mut RuneVec {
-    unsafe {
-        if v.is_null() {
-            return std::ptr::null_mut();
-        }
-        let rc = (*v).rc;
-        if rc <= 0 {
-            return std::ptr::null_mut();
-        }
-        (*v).rc = rc + 1;
-        v
-    }
-}
-
-/// `upgrade_or(w, default) -> Vec`. Always returns a freshly-
-/// retained pointer (+1 to the caller). Args are borrowed under
-/// Rune's calling convention; this helper leaves their refcounts
-/// unchanged from the caller's view.
-extern "C" fn rune_runtime_weak_upgrade_or_vec(
-    w: *mut RuneVec,
-    default_v: *mut RuneVec,
-) -> *mut RuneVec {
-    unsafe {
-        if !w.is_null() && (*w).rc > 0 {
-            (*w).rc += 1;
-            return w;
-        }
-        // Dead — retain and return the default. The caller's
-        // `default` local still owns its original +1; the returned
-        // value gets its own +1 so they're both safely released.
-        rune_runtime_retain_vec(default_v);
-        default_v
-    }
-}
-
-/// Host implementation of string concatenation for JIT mode. Allocates a
-/// fresh descriptor + fresh byte buffer on the heap, never freed (leak by
-/// design — Rune v0.x is process-lifetime).
-extern "C" fn rune_runtime_str_concat(a: *const RuneStr, b: *const RuneStr) -> *mut RuneStr {
-    use std::alloc::{alloc, Layout};
-    unsafe {
-        let a = &*a;
-        let b = &*b;
-        let total_len = a.len + b.len;
-        let desc_layout = Layout::new::<RuneStr>();
-        let desc = alloc(desc_layout) as *mut RuneStr;
-        (*desc).rc = 1;
-        if total_len == 0 {
-            (*desc).ptr = std::ptr::null();
-            (*desc).len = 0;
-            return desc;
-        }
-        let bytes_layout = Layout::from_size_align(total_len as usize, 1).unwrap();
-        let bytes = alloc(bytes_layout);
-        if a.len > 0 {
-            std::ptr::copy_nonoverlapping(a.ptr, bytes, a.len as usize);
-        }
-        if b.len > 0 {
-            std::ptr::copy_nonoverlapping(b.ptr, bytes.add(a.len as usize), b.len as usize);
-        }
-        (*desc).ptr = bytes as *const u8;
-        (*desc).len = total_len;
-        desc
-    }
+// The Rune runtime lives in `runtime.c`, the single source of
+// truth, compiled into this binary by `build.rs`. These
+// declarations only let the JIT register each symbol's address —
+// the JIT-compiled program is what actually calls them, and the
+// AOT path links `runtime.c` directly. Pointers are declared as
+// `*mut u8` since Rust never dereferences them here.
+unsafe extern "C" {
+    fn rune_print_i64(x: i64);
+    fn rune_print_str(s: *const u8);
+    fn rune_str_eq(a: *const u8, b: *const u8) -> i8;
+    fn rune_str_concat(a: *const u8, b: *const u8) -> *mut u8;
+    fn rune_str_slice(s: *const u8, start: i64, end: i64) -> *mut u8;
+    fn rune_str_starts_with(s: *const u8, prefix: *const u8) -> i8;
+    fn rune_str_ends_with(s: *const u8, suffix: *const u8) -> i8;
+    fn rune_str_contains(s: *const u8, needle: *const u8) -> i8;
+    fn rune_vec_new() -> *mut u8;
+    fn rune_vec_push(v: *mut u8, x: i64);
+    fn rune_vec_get(v: *const u8, i: i64) -> i64;
+    fn rune_vec_len(v: *const u8) -> i64;
+    fn rune_panic_bounds(idx: i64, len: i64);
+    fn rune_panic_no_match();
+    fn rune_retain_str(s: *mut u8);
+    fn rune_release_str(s: *mut u8);
+    fn rune_retain_vec(v: *mut u8);
+    fn rune_release_vec(v: *mut u8);
+    fn rune_weak_downgrade_vec(v: *mut u8) -> *mut u8;
+    fn rune_weak_retain_vec(v: *mut u8);
+    fn rune_weak_release_vec(v: *mut u8);
+    fn rune_weak_upgrade_vec(v: *mut u8) -> *mut u8;
+    fn rune_weak_upgrade_or_vec(w: *mut u8, def: *mut u8) -> *mut u8;
+    fn rune_struct_new(size: i64) -> *mut u8;
+    fn rune_struct_dealloc(p: *mut u8, size: i64);
 }
 
 // ---- generic methods: compile any module backend ----
@@ -1341,50 +848,33 @@ impl Codegen<JITModule> {
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| CodegenError(e.to_string()))?;
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        builder.symbol("rune_print_i64", rune_runtime_print_i64 as *const u8);
-        builder.symbol("rune_print_str", rune_runtime_print_str as *const u8);
-        builder.symbol("rune_str_eq", rune_runtime_str_eq as *const u8);
-        builder.symbol("rune_str_concat", rune_runtime_str_concat as *const u8);
-        builder.symbol("rune_str_slice", rune_runtime_str_slice as *const u8);
-        builder.symbol("rune_str_starts_with", rune_runtime_str_starts_with as *const u8);
-        builder.symbol("rune_str_ends_with", rune_runtime_str_ends_with as *const u8);
-        builder.symbol("rune_str_contains", rune_runtime_str_contains as *const u8);
-        builder.symbol("rune_vec_new", rune_runtime_vec_new as *const u8);
-        builder.symbol("rune_vec_push", rune_runtime_vec_push as *const u8);
-        builder.symbol("rune_vec_get", rune_runtime_vec_get as *const u8);
-        builder.symbol("rune_vec_len", rune_runtime_vec_len as *const u8);
-        builder.symbol("rune_panic_bounds", rune_runtime_panic_bounds as *const u8);
-        builder.symbol("rune_panic_no_match", rune_runtime_panic_no_match as *const u8);
-        builder.symbol("rune_retain_str", rune_runtime_retain_str as *const u8);
-        builder.symbol("rune_release_str", rune_runtime_release_str as *const u8);
-        builder.symbol("rune_retain_vec", rune_runtime_retain_vec as *const u8);
-        builder.symbol("rune_release_vec", rune_runtime_release_vec as *const u8);
-        builder.symbol(
-            "rune_weak_downgrade_vec",
-            rune_runtime_weak_downgrade_vec as *const u8,
-        );
-        builder.symbol(
-            "rune_weak_retain_vec",
-            rune_runtime_weak_retain_vec as *const u8,
-        );
-        builder.symbol(
-            "rune_weak_release_vec",
-            rune_runtime_weak_release_vec as *const u8,
-        );
-        builder.symbol(
-            "rune_weak_upgrade_vec",
-            rune_runtime_weak_upgrade_vec as *const u8,
-        );
-        builder.symbol(
-            "rune_weak_upgrade_or_vec",
-            rune_runtime_weak_upgrade_or_vec as *const u8,
-        );
-        builder.symbol("rune_struct_new", rune_runtime_struct_new as *const u8);
-        builder.symbol("rune_struct_dealloc", rune_runtime_struct_dealloc as *const u8);
-        builder.symbol("rune_enum_new", rune_runtime_enum_new as *const u8);
-        builder.symbol("rune_enum_dealloc", rune_runtime_enum_dealloc as *const u8);
-        builder.symbol("rune_retain_enum", rune_runtime_retain_enum as *const u8);
-        builder.symbol("rune_release_enum", rune_runtime_release_enum as *const u8);
+        // Point each runtime symbol at the `runtime.c` function of
+        // the same name, linked into this binary by `build.rs`.
+        builder.symbol("rune_print_i64", rune_print_i64 as *const u8);
+        builder.symbol("rune_print_str", rune_print_str as *const u8);
+        builder.symbol("rune_str_eq", rune_str_eq as *const u8);
+        builder.symbol("rune_str_concat", rune_str_concat as *const u8);
+        builder.symbol("rune_str_slice", rune_str_slice as *const u8);
+        builder.symbol("rune_str_starts_with", rune_str_starts_with as *const u8);
+        builder.symbol("rune_str_ends_with", rune_str_ends_with as *const u8);
+        builder.symbol("rune_str_contains", rune_str_contains as *const u8);
+        builder.symbol("rune_vec_new", rune_vec_new as *const u8);
+        builder.symbol("rune_vec_push", rune_vec_push as *const u8);
+        builder.symbol("rune_vec_get", rune_vec_get as *const u8);
+        builder.symbol("rune_vec_len", rune_vec_len as *const u8);
+        builder.symbol("rune_panic_bounds", rune_panic_bounds as *const u8);
+        builder.symbol("rune_panic_no_match", rune_panic_no_match as *const u8);
+        builder.symbol("rune_retain_str", rune_retain_str as *const u8);
+        builder.symbol("rune_release_str", rune_release_str as *const u8);
+        builder.symbol("rune_retain_vec", rune_retain_vec as *const u8);
+        builder.symbol("rune_release_vec", rune_release_vec as *const u8);
+        builder.symbol("rune_weak_downgrade_vec", rune_weak_downgrade_vec as *const u8);
+        builder.symbol("rune_weak_retain_vec", rune_weak_retain_vec as *const u8);
+        builder.symbol("rune_weak_release_vec", rune_weak_release_vec as *const u8);
+        builder.symbol("rune_weak_upgrade_vec", rune_weak_upgrade_vec as *const u8);
+        builder.symbol("rune_weak_upgrade_or_vec", rune_weak_upgrade_or_vec as *const u8);
+        builder.symbol("rune_struct_new", rune_struct_new as *const u8);
+        builder.symbol("rune_struct_dealloc", rune_struct_dealloc as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,

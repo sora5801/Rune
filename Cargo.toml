@@ -13,6 +13,9 @@ path = "src/lib.rs"
 name = "rune"
 path = "src/main.rs"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 cranelift = "0.115"
 cranelift-jit = "0.115"

@@ -148,8 +148,8 @@ rune: linked with clang -> primes.exe
   - Host builtins: **polymorphic `print(x)`** dispatches on argument
     type to `print_i64` (for any int) or `print_str` (for `str`).
     Explicit-typed variants `print_i64` and `print_str` remain callable
-    directly. All three are registered with `JITBuilder::symbol` for
-    JIT and defined in the embedded C runtime for AOT.
+    directly. All runtime symbols come from one source — `runtime.c`,
+    linked into the binary for the JIT and compiled by the AOT linker.
   - **Method calls** dispatch on `(receiver_ty, method_name)`. First
     three methods: `str.len()` and `str.is_empty()` (inline `load` +
     optional `icmp`), `arr.len()` (static constant from the array's
@@ -220,9 +220,11 @@ rune: linked with clang -> primes.exe
   via `cranelift-object` + an external C-style linker driver.
 - `src/aot.rs`: `build_object` renames Rune's `main` to `__rune_main`,
   emits a synthesized `int main(void)` that calls it and truncates the
-  i64 return to the i32 exit code. `link` writes a small `RUNTIME_C`
-  string to a `.rt.c` file and passes it to the linker driver alongside
-  the `.o` — drivers compile and link in one shot.
+  i64 return to the i32 exit code. `link` writes the single-source
+  runtime (`runtime.c`) to a `.rt.c` file and passes it to the linker
+  driver alongside the `.o` — drivers compile and link in one shot.
+  The same `runtime.c` is compiled into the `rune` binary by
+  `build.rs` for the JIT.
 - Linker discovery: `clang` → `gcc` → `cc`; `$RUNE_LINKER` overrides.
 - `--release` sets Cranelift's opt level to `speed`; default is `none`
   for fast iteration.
@@ -252,7 +254,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 ## Roadmap
 
 1. `dyn` coercion at struct-literal fields and enum-variant
-   payloads; a single-source runtime (no C/Rust transcription)
+   payloads
 2. Supertraits, associated types, generic impls
 3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
