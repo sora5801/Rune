@@ -1403,3 +1403,41 @@ fn struct_and_enum_array_fields_check() {
         }
     "#);
 }
+
+#[test]
+fn dyn_coercion_at_struct_field_and_enum_payload() {
+    // A concrete struct coerces to `dyn Trait` at a struct-literal
+    // field initializer and at an enum-variant payload position.
+    check_ok(r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        struct Holder { shape: dyn Shape }
+        enum Maybe { Has(dyn Shape), Empty }
+        fn main() -> i64 {
+            let h: Holder = Holder { shape: Circle { r: 2 } };
+            let m: Maybe = Maybe::Has(Circle { r: 3 });
+            0
+        }
+    "#);
+}
+
+#[test]
+fn dyn_field_non_implementor_rejected() {
+    // A struct that does not implement the trait cannot coerce at a
+    // `dyn` field position.
+    check_has_error(
+        r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct NotShape { x: i64 }
+        struct Holder { shape: dyn Shape }
+        fn main() -> i64 {
+            let h: Holder = Holder { shape: NotShape { x: 1 } };
+            0
+        }
+        "#,
+        "shape",
+    );
+}

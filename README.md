@@ -118,7 +118,7 @@ rune: linked with clang -> primes.exe
   for `bool` / enum, "missing `_` arm" for infinite domains, unreachable-
   arm detection across arms and within or-patterns. Guards must be `bool`
   and don't contribute to exhaustiveness coverage.
-- 123 integration tests.
+- 125 integration tests.
 
 ### HIR + Cranelift codegen — done
 
@@ -212,7 +212,7 @@ rune: linked with clang -> primes.exe
   - **`as` casts** between numeric / char / bool with sign-aware
     extend, saturating float→int, and float widening/narrowing.
 - ABI: target-native (effectively `extern "C"`).
-- 241 JIT codegen tests + 40 AOT tests.
+- 243 JIT codegen tests + 40 AOT tests.
 
 ### AOT executables — done
 
@@ -253,12 +253,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `dyn` coercion at struct-literal fields and enum-variant
-   payloads
-2. Supertraits, associated types, generic impls
-3. A `collections` module — `HashMap<K, V>`, an iterator protocol —
+1. Supertraits, associated types, generic impls
+2. A `collections` module — `HashMap<K, V>`, an iterator protocol —
    built on the now-generic `Vec<T>`
-4. `From`-based error conversion for `?`
+3. `From`-based error conversion for `?`
 5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

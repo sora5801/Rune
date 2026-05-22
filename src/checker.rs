@@ -1585,7 +1585,7 @@ impl<'r> Checker<'r> {
         for (i, (param_ty, arg)) in payload_tys.iter().zip(args).enumerate() {
             let arg_ty = self.check_expr(arg);
             unify_typevars(param_ty, &arg_ty, &mut subst);
-            if !arg_ty.compatible(param_ty) {
+            if !self.check_assignable(arg.span(), &arg_ty, param_ty) {
                 self.error(
                     arg.span(),
                     format!(
@@ -1765,7 +1765,7 @@ impl<'r> Checker<'r> {
                 continue;
             };
             unify_typevars(&decl_field.ty, &value_ty, &mut subst);
-            if !value_ty.compatible(&decl_field.ty) {
+            if !self.check_assignable(init.value.span(), &value_ty, &decl_field.ty) {
                 self.error(
                     init.value.span(),
                     format!(

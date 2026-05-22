@@ -3948,3 +3948,63 @@ fn heap_array_of_vecs_returned() {
     // 200 * (8 + 9) = 3400
     assert_eq!(run_main(src), 3400);
 }
+
+#[test]
+fn dyn_struct_field() {
+    // A concrete struct coerces to `dyn Trait` at a struct-literal
+    // field initializer. The struct's release walks the `dyn` field,
+    // reclaiming the box — 200 iterations, a leak or double free
+    // would show.
+    let src = r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Circle { r: i64 }
+        impl Shape for Circle {
+            fn area(self: Circle) -> i64 { self.r * self.r }
+        }
+        struct Holder { shape: dyn Shape, tag: i64 }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let h: Holder = Holder { shape: Circle { r: 3 }, tag: 7 };
+                sum = sum + h.shape.area() + h.tag;
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (9 + 7) = 3200
+    assert_eq!(run_main(src), 3200);
+}
+
+#[test]
+fn dyn_enum_payload() {
+    // A concrete struct coerces to `dyn Trait` at an enum-variant
+    // payload position. The enum's release walks the `dyn` payload.
+    let src = r#"
+        trait Shape { fn area(self: dyn Shape) -> i64; }
+        struct Square { s: i64 }
+        impl Shape for Square {
+            fn area(self: Square) -> i64 { self.s * self.s }
+        }
+        enum Maybe { Has(dyn Shape), Empty }
+        fn area_of(m: Maybe) -> i64 {
+            match m {
+                Maybe::Has(s) => s.area(),
+                Maybe::Empty => 0,
+            }
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let m: Maybe = Maybe::Has(Square { s: 5 });
+                sum = sum + area_of(m);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * 25 = 5000
+    assert_eq!(run_main(src), 5000);
+}

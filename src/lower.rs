@@ -1021,10 +1021,10 @@ impl<'a> Lowerer<'a> {
 }
 
 /// Whether a struct field type takes part in the per-struct ARC
-/// release walk: a `Vec` / `Str`, an ARC-bearing struct, or any
-/// array (a heap array is a refcounted block regardless of element
-/// type). Mirrors the conservative shape of `struct_arc_fields` —
-/// enums, `Weak`, and `dyn` fields are not walked yet.
+/// release walk: a `Vec` / `Str`, an ARC-bearing struct, any array
+/// (a heap array is a refcounted block regardless of element type),
+/// or a `dyn` trait object (a refcounted box). Enums and `Weak`
+/// fields are still not walked.
 fn field_ty_is_arc(
     ty: &Ty,
     known: &std::collections::HashMap<SymbolId, Vec<(u32, Ty)>>,
@@ -1033,6 +1033,7 @@ fn field_ty_is_arc(
         Ty::Vec(_) | Ty::Str => true,
         Ty::Struct(inner, _) => known.contains_key(inner),
         Ty::Array(_, _) => true,
+        Ty::Dyn(_) => true,
         _ => false,
     }
 }
