@@ -59,11 +59,7 @@ impl<'a> Lowerer<'a> {
                 let arc_fields: Vec<(u32, Ty)> = layout
                     .fields
                     .iter()
-                    .filter(|f| match &f.ty {
-                        Ty::Vec(_) | Ty::Str => true,
-                        Ty::Struct(inner, _) => struct_arc_fields.contains_key(inner),
-                        _ => false,
-                    })
+                    .filter(|f| field_ty_is_arc(&f.ty, &struct_arc_fields))
                     .map(|f| (f.offset, f.ty.clone()))
                     .collect();
                 if !arc_fields.is_empty() {
@@ -1020,6 +1016,23 @@ impl<'a> Lowerer<'a> {
             name: dispatched.to_string(),
             args: lowered_args,
         }
+    }
+}
+
+/// Whether a struct field type takes part in the per-struct ARC
+/// release walk: a `Vec` / `Str`, an ARC-bearing struct, or a
+/// (possibly nested) array of such. Mirrors the conservative shape
+/// of `struct_arc_fields` — enums, `Weak`, and `dyn` fields are not
+/// walked yet.
+fn field_ty_is_arc(
+    ty: &Ty,
+    known: &std::collections::HashMap<SymbolId, Vec<(u32, Ty)>>,
+) -> bool {
+    match ty {
+        Ty::Vec(_) | Ty::Str => true,
+        Ty::Struct(inner, _) => known.contains_key(inner),
+        Ty::Array(elem, _) => field_ty_is_arc(elem, known),
+        _ => false,
     }
 }
 

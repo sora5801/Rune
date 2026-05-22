@@ -3801,3 +3801,79 @@ fn array_copy_retains() {
     // 200 * (4 + 5) = 1800
     assert_eq!(run_main(src), 1800);
 }
+
+#[test]
+fn array_let_annotation_and_param() {
+    // `[T; N]` written as a type — on a `let` and a function
+    // parameter. The array flows through borrowed (the parameter is
+    // never scope-tracked).
+    let src = r#"
+        fn sum3(a: [i64; 3]) -> i64 {
+            a[0] + a[1] + a[2]
+        }
+        fn main() -> i64 {
+            let nums: [i64; 3] = [10, 20, 30];
+            sum3(nums)
+        }
+    "#;
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn struct_array_field_arc() {
+    // A struct field of array type — `[Vec<i64>; 2]`. The struct's
+    // release walks the array field, reclaiming each element Vec.
+    // 200 iterations; a double free would crash.
+    let src = r#"
+        struct Holder { items: [Vec<i64>; 2], tag: i64 }
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let h: Holder = Holder { items: [make(2), make(3)], tag: 5 };
+                sum = sum + h.items[0].get(0) + h.items[1].get(0) + h.tag;
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (2 + 3 + 5) = 2000
+    assert_eq!(run_main(src), 2000);
+}
+
+#[test]
+fn enum_array_payload_arc() {
+    // An enum payload of array type — `[Vec<i64>; 2]`. The enum's
+    // release walks the array payload, reclaiming each element.
+    let src = r#"
+        enum Crate { Loaded([Vec<i64>; 2]), Empty }
+        fn make(k: i64) -> Vec<i64> {
+            let mut v: Vec<i64> = vec_new();
+            v.push(k);
+            v
+        }
+        fn unload(c: Crate) -> i64 {
+            match c {
+                Crate::Loaded(p) => p[0].get(0) + p[1].get(0),
+                Crate::Empty => 0,
+            }
+        }
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut n = 0;
+            while n < 200 {
+                let c: Crate = Crate::Loaded([make(6), make(8)]);
+                sum = sum + unload(c);
+                n = n + 1;
+            }
+            sum
+        }
+    "#;
+    // 200 * (6 + 8) = 2800
+    assert_eq!(run_main(src), 2800);
+}

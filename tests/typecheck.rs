@@ -1377,3 +1377,29 @@ fn vec_of_dyn_rejects_non_impl() {
         "argument 1",
     );
 }
+
+#[test]
+fn array_type_annotation_checks() {
+    check_ok(r#"
+        fn sum3(a: [i64; 3]) -> i64 {
+            a[0] + a[1] + a[2]
+        }
+        fn main() -> i64 {
+            let nums: [i64; 3] = [4, 5, 6];
+            sum3(nums)
+        }
+    "#);
+}
+
+#[test]
+fn struct_and_enum_array_fields_check() {
+    check_ok(r#"
+        struct Grid { cells: [Vec<i64>; 2], rows: i64 }
+        enum Bag { Pair([i64; 2]), Empty }
+        fn main() -> i64 {
+            let g: Grid = Grid { cells: [vec_new(), vec_new()], rows: 2 };
+            let b: Bag = Bag::Pair([1, 2]);
+            g.rows
+        }
+    "#);
+}

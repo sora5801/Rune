@@ -1037,6 +1037,7 @@ impl Resolver {
         match t {
             Type::Path(p) => self.resolve_path(p),
             Type::Dyn(p) => self.resolve_path(p),
+            Type::Array { elem, .. } => self.resolve_type(elem),
         }
     }
 

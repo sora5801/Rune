@@ -173,6 +173,8 @@ pub enum Type {
     Path(Path),
     /// `dyn TraitName` — a trait object (dynamic dispatch).
     Dyn(Path),
+    /// `[T; N]` — a fixed-size array type.
+    Array { elem: Box<Type>, len: usize, span: Span },
 }
 
 impl Type {
@@ -180,6 +182,7 @@ impl Type {
         match self {
             Type::Path(p) => p.span,
             Type::Dyn(p) => p.span,
+            Type::Array { span, .. } => *span,
         }
     }
 }

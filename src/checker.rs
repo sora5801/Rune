@@ -278,6 +278,12 @@ impl<'r> Checker<'r> {
                 self.type_resolutions.insert(p.span, ty.clone());
                 ty
             }
+            Type::Array { elem, len, span } => {
+                let elem_ty = self.resolve_type(elem);
+                let ty = Ty::Array(Box::new(elem_ty), *len);
+                self.type_resolutions.insert(*span, ty.clone());
+                ty
+            }
         }
     }
 

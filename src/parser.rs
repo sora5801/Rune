@@ -500,6 +500,30 @@ impl Parser {
     // ---- types & paths ----
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        // `[T; N]` — a fixed-size array type.
+        if self.check(&TokenKind::LBracket) {
+            let start = self.peek_span().start;
+            self.bump(); // `[`
+            let elem = self.parse_type()?;
+            self.expect(&TokenKind::Semi, "`;`")?;
+            let len_span = self.peek_span();
+            let len = match self.peek() {
+                TokenKind::Int(n) if *n >= 0 => *n as usize,
+                _ => {
+                    return Err(ParseError {
+                        message: "expected a non-negative array length".into(),
+                        span: len_span,
+                    });
+                }
+            };
+            self.bump(); // the length literal
+            let close = self.expect(&TokenKind::RBracket, "`]`")?;
+            return Ok(Type::Array {
+                elem: Box::new(elem),
+                len,
+                span: Span::new(start, close.span.end),
+            });
+        }
         // `dyn TraitName` — a trait object. v0.x: the trait path
         // carries no generic args.
         if self.eat(&TokenKind::Dyn) {
