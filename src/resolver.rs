@@ -101,6 +101,16 @@ pub struct Resolutions {
     /// The checker uses these for impl conformance + bounded-generic
     /// method-call resolution.
     pub trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    /// Direct supertraits of each trait — the names after `:` in
+    /// `trait Sub: A + B { .. }`, resolved to their trait symbols.
+    /// Transitive walk is the caller's job; an empty entry (or no
+    /// entry) means a free-standing trait.
+    pub trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
+    /// For each struct, the set of traits explicitly implemented by
+    /// an `impl Trait for Struct` block. Strict — inherent methods
+    /// shadowing a trait method do *not* count as implementing the
+    /// trait. The checker reads this for supertrait conformance.
+    pub impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
     /// Associated-type names each trait declares, in source order.
     pub trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     /// `(struct sym, associated-type name) → bound type`, from an
@@ -152,6 +162,8 @@ pub struct Resolver {
     struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
     enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
+    impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
     trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
@@ -205,6 +217,8 @@ impl Resolver {
             struct_generics: HashMap::new(),
             enum_generics: HashMap::new(),
             trait_methods: HashMap::new(),
+            trait_supertraits: HashMap::new(),
+            impls_for: HashMap::new(),
             trait_assoc_types: HashMap::new(),
             impl_assoc_bindings: HashMap::new(),
             generic_bounds: HashMap::new(),
@@ -227,6 +241,9 @@ impl Resolver {
         self.resolve_uses(&m.items);
         // Pass 2: resolve all bodies.
         self.resolve_items(&m.items);
+        // After every trait's supertrait list is resolved, surface
+        // cycles as a clear diagnostic.
+        self.validate_supertrait_cycles();
         (
             Resolutions {
                 symbols: self.symbols,
@@ -240,6 +257,8 @@ impl Resolver {
                 struct_generics: self.struct_generics,
                 enum_generics: self.enum_generics,
                 trait_methods: self.trait_methods,
+                trait_supertraits: self.trait_supertraits,
+                impls_for: self.impls_for,
                 trait_assoc_types: self.trait_assoc_types,
                 impl_assoc_bindings: self.impl_assoc_bindings,
                 generic_bounds: self.generic_bounds,
@@ -434,6 +453,10 @@ impl Resolver {
                         ),
                         trait_path.span,
                     );
+                } else {
+                    // Record the explicit `impl Trait for Struct`
+                    // for the supertrait conformance check.
+                    self.impls_for.entry(struct_sym).or_default().insert(tsym);
                 }
             }
         }
@@ -867,6 +890,44 @@ impl Resolver {
 
     // ---- pass 2: resolve bodies (recursing into modules) ----
 
+    /// For each trait, BFS its supertrait chain — if the trait is
+    /// reachable from itself there is a cycle. The conformance and
+    /// method-lookup walks below all use visited-sets so a cycle
+    /// never hangs them, but it is worth surfacing as a clear error.
+    fn validate_supertrait_cycles(&mut self) {
+        let traits: Vec<SymbolId> = self.trait_supertraits.keys().copied().collect();
+        for start in traits {
+            let mut queue: std::collections::VecDeque<SymbolId> =
+                std::collections::VecDeque::new();
+            let mut visited: std::collections::HashSet<SymbolId> =
+                std::collections::HashSet::new();
+            if let Some(supers) = self.trait_supertraits.get(&start) {
+                queue.extend(supers);
+            }
+            let mut cyclic = false;
+            while let Some(t) = queue.pop_front() {
+                if t == start {
+                    cyclic = true;
+                    break;
+                }
+                if !visited.insert(t) {
+                    continue;
+                }
+                if let Some(supers) = self.trait_supertraits.get(&t) {
+                    queue.extend(supers);
+                }
+            }
+            if cyclic {
+                let name = self.symbols[start.0 as usize].name.clone();
+                let span = self.symbols[start.0 as usize].span;
+                self.error(
+                    format!("supertrait cycle through `{}`", name),
+                    span,
+                );
+            }
+        }
+    }
+
     fn resolve_items(&mut self, items: &[Item]) {
         for item in items {
             self.resolve_item(item);
@@ -885,6 +946,31 @@ impl Resolver {
                 }
             }
             Item::Trait(t) => {
+                // Resolve supertrait idents to trait symbols.
+                if let Some(&trait_sym) = self.decl_to_sym.get(&t.name.span) {
+                    let mut super_syms = Vec::new();
+                    for s in &t.supertraits {
+                        if let Some(ssym) = self.lookup(&s.name) {
+                            if matches!(
+                                self.symbols[ssym.0 as usize].kind,
+                                SymbolKind::Trait
+                            ) {
+                                super_syms.push(ssym);
+                            } else {
+                                self.error(
+                                    format!("`{}` is not a trait", s.name),
+                                    s.span,
+                                );
+                            }
+                        } else {
+                            self.error(
+                                format!("unresolved trait `{}`", s.name),
+                                s.span,
+                            );
+                        }
+                    }
+                    self.trait_supertraits.insert(trait_sym, super_syms);
+                }
                 // Resolve the parameter / return types of each trait
                 // method signature so `Self` and any referenced types
                 // bind. The bodies don't exist (signatures only).

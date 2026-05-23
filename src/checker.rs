@@ -461,6 +461,42 @@ impl<'r> Checker<'r> {
         let Some(&struct_sym) = self.res.path_to_sym.get(&i.type_path.span) else {
             return;
         };
+        // Supertrait conformance: walk the trait's supertrait closure
+        // and require an `impl Super for Type` for each ancestor.
+        // `visited` keeps the walk finite even with a (diagnosed)
+        // supertrait cycle.
+        let mut worklist: Vec<SymbolId> = self
+            .res
+            .trait_supertraits
+            .get(&trait_sym)
+            .cloned()
+            .unwrap_or_default();
+        let mut visited: std::collections::HashSet<SymbolId> =
+            std::collections::HashSet::new();
+        while let Some(anc) = worklist.pop() {
+            if !visited.insert(anc) {
+                continue;
+            }
+            let has_impl = self
+                .res
+                .impls_for
+                .get(&struct_sym)
+                .map_or(false, |s| s.contains(&anc));
+            if !has_impl {
+                self.error(
+                    i.span,
+                    format!(
+                        "trait `{}` requires supertrait `{}` to be implemented for `{}`",
+                        self.res.symbol(trait_sym).name,
+                        self.res.symbol(anc).name,
+                        self.res.symbol(struct_sym).name,
+                    ),
+                );
+            }
+            if let Some(supers) = self.res.trait_supertraits.get(&anc) {
+                worklist.extend(supers);
+            }
+        }
         for name in &declared {
             if !self
                 .res
@@ -2005,25 +2041,38 @@ impl<'r> Checker<'r> {
     fn trait_bound_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
         let Ty::TypeVar(tvar) = recv else { return None };
         let bounds = self.res.generic_bounds.get(tvar)?;
-        for &trait_sym in bounds {
-            let methods = self.res.trait_methods.get(&trait_sym)?;
-            if let Some(m) = methods.iter().find(|m| m.name.name == name) {
-                // Skip the leading `self` param; resolve the rest.
-                let mut params: Vec<Ty> = Vec::new();
-                for p in m.params.iter().skip(1) {
-                    params.push(
-                        self.type_resolutions
-                            .get(&p.ty.span())
-                            .cloned()
-                            .unwrap_or(Ty::Error),
-                    );
+        // Walk the bound traits and their supertrait chains
+        // transitively — a `<T: Sub>` value can call `Super`'s
+        // methods. `visited` guards against supertrait cycles.
+        let mut worklist: Vec<SymbolId> = bounds.clone();
+        let mut visited: std::collections::HashSet<SymbolId> =
+            std::collections::HashSet::new();
+        while let Some(trait_sym) = worklist.pop() {
+            if !visited.insert(trait_sym) {
+                continue;
+            }
+            if let Some(methods) = self.res.trait_methods.get(&trait_sym) {
+                if let Some(m) = methods.iter().find(|m| m.name.name == name) {
+                    // Skip the leading `self` param; resolve the rest.
+                    let mut params: Vec<Ty> = Vec::new();
+                    for p in m.params.iter().skip(1) {
+                        params.push(
+                            self.type_resolutions
+                                .get(&p.ty.span())
+                                .cloned()
+                                .unwrap_or(Ty::Error),
+                        );
+                    }
+                    let ret = m
+                        .return_type
+                        .as_ref()
+                        .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
+                        .unwrap_or(Ty::Unit);
+                    return Some(MethodSig { params, ret });
                 }
-                let ret = m
-                    .return_type
-                    .as_ref()
-                    .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
-                    .unwrap_or(Ty::Unit);
-                return Some(MethodSig { params, ret });
+            }
+            if let Some(supers) = self.res.trait_supertraits.get(&trait_sym) {
+                worklist.extend(supers);
             }
         }
         None

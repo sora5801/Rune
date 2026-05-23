@@ -4097,3 +4097,58 @@ fn assoc_type_concrete_method_call() {
     "#;
     assert_eq!(run_main(src), 42);
 }
+
+#[test]
+fn supertrait_method_via_bound() {
+    // `<T: Dog>` — a value bounded by `Dog` can call both `Dog`'s
+    // and the supertrait `Animal`'s methods. The checker's
+    // method-lookup walks the supertrait chain transitively.
+    let src = r#"
+        trait Animal {
+            fn speak(self: dyn Animal) -> i64;
+        }
+        trait Dog: Animal {
+            fn bark(self: dyn Dog) -> i64;
+        }
+        struct Lab { volume: i64 }
+        impl Animal for Lab {
+            fn speak(self: Lab) -> i64 { self.volume + 10 }
+        }
+        impl Dog for Lab {
+            fn bark(self: Lab) -> i64 { self.volume + 20 }
+        }
+        fn handle<T: Dog>(x: T) -> i64 {
+            x.speak() + x.bark()
+        }
+        fn main() -> i64 {
+            let l: Lab = Lab { volume: 6 };
+            handle(l)
+        }
+    "#;
+    // (6+10) + (6+20) = 42
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn supertrait_two_level_chain() {
+    // `A: B`, `B: C`. A `<T: A>` value can call methods from A, B,
+    // and C — the supertrait walk is transitive.
+    let src = r#"
+        trait C { fn c(self: dyn C) -> i64; }
+        trait B: C { fn b(self: dyn B) -> i64; }
+        trait A: B { fn a(self: dyn A) -> i64; }
+        struct S { n: i64 }
+        impl C for S { fn c(self: S) -> i64 { self.n } }
+        impl B for S { fn b(self: S) -> i64 { self.n + 1 } }
+        impl A for S { fn a(self: S) -> i64 { self.n + 2 } }
+        fn all<T: A>(x: T) -> i64 {
+            x.a() + x.b() + x.c()
+        }
+        fn main() -> i64 {
+            let s: S = S { n: 13 };
+            all(s)
+        }
+    "#;
+    // 15 + 14 + 13 = 42
+    assert_eq!(run_main(src), 42);
+}

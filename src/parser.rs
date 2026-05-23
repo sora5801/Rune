@@ -442,6 +442,16 @@ impl Parser {
     fn parse_trait(&mut self, vis: Visibility, start: usize) -> ParseResult<TraitDecl> {
         self.expect(&TokenKind::Trait, "`trait`")?;
         let name = self.expect_ident()?;
+        // Optional supertrait list: `trait Sub: A + B { .. }`.
+        let mut supertraits = Vec::new();
+        if self.eat(&TokenKind::Colon) {
+            loop {
+                supertraits.push(self.expect_ident()?);
+                if !self.eat(&TokenKind::Plus) {
+                    break;
+                }
+            }
+        }
         self.expect(&TokenKind::LBrace, "`{`")?;
         let mut assoc_types = Vec::new();
         let mut methods = Vec::new();
@@ -487,6 +497,7 @@ impl Parser {
         Ok(TraitDecl {
             vis,
             name,
+            supertraits,
             assoc_types,
             methods,
             span: Span::new(start, rb.span.end),

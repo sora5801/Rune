@@ -1492,3 +1492,30 @@ fn impl_unknown_assoc_type_rejected() {
         "trait declares no associated type `Other`",
     );
 }
+
+#[test]
+fn impl_missing_supertrait_rejected() {
+    check_has_error(
+        r#"
+        trait Animal { fn speak(self: dyn Animal) -> i64; }
+        trait Dog: Animal { fn bark(self: dyn Dog) -> i64; }
+        struct Lab { n: i64 }
+        impl Dog for Lab {
+            fn bark(self: Lab) -> i64 { self.n }
+        }
+        fn main() -> i64 { 0 }
+        "#,
+        "requires supertrait `Animal`",
+    );
+}
+
+#[test]
+fn unresolved_supertrait_rejected() {
+    check_has_error(
+        r#"
+        trait Dog: Unknown { fn bark(self: dyn Dog) -> i64; }
+        fn main() -> i64 { 0 }
+        "#,
+        "unresolved trait `Unknown`",
+    );
+}

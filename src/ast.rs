@@ -98,6 +98,10 @@ pub struct AssocTypeBinding {
 pub struct TraitDecl {
     pub vis: Visibility,
     pub name: Ident,
+    /// Supertraits after `:` (`trait Sub: A + B { .. }`). Empty for
+    /// a free-standing trait. Stored as `Vec<Ident>` like
+    /// `GenericParam::bounds` — single-segment names only.
+    pub supertraits: Vec<Ident>,
     /// `type Item;` members — associated types every implementor
     /// must bind.
     pub assoc_types: Vec<AssocTypeDecl>,
