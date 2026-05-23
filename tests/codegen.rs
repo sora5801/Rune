@@ -4303,3 +4303,184 @@ fn dyn_supertrait_box_arc_under_loop() {
     "#;
     assert_eq!(run_main(src), 10200);
 }
+
+#[test]
+fn iter_counter_for_in() {
+    // The headline test: a Counter struct implements std::Iterator
+    // and a `for x in counter { ... }` loop walks it. The lowerer
+    // desugars to `while true { match counter.next() { Some(x) => ...,
+    // None => break } }`; the body's contributions sum up.
+    let src = r#"
+        struct Counter { n: i64, limit: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> std::Option<i64> {
+                if self.n < self.limit {
+                    let v: i64 = self.n;
+                    self.n = self.n + 1;
+                    std::Option::Some(v)
+                } else {
+                    std::Option::None
+                }
+            }
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            let c: Counter = Counter { n: 1, limit: 6 };
+            for x in c {
+                total = total + x;
+            }
+            total
+        }
+    "#;
+    // 1 + 2 + 3 + 4 + 5 = 15
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn iter_break_from_loop_body() {
+    // `break` inside a `for` body exits the loop. The desugared
+    // `while-match` loop's exit block is on the loop_exit_stack;
+    // the body's break jumps there, releasing the synthesized
+    // `__it` ARC local on the way out.
+    let src = r#"
+        struct Counter { n: i64, limit: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> std::Option<i64> {
+                if self.n < self.limit {
+                    let v: i64 = self.n;
+                    self.n = self.n + 1;
+                    std::Option::Some(v)
+                } else {
+                    std::Option::None
+                }
+            }
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            let c: Counter = Counter { n: 0, limit: 100 };
+            for x in c {
+                if x == 7 { break; }
+                total = total + x;
+            }
+            // 0+1+2+3+4+5+6 = 21
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 21);
+}
+
+#[test]
+fn iter_bounded_generic() {
+    // A generic function `count<T: Iterator>(it: T)` consumes
+    // any iterator and tallies. The monomorphizer specializes
+    // `count` for `Counter`; inside the specialized body the
+    // `for _ in it` desugar runs as usual. (Generic bounds only
+    // accept single-segment trait names today — a path like
+    // `<T: std::Iterator>` would parse-error, so this brings
+    // `Iterator` into scope first.)
+    let src = r#"
+        struct Counter { n: i64, limit: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> std::Option<i64> {
+                if self.n < self.limit {
+                    let v: i64 = self.n;
+                    self.n = self.n + 1;
+                    std::Option::Some(v)
+                } else {
+                    std::Option::None
+                }
+            }
+        }
+        // Use a bare-named alias so the parser's single-Ident
+        // trait-bound rule accepts it.
+        use std::Iterator as Iter;
+        fn count<T: Iter>(it: T) -> i64 {
+            let mut n: i64 = 0;
+            for _ in it {
+                n = n + 1;
+            }
+            n
+        }
+        fn main() -> i64 {
+            let c: Counter = Counter { n: 0, limit: 7 };
+            count(c)
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn iter_early_return_from_for_body() {
+    // A `return` inside the for body should release `__it` (the
+    // synthesized iterator local) via `release_all_arc_locals` —
+    // the iterator struct is ARC-managed (every user struct is
+    // since session 020), so missing the release would leak.
+    let src = r#"
+        struct Counter { n: i64, limit: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> std::Option<i64> {
+                if self.n < self.limit {
+                    let v: i64 = self.n;
+                    self.n = self.n + 1;
+                    std::Option::Some(v)
+                } else {
+                    std::Option::None
+                }
+            }
+        }
+        fn find_first_gt(threshold: i64) -> i64 {
+            let c: Counter = Counter { n: 0, limit: 1000 };
+            for x in c {
+                if x > threshold { return x; }
+            };
+            // Sentinel for "not found"; the trailing semi above
+            // disambiguates the for-expression from a binary subtract
+            // (Rune parses block-trailed expressions hungrily).
+            0 - 1
+        }
+        fn main() -> i64 {
+            find_first_gt(41)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn iter_nested_for_array_inside_iterator() {
+    // Outer for-in over a Counter (iterator path), inner for-in
+    // over an array (array path). Tests that the dispatch in
+    // `lower_for` is per-call-site, not per-function.
+    let src = r#"
+        struct Counter { n: i64, limit: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> std::Option<i64> {
+                if self.n < self.limit {
+                    let v: i64 = self.n;
+                    self.n = self.n + 1;
+                    std::Option::Some(v)
+                } else {
+                    std::Option::None
+                }
+            }
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            let c: Counter = Counter { n: 1, limit: 4 };
+            for x in c {
+                let row: [i64; 3] = [x, x * 2, x * 3];
+                for y in row {
+                    total = total + y;
+                }
+            }
+            // outer x in 1..3: row = [1,2,3], [2,4,6], [3,6,9]
+            // sums:                   6,        12,       18  -> 36
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 36);
+}

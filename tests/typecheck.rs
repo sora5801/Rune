@@ -390,13 +390,19 @@ fn field_assignment_on_immutable_is_error() {
 }
 
 #[test]
-fn field_assignment_on_param_is_error() {
-    check_has_error(
+fn field_assignment_on_param_allowed() {
+    // Heap-struct interior mutation. A user struct is an 8-byte
+    // descriptor pointer; the caller and callee share the same
+    // heap location, so `p.x = 5` mutates a value both see and
+    // is not a stack-aliasing hazard. Without this, an iterator
+    // `fn next(self: Counter) { self.n = self.n + 1; ... }`
+    // couldn't advance its own state (session 053).
+    check_ok(
         r#"
         struct P { x: i64 }
         fn touch(p: P) { p.x = 5; }
+        fn main() {}
         "#,
-        "parameter",
     );
 }
 
@@ -1600,5 +1606,41 @@ fn dyn_method_not_on_chain_rejected() {
         fn main() -> i64 { 0 }
         "#,
         "no method `.purr`",
+    );
+}
+
+#[test]
+fn for_in_non_iterator_struct_rejected() {
+    // A struct with no `impl Iterator` block can't be the right-
+    // hand side of `for x in ...`. The lowerer leaves an
+    // `Unsupported`, but the checker's `check_for` produces the
+    // user-facing diagnostic earlier.
+    check_has_error(
+        r#"
+        struct Bag { n: i64 }
+        fn main() {
+            let b: Bag = Bag { n: 1 };
+            for x in b { let _: i64 = x; }
+        }
+        "#,
+        "does not implement `std::Iterator`",
+    );
+}
+
+#[test]
+fn iterator_impl_missing_next_rejected() {
+    // The existing trait-impl conformance check fires for an
+    // impl missing the trait's required method. Iterator is no
+    // different — `impl Iterator for Counter` without `fn next`
+    // is rejected the same way as any other partial impl.
+    check_has_error(
+        r#"
+        struct Counter { n: i64 }
+        impl std::Iterator for Counter {
+            type Item = i64;
+        }
+        fn main() {}
+        "#,
+        "missing method",
     );
 }

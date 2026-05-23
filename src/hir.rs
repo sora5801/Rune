@@ -259,6 +259,12 @@ pub enum HirExprKind {
         arms: Vec<HirMatchArm>,
     },
     Return(Option<Box<HirExpr>>),
+    /// `break` — exit the innermost enclosing loop (while/for/for-range).
+    /// Codegen emits a jump to the loop's exit block after releasing any
+    /// ARC locals pushed inside the loop. Types as `Ty::Never`, the same
+    /// short-circuit `Return` uses, so a `break` inside a match arm is a
+    /// valid never-typed body.
+    Break,
     /// Stub for features not yet handled in codegen. Lowering succeeds
     /// to allow inspection, codegen fails with the embedded message.
     Unsupported(String),

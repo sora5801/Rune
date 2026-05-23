@@ -150,12 +150,34 @@ impl Ty {
     }
 
     /// Unify two branch types into one (used for `if`/`else`, `match` arms).
+    /// Generic types match by sym alone, exactly mirroring `compatible`:
+    /// `Some(v): Enum(option, [i64])` and `None: Enum(option, [])` (the
+    /// placeholder used for bare variant construction) must unify to
+    /// `Enum(option, [i64])` so an `if c { Some(x) } else { None }`
+    /// typechecks. Pick whichever side has non-empty args; if both do,
+    /// they must match exactly.
     pub fn unify(&self, other: &Ty) -> Option<Ty> {
         if self.is_error() { return Some(other.clone()); }
         if other.is_error() { return Some(self.clone()); }
         if self.is_never() { return Some(other.clone()); }
         if other.is_never() { return Some(self.clone()); }
-        if self == other { Some(self.clone()) } else { None }
+        match (self, other) {
+            (Ty::Struct(s1, a1), Ty::Struct(s2, a2)) if s1 == s2 => {
+                Some(Ty::Struct(*s1, pick_concrete_args(a1, a2)?))
+            }
+            (Ty::Enum(s1, a1), Ty::Enum(s2, a2)) if s1 == s2 => {
+                Some(Ty::Enum(*s1, pick_concrete_args(a1, a2)?))
+            }
+            (Ty::Vec(e1), Ty::Vec(e2)) => {
+                // The placeholder element type from `vec_new()` is
+                // `Vec<i64>` — unify with whichever side carries the
+                // user-pinned element. If both are concrete and
+                // differ, the unification fails (caller errors).
+                let inner = e1.unify(e2)?;
+                Some(Ty::Vec(Box::new(inner)))
+            }
+            _ => if self == other { Some(self.clone()) } else { None },
+        }
     }
 
     pub fn display(&self) -> String {
@@ -195,4 +217,27 @@ impl Ty {
             Ty::Error => "?".into(),
         }
     }
+}
+
+/// Helper for `Ty::unify` on generic types: given two args lists for
+/// the *same* generic sym, return the one with concrete (non-empty)
+/// args, or fail if both are concrete and disagree. The empty list
+/// is the "placeholder" Rune emits at variant construction sites
+/// like `None` — it always loses to a use-site list that names the
+/// concrete type parameters.
+fn pick_concrete_args(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
+    if a.is_empty() {
+        return Some(b.to_vec());
+    }
+    if b.is_empty() {
+        return Some(a.to_vec());
+    }
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut out: Vec<Ty> = Vec::with_capacity(a.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        out.push(x.unify(y)?);
+    }
+    Some(out)
 }

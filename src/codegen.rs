@@ -801,6 +801,7 @@ impl<M: Module> Codegen<M> {
             var_map: HashMap::new(),
             var_counter: 0,
             arc_locals: Vec::new(),
+            loop_exit_stack: Vec::new(),
         };
 
         for (i, p) in f.params.iter().enumerate() {
@@ -1056,6 +1057,12 @@ struct FnCodegen<'a, M: Module> {
     /// at scope exit. Each entry is the Cranelift Variable holding the
     /// pointer plus the ARC type (Vec or Str) to pick the runtime helper.
     arc_locals: Vec<(Variable, Ty)>,
+    /// Stack of enclosing loops — `(exit_block, arc_locals_len_at_entry)`.
+    /// `Break` jumps to the top entry's exit block after releasing any
+    /// ARC locals that were declared since the loop started. Pushed in
+    /// `compile_while` / `compile_for` / `compile_for_range` at loop
+    /// entry; popped in the same place after the loop body.
+    loop_exit_stack: Vec<(Block, usize)>,
 }
 
 impl<'a, M: Module> FnCodegen<'a, M> {
@@ -1630,6 +1637,26 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 };
                 self.release_all_arc_locals()?;
                 self.builder.ins().return_(&vals);
+                let after = self.builder.create_block();
+                self.builder.switch_to_block(after);
+                self.builder.seal_block(after);
+                Ok(None)
+            }
+            HirExprKind::Break => {
+                // Jump to the innermost enclosing loop's exit block.
+                // Release any ARC locals declared since the loop entry —
+                // the snapshot at `loop_exit_stack.last()` is the
+                // arc_locals length just before the loop body started,
+                // so anything past it is owned by an iteration that's
+                // about to be abandoned.
+                let &(exit, snapshot) = self.loop_exit_stack.last().ok_or_else(
+                    || CodegenError("internal: `break` outside a loop reached codegen".into()),
+                )?;
+                self.release_arc_locals_to(snapshot)?;
+                self.builder.ins().jump(exit, &[]);
+                // Continue compiling into an unreachable trailer block,
+                // matching `Return`'s pattern at line 1633. Anything in
+                // the source position after `break` is dead code.
                 let after = self.builder.create_block();
                 self.builder.switch_to_block(after);
                 self.builder.seal_block(after);
@@ -2715,7 +2742,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             self.builder.def_var(v, elem);
         }
 
+        self.loop_exit_stack.push((exit, self.arc_locals.len()));
         self.compile_block(body)?;
+        self.loop_exit_stack.pop();
 
         if !self.is_filled() {
             let counter = self.builder.use_var(counter_var);
@@ -3075,7 +3104,9 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         self.builder.switch_to_block(body_blk);
         self.builder.seal_block(body_blk);
+        self.loop_exit_stack.push((exit, self.arc_locals.len()));
         self.compile_block(body)?;
+        self.loop_exit_stack.pop();
         if !self.is_filled() {
             let counter = self.builder.use_var(counter_var);
             let one = self.builder.ins().iconst(types::I64, 1);
@@ -3109,7 +3140,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         self.builder.switch_to_block(body_blk);
         self.builder.seal_block(body_blk);
+        // Record the loop's exit block + ARC snapshot so a `break`
+        // inside the body releases any ARC locals declared since the
+        // loop entry, then jumps to `exit`.
+        self.loop_exit_stack.push((exit, self.arc_locals.len()));
         self.compile_block(body)?;
+        self.loop_exit_stack.pop();
         if !self.is_filled() {
             self.builder.ins().jump(header, &[]);
         }

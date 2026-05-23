@@ -445,7 +445,7 @@ impl<'a> Lowerer<'a> {
             ast::Expr::Return { value, .. } => {
                 HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v))))
             }
-            ast::Expr::Break(_) => HirExprKind::Unsupported("break".into()),
+            ast::Expr::Break(_) => HirExprKind::Break,
             ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
             ast::Expr::MethodCall { receiver, method, args, .. } => {
                 let receiver_hir = self.lower_expr(receiver);
@@ -995,21 +995,243 @@ impl<'a> Lowerer<'a> {
             };
         }
         let iter_hir = self.lower_expr(iter);
-        let (elem_ty, length) = match &iter_hir.ty {
-            Ty::Array(elem, n) => ((**elem).clone(), *n),
-            _ => {
-                return HirExprKind::Unsupported(
-                    "for-loop iterator must be a stack-allocated array or an integer range"
-                        .into(),
-                );
+        // Array iter — the existing counted-loop path. Fast, no
+        // method dispatch.
+        if let Ty::Array(elem, n) = iter_hir.ty.clone() {
+            let elem_ty = *elem;
+            let length = n;
+            return HirExprKind::For {
+                local,
+                iter: Box::new(iter_hir),
+                body: self.lower_block(body),
+                elem_ty,
+                length,
+            };
+        }
+        // Iterator protocol — desugar `for x in iter` to
+        //   { let __it = iter;
+        //     while true {
+        //         match __it.next() { Some(__x) => { let x = __x; body },
+        //                             None     => break } } }
+        // The match's `Some` arm is what binds the user's pattern.
+        // The struct's `next` method is resolved through the existing
+        // user-method path; the monomorphizer rewrites the MethodCall
+        // into a Call once the receiver type is concrete.
+        match &iter_hir.ty {
+            Ty::Struct(struct_sym, _) => {
+                if let Some(desugar) = self.lower_for_iterator(
+                    Some(*struct_sym),
+                    local,
+                    iter_hir.clone(),
+                    body,
+                ) {
+                    return desugar;
+                }
             }
+            // Bounded-generic body: `<T: Iterator>(x: T) { for v in x { .. } }`.
+            // The item type is `Ty::Assoc(TypeVar(T), "Item")`, an
+            // abstract projection the monomorphizer resolves once `T`
+            // is concrete (session 051). No concrete struct yet, so
+            // pass `None` for the impl-binding lookup.
+            Ty::TypeVar(_) => {
+                if let Some(desugar) = self.lower_for_iterator(
+                    None,
+                    local,
+                    iter_hir.clone(),
+                    body,
+                ) {
+                    return desugar;
+                }
+            }
+            _ => {}
+        }
+        HirExprKind::Unsupported(
+            "for-loop iterator must be an array, integer range, or a struct implementing `std::Iterator`"
+                .into(),
+        )
+    }
+
+    /// Build the `while-match` desugar for `for x in iter`.
+    ///
+    /// `struct_sym` is `Some(s)` when the iter's type is concretely
+    /// `Ty::Struct(s, _)` — we resolve `Item` from the impl binding.
+    /// It is `None` for a bounded-generic body (`<T: Iterator>(x: T)`)
+    /// where the item type stays abstract as
+    /// `Ty::Assoc(iter_hir.ty, "Item")` until monomorphization.
+    /// Returns `None` (so the caller emits `Unsupported`) if any
+    /// precondition isn't met.
+    fn lower_for_iterator(
+        &self,
+        struct_sym: Option<SymbolId>,
+        local: Option<SymbolId>,
+        iter_hir: HirExpr,
+        body: &ast::Block,
+    ) -> Option<HirExprKind> {
+        // For a concrete struct, verify it implements Iterator and
+        // look up the impl's `type Item = ...` binding. For a generic
+        // type-param, the checker already confirmed the bound, and
+        // the item type is the abstract projection.
+        let item_ty = if let Some(s) = struct_sym {
+            let iter_trait_sym = self.find_iterator_sym()?;
+            if !self
+                .res
+                .impls_for
+                .get(&s)
+                .map(|set| set.contains(&iter_trait_sym))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            self.check
+                .impl_assoc_bindings_ty
+                .get(&(s, "Item".to_string()))
+                .cloned()?
+        } else {
+            // Bounded-generic body — item is `T::Item`.
+            Ty::Assoc(Box::new(iter_hir.ty.clone()), "Item".into())
         };
-        HirExprKind::For {
-            local,
-            iter: Box::new(iter_hir),
-            body: self.lower_block(body),
-            elem_ty,
-            length,
+        // Look up the prelude's std::Option enum and its variant
+        // discriminants. They were interned during prelude resolution.
+        let option_sym = self.find_option_sym()?;
+        let some_disc = self.enum_variant_disc(option_sym, "Some")?;
+        let none_disc = self.enum_variant_disc(option_sym, "None")?;
+        let option_item_ty = Ty::Enum(option_sym, vec![item_ty.clone()]);
+        let iter_ty = iter_hir.ty.clone();
+
+        // __it: synthetic local that holds the iterator state across
+        // the loop. Its `Local` reads in the body type as `iter_ty`.
+        let it_sym = self.fresh_sym();
+        let let_it = HirStmt::Let(HirLet {
+            sym: Some(it_sym),
+            mutable: true,
+            ty: iter_ty.clone(),
+            init: Some(iter_hir),
+        });
+
+        // __it.next() — resolved as a method call on the concrete
+        // struct. The monomorphizer rewrites it to a direct Call.
+        let it_local = HirExpr {
+            kind: HirExprKind::Local(it_sym),
+            ty: iter_ty.clone(),
+        };
+        let next_call = HirExpr {
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(it_local),
+                method: "next".into(),
+                args: Vec::new(),
+            },
+            ty: option_item_ty.clone(),
+        };
+
+        // Some(__x) => { (if pat is `let x`, bind x); body; () }
+        let x_sym = self.fresh_sym();
+        let mut some_body_stmts: Vec<HirStmt> = Vec::new();
+        if let Some(user_sym) = local {
+            // Alias the user's pattern symbol to the freshly bound __x.
+            some_body_stmts.push(HirStmt::Let(HirLet {
+                sym: Some(user_sym),
+                mutable: false,
+                ty: item_ty.clone(),
+                init: Some(HirExpr {
+                    kind: HirExprKind::Local(x_sym),
+                    ty: item_ty.clone(),
+                }),
+            }));
+        }
+        let body_hir = self.lower_block(body);
+        some_body_stmts.extend(body_hir.stmts);
+        // Inner block returns unit — the match-arm body's tail is the
+        // body's tail, but a for-loop body is unit-typed by spec.
+        let some_arm_body = HirExpr {
+            kind: HirExprKind::Block(HirBlock {
+                stmts: some_body_stmts,
+                ty: Ty::Unit,
+            }),
+            ty: Ty::Unit,
+        };
+        let some_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: some_disc,
+                bindings: vec![(item_ty.clone(), Some(x_sym))],
+            }],
+            guard: None,
+            body: some_arm_body,
+        };
+        // None => break
+        let none_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: none_disc,
+                bindings: vec![],
+            }],
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Break,
+                ty: Ty::Never,
+            },
+        };
+        let match_expr = HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(next_call),
+                arms: vec![some_arm, none_arm],
+            },
+            ty: Ty::Unit,
+        };
+
+        // while true { <match> }
+        let while_expr = HirExpr {
+            kind: HirExprKind::While {
+                cond: Box::new(HirExpr {
+                    kind: HirExprKind::Lit(HirLit::Bool(true)),
+                    ty: Ty::Bool,
+                }),
+                body: HirBlock {
+                    stmts: vec![HirStmt::Expr(match_expr, true)],
+                    ty: Ty::Unit,
+                },
+            },
+            ty: Ty::Unit,
+        };
+
+        Some(HirExprKind::Block(HirBlock {
+            stmts: vec![let_it, HirStmt::Expr(while_expr, true)],
+            ty: Ty::Unit,
+        }))
+    }
+
+    /// Walk the resolver's symbol table for the prelude's
+    /// `std::Iterator` trait sym. Same heuristic as `Checker`'s
+    /// `find_iterator_sym` — first `Trait` named `Iterator`.
+    fn find_iterator_sym(&self) -> Option<SymbolId> {
+        for (idx, sym) in self.res.symbols.iter().enumerate() {
+            if sym.name == "Iterator" && matches!(sym.kind, SymbolKind::Trait) {
+                return Some(SymbolId(idx as u32));
+            }
+        }
+        None
+    }
+
+    /// Walk the resolver's symbol table for the prelude's
+    /// `std::Option` enum sym. The prelude is parsed first, so the
+    /// first `Enum` named `Option` is the right one.
+    fn find_option_sym(&self) -> Option<SymbolId> {
+        for (idx, sym) in self.res.symbols.iter().enumerate() {
+            if sym.name == "Option" && matches!(sym.kind, SymbolKind::Enum) {
+                return Some(SymbolId(idx as u32));
+            }
+        }
+        None
+    }
+
+    /// Discriminant of a variant on an enum, looked up by name.
+    fn enum_variant_disc(
+        &self,
+        enum_sym: SymbolId,
+        variant_name: &str,
+    ) -> Option<u32> {
+        let &variant_sym = self.res.enum_variants.get(&enum_sym)?.get(variant_name)?;
+        match self.res.symbol(variant_sym).kind {
+            SymbolKind::EnumVariant { discriminant, .. } => Some(discriminant),
+            _ => None,
         }
     }
 

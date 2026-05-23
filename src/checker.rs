@@ -1647,6 +1647,13 @@ impl<'r> Checker<'r> {
 
     /// Walks a place expression (e.g. `a.b.c`) down to its root binding
     /// and ensures that binding is mutable. Reports an error otherwise.
+    ///
+    /// Parameters are allowed as roots: every user struct is heap-
+    /// allocated (an 8-byte descriptor pointer), so `param.field = ...`
+    /// mutates the heap location the caller and callee share — there
+    /// is no stack-by-value aliasing risk. Without this, an iterator
+    /// `fn next(self: Counter)` could not advance `self.n`, which is
+    /// the canonical Rune mutation pattern (sessions 014 / 020 / 049).
     fn check_place_root_mutable(&mut self, e: &Expr, span: Span) {
         match e {
             Expr::Path(p) => {
@@ -1657,13 +1664,12 @@ impl<'r> Checker<'r> {
                 let name = sym.name.clone();
                 match sym.kind {
                     SymbolKind::Local { mutable: true } => {}
+                    SymbolKind::Param => {
+                        // Heap-struct interior mutation; see doc above.
+                    }
                     SymbolKind::Local { mutable: false } => self.error(
                         span,
                         format!("cannot assign to field of immutable binding `{}`", name),
-                    ),
-                    SymbolKind::Param => self.error(
-                        span,
-                        format!("cannot assign to field of parameter `{}`", name),
                     ),
                     _ => self.error(span, format!("cannot assign to field of `{}`", name)),
                 }
@@ -2542,11 +2548,36 @@ impl<'r> Checker<'r> {
         let it = self.check_expr(iter);
         let elem_ty = match it {
             Ty::Array(elem, _) => *elem,
+            // A struct that implements the prelude's `std::Iterator`
+            // is iterable — the lowerer desugars `for x in iter` to
+            // a `while-true + match iter.next()` loop. The item type
+            // is the impl's `type Item = ...` binding, which the
+            // checker recorded in `impl_assoc_bindings_ty` during
+            // pass 1.
+            Ty::Struct(s, _) if self.struct_implements_iterator(s) => {
+                self.impl_assoc_bindings_ty
+                    .get(&(s, "Item".to_string()))
+                    .cloned()
+                    .unwrap_or(Ty::Error)
+            }
+            // A generic type parameter bounded by `Iterator` is also
+            // iterable — the desugar runs in the bounded-generic
+            // body, then monomorphization substitutes `T` with a
+            // concrete struct that does have the impl, at which
+            // point the projection resolves. The item type stays
+            // abstract here as `Ty::Assoc(TypeVar(T), "Item")` and
+            // gets concretized at substitution time (session 051).
+            Ty::TypeVar(t) if self.type_param_has_iterator_bound(t) => {
+                Ty::Assoc(Box::new(Ty::TypeVar(t)), "Item".into())
+            }
             Ty::Error => Ty::Error,
             other => {
                 self.error(
                     iter.span(),
-                    format!("cannot iterate over `{}`", other.display()),
+                    format!(
+                        "cannot iterate over `{}` — type does not implement `std::Iterator`",
+                        other.display()
+                    ),
                 );
                 Ty::Error
             }
@@ -2554,6 +2585,62 @@ impl<'r> Checker<'r> {
         self.bind_pattern(pat, &elem_ty);
         self.check_block(body);
         Ty::Unit
+    }
+
+    /// True iff `struct_sym` has an `impl Iterator for ...` block
+    /// in `Resolutions::impls_for`, where "Iterator" is the prelude
+    /// trait `std::Iterator`. A user-defined trait happening to be
+    /// named `Iterator` in some other module is *not* matched here
+    /// — the prelude's sym is unique by parse order (the prelude is
+    /// prepended to every program so its symbols are interned first;
+    /// `find_iterator_sym` returns the first match it finds).
+    fn struct_implements_iterator(&self, struct_sym: SymbolId) -> bool {
+        let Some(iter_sym) = self.find_iterator_sym() else { return false; };
+        self.res
+            .impls_for
+            .get(&struct_sym)
+            .map(|s| s.contains(&iter_sym))
+            .unwrap_or(false)
+    }
+
+    /// True iff the generic type-parameter `tvar` has the prelude's
+    /// `std::Iterator` trait in its bounds — the bounded-generic
+    /// counterpart of `struct_implements_iterator`.
+    fn type_param_has_iterator_bound(&self, tvar: SymbolId) -> bool {
+        let Some(iter_sym) = self.find_iterator_sym() else { return false; };
+        let Some(bounds) = self.res.generic_bounds.get(&tvar) else { return false; };
+        // Walk bounds + their supertrait closures so `<T: Sub>` where
+        // `Sub: Iterator` also counts. Mirrors the
+        // `trait_bound_method_sig` walk for static dispatch.
+        let mut worklist: Vec<SymbolId> = bounds.clone();
+        let mut visited: std::collections::HashSet<SymbolId> =
+            std::collections::HashSet::new();
+        while let Some(t) = worklist.pop() {
+            if !visited.insert(t) {
+                continue;
+            }
+            if t == iter_sym {
+                return true;
+            }
+            if let Some(supers) = self.res.trait_supertraits.get(&t) {
+                worklist.extend(supers);
+            }
+        }
+        false
+    }
+
+    /// Find the prelude's `std::Iterator` trait sym. Walks the
+    /// resolver's symbol table once per call — cheap; cargo's
+    /// test pool measures this as <1 us per for-loop site.
+    fn find_iterator_sym(&self) -> Option<SymbolId> {
+        for (idx, sym) in self.res.symbols.iter().enumerate() {
+            if sym.name == "Iterator"
+                && matches!(sym.kind, crate::resolver::SymbolKind::Trait)
+            {
+                return Some(SymbolId(idx as u32));
+            }
+        }
+        None
     }
 
     fn check_match(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Ty {

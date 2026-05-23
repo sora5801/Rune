@@ -82,6 +82,15 @@ rune: linked with clang -> primes.exe
   projection through a type parameter — the projection is resolved
   to the impl's binding at monomorphization, so the iterator-protocol
   shape `fn next<T: Iterator>(x: T) -> T::Item` compiles.
+- **Iterator protocol** — the prelude declares
+  `trait Iterator { type Item; fn next(self: dyn Iterator) -> Option<Self::Item>; }`.
+  A user struct that implements `Iterator` is iterable through
+  `for x in iter { ... }`; the lowerer desugars to a
+  `while true { match iter.next() { Some(x) => ..., None => break } }`
+  loop. Composes with bounded generics — `fn count<T: Iterator>(it: T)`
+  works for any concrete implementor. `break` is a real control-flow
+  construct, threaded through codegen's per-loop exit-block stack
+  with ARC-local cleanup at the snapshot.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -265,13 +274,15 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. A `collections` module — `HashMap<K, V>`, an iterator protocol
-   on top of `T::Item` — built on the now-generic `Vec<T>`
+1. A `collections` module — `HashMap<K, V>`, plus iterator
+   adapters (`map`, `filter`, `collect`) on top of the
+   now-shipped `Iterator` trait
 2. `From`-based error conversion for `?`
-3. `dyn Sub → dyn Super` explicit upcast (the layout admits a
-   zero-copy upcast for single-supertrait chains; diamond needs
-   box-rewriting)
-4. Self-hosted bootstrap (long-term)
+3. Paths in generic bounds (`<T: std::Iterator>`) and trait
+   supertraits — small follow-up to lift the `use as` workaround
+4. `Vec::iter()` / `slice::iter()` — collections become iterable
+   through the new protocol
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

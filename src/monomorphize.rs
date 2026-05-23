@@ -619,6 +619,7 @@ fn subst_expr_kind(k: &HirExprKind, subst: &HashMap<SymbolId, Ty>) -> HirExprKin
                 .collect(),
         },
         Return(v) => Return(v.as_ref().map(|e| Box::new(subst_expr(e, subst)))),
+        Break => Break,
         Unsupported(m) => Unsupported(m.clone()),
     }
 }
@@ -1095,7 +1096,7 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
     use HirExprKind::*;
     f(&e.ty);
     match &e.kind {
-        Lit(_) | Local(_) | Fn(_) | EnumVariant { .. } | Unsupported(_) => {}
+        Lit(_) | Local(_) | Fn(_) | EnumVariant { .. } | Unsupported(_) | Break => {}
         EnumPayloadCtor { payloads, .. } => {
             for p in payloads {
                 walk_tys_expr(p, f);
@@ -1228,7 +1229,7 @@ fn walk_block_collect_syms(b: &HirBlock, max: &mut u32) {
 fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
     use HirExprKind::*;
     match &e.kind {
-        Lit(_) | EnumVariant { .. } | Unsupported(_) => {}
+        Lit(_) | EnumVariant { .. } | Unsupported(_) | Break => {}
         Local(s) | Fn(s) => *max = (*max).max(s.0),
         Assign { lhs, rhs } => {
             *max = (*max).max(lhs.0);

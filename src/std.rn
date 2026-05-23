@@ -15,6 +15,19 @@ pub mod std {
     /* The result type — `Ok(value)` or `Err(error)`. */
     pub enum Result<T, E> { Ok(T), Err(E) }
 
+    /* The iterator protocol. Implement `Iterator` on a struct and
+       `for x in it { ... }` desugars to repeated `it.next()` calls,
+       stopping when `next` returns `None`.
+
+       Each call to `next` mutates the struct's fields in place via
+       FieldAssign — Rune has no mutable references, so iteration
+       state lives inside the struct and the method writes through
+       `self.field = ...`. */
+    pub trait Iterator {
+        type Item;
+        fn next(self: dyn Iterator) -> Option<Self::Item>;
+    }
+
     /* Return the contained value, or `default` when the Option is
        None. */
     pub fn unwrap_or<T>(o: Option<T>, default: T) -> T {
