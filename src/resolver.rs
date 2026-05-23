@@ -955,11 +955,15 @@ impl Resolver {
                 }
             }
             Item::Trait(t) => {
-                // Resolve supertrait idents to trait symbols.
+                // Resolve supertrait paths to trait symbols. Each
+                // entry may be a single-segment name (`A`) or a
+                // module-qualified path (`std::Iterator`); both go
+                // through `lookup_path`.
                 if let Some(&trait_sym) = self.decl_to_sym.get(&t.name.span) {
                     let mut super_syms = Vec::new();
                     for s in &t.supertraits {
-                        if let Some(ssym) = self.lookup(&s.name) {
+                        let display = path_display(s);
+                        if let Some((ssym, _)) = self.lookup_path(&s.segments) {
                             if matches!(
                                 self.symbols[ssym.0 as usize].kind,
                                 SymbolKind::Trait
@@ -967,13 +971,13 @@ impl Resolver {
                                 super_syms.push(ssym);
                             } else {
                                 self.error(
-                                    format!("`{}` is not a trait", s.name),
+                                    format!("`{}` is not a trait", display),
                                     s.span,
                                 );
                             }
                         } else {
                             self.error(
-                                format!("unresolved trait `{}`", s.name),
+                                format!("unresolved trait `{}`", display),
                                 s.span,
                             );
                         }
@@ -1025,19 +1029,22 @@ impl Resolver {
                 id
             };
             // Resolve each `T: Bound` to the bound trait's symbol.
+            // Bounds may be paths (`std::Iterator`), so dispatch
+            // through `lookup_path` rather than `lookup`.
             let mut bound_syms: Vec<SymbolId> = Vec::new();
             for b in &g.bounds {
-                if let Some(bsym) = self.lookup(&b.name) {
+                let display = path_display(b);
+                if let Some((bsym, _)) = self.lookup_path(&b.segments) {
                     if matches!(self.symbols[bsym.0 as usize].kind, SymbolKind::Trait) {
                         bound_syms.push(bsym);
                     } else {
                         self.error(
-                            format!("`{}` is not a trait", b.name),
+                            format!("`{}` is not a trait", display),
                             b.span,
                         );
                     }
                 } else {
-                    self.error(format!("unresolved trait `{}`", b.name), b.span);
+                    self.error(format!("unresolved trait `{}`", display), b.span);
                 }
             }
             if !bound_syms.is_empty() {
@@ -1366,4 +1373,17 @@ impl Resolver {
             Expr::Break(_) | Expr::Continue(_) => {}
         }
     }
+}
+
+/// `a::b::c` for diagnostics. The resolver carries `Path` values
+/// in trait-bound positions now; the original error messages used
+/// the bare `Ident.name`, so this preserves the format for the
+/// single-segment case while showing the full path for qualified
+/// bounds like `std::Iterator`.
+fn path_display(p: &crate::ast::Path) -> String {
+    p.segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
 }

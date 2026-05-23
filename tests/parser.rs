@@ -445,7 +445,24 @@ fn parses_bounded_generic() {
     let m = parse_ok("fn show<T: Display>(x: T) -> str { \"\" }");
     let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
     assert_eq!(f.generics[0].bounds.len(), 1);
-    assert_eq!(f.generics[0].bounds[0].name, "Display");
+    // Bounds are now `Path` (session 054); a single-segment bound
+    // still parses cleanly and its first segment is the name.
+    assert_eq!(f.generics[0].bounds[0].segments[0].name, "Display");
+}
+
+#[test]
+fn parses_path_bounded_generic() {
+    // `<T: a::b::Trait>` — multi-segment trait bounds parse as
+    // `Path` rather than the old single-Ident shape.
+    let m = parse_ok("fn show<T: a::b::Trait>(x: T) -> i64 { 0 }");
+    let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(f.generics[0].bounds.len(), 1);
+    let segs: Vec<&str> = f.generics[0].bounds[0]
+        .segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(segs, vec!["a", "b", "Trait"]);
 }
 
 #[test]

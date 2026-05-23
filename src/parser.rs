@@ -256,7 +256,7 @@ impl Parser {
                 if self.eat(&TokenKind::Colon) {
                     // One or more `+`-separated trait bounds.
                     loop {
-                        bounds.push(self.expect_ident()?);
+                        bounds.push(self.parse_path()?);
                         if !self.eat(&TokenKind::Plus) {
                             break;
                         }
@@ -442,11 +442,13 @@ impl Parser {
     fn parse_trait(&mut self, vis: Visibility, start: usize) -> ParseResult<TraitDecl> {
         self.expect(&TokenKind::Trait, "`trait`")?;
         let name = self.expect_ident()?;
-        // Optional supertrait list: `trait Sub: A + B { .. }`.
+        // Optional supertrait list: `trait Sub: A + B { .. }` or
+        // `trait Sub: std::Iterator { .. }`. Each entry is a path so
+        // module-qualified supertraits work without a `use`.
         let mut supertraits = Vec::new();
         if self.eat(&TokenKind::Colon) {
             loop {
-                supertraits.push(self.expect_ident()?);
+                supertraits.push(self.parse_path()?);
                 if !self.eat(&TokenKind::Plus) {
                     break;
                 }

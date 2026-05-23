@@ -274,15 +274,14 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. A `collections` module — `HashMap<K, V>`, plus iterator
-   adapters (`map`, `filter`, `collect`) on top of the
-   now-shipped `Iterator` trait
-2. `From`-based error conversion for `?`
-3. Paths in generic bounds (`<T: std::Iterator>`) and trait
-   supertraits — small follow-up to lift the `use as` workaround
-4. `Vec::iter()` / `slice::iter()` — collections become iterable
-   through the new protocol
-5. Self-hosted bootstrap (long-term)
+1. `Vec::iter()` / `slice::iter()` — built-in collections become
+   iterable through the now-shipped `Iterator` trait
+2. Iterator adapters (`map`, `filter`, `collect`) in the prelude
+3. `HashMap<K, V>` — the bigger collections piece
+4. `From`-based error conversion for `?`
+5. `continue` keyword — mirror of `break` over the existing
+   loop-exit-stack pattern
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

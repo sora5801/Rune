@@ -98,10 +98,11 @@ pub struct AssocTypeBinding {
 pub struct TraitDecl {
     pub vis: Visibility,
     pub name: Ident,
-    /// Supertraits after `:` (`trait Sub: A + B { .. }`). Empty for
-    /// a free-standing trait. Stored as `Vec<Ident>` like
-    /// `GenericParam::bounds` — single-segment names only.
-    pub supertraits: Vec<Ident>,
+    /// Supertraits after `:` (`trait Sub: A + B { .. }`, or
+    /// `trait Sub: std::Iterator { .. }`). Empty for a
+    /// free-standing trait. Each entry is a path so module-qualified
+    /// supertraits work without a `use` indirection.
+    pub supertraits: Vec<Path>,
     /// `type Item;` members — associated types every implementor
     /// must bind.
     pub assoc_types: Vec<AssocTypeDecl>,
@@ -120,11 +121,13 @@ pub struct TraitMethodSig {
 }
 
 /// A generic type parameter with optional trait bounds.
-/// `<T>` has empty bounds; `<T: Display>` / `<T: A + B>` populate them.
+/// `<T>` has empty bounds; `<T: Display>` / `<T: A + B>` /
+/// `<T: std::Iterator>` populate them. Each bound is a path so
+/// module-qualified trait bounds work without a `use` indirection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenericParam {
     pub name: Ident,
-    pub bounds: Vec<Ident>,
+    pub bounds: Vec<Path>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

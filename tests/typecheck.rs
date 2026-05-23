@@ -1644,3 +1644,29 @@ fn iterator_impl_missing_next_rejected() {
         "missing method",
     );
 }
+
+#[test]
+fn unresolved_path_bound_diagnostic_uses_full_path() {
+    // A bound that doesn't resolve produces an "unresolved trait
+    // `a::Unknown`" diagnostic — the full path appears, not just
+    // the last segment.
+    check_has_error(
+        r#"
+        fn ask<T: a::Unknown>(x: T) -> i64 { 0 }
+        fn main() -> i64 { 0 }
+        "#,
+        "unresolved trait `a::Unknown`",
+    );
+}
+
+#[test]
+fn unresolved_path_supertrait_diagnostic_uses_full_path() {
+    // Same shape for a supertrait list.
+    check_has_error(
+        r#"
+        trait Sub: a::Unknown { fn n(self: dyn Sub) -> i64; }
+        fn main() -> i64 { 0 }
+        "#,
+        "unresolved trait `a::Unknown`",
+    );
+}

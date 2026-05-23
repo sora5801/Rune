@@ -4373,13 +4373,9 @@ fn iter_break_from_loop_body() {
 
 #[test]
 fn iter_bounded_generic() {
-    // A generic function `count<T: Iterator>(it: T)` consumes
-    // any iterator and tallies. The monomorphizer specializes
-    // `count` for `Counter`; inside the specialized body the
-    // `for _ in it` desugar runs as usual. (Generic bounds only
-    // accept single-segment trait names today — a path like
-    // `<T: std::Iterator>` would parse-error, so this brings
-    // `Iterator` into scope first.)
+    // A generic function `count<T: std::Iterator>(it: T)` consumes
+    // any iterator and tallies. As of session 054, generic bounds
+    // accept paths directly — no `use as` workaround needed.
     let src = r#"
         struct Counter { n: i64, limit: i64 }
         impl std::Iterator for Counter {
@@ -4394,10 +4390,7 @@ fn iter_bounded_generic() {
                 }
             }
         }
-        // Use a bare-named alias so the parser's single-Ident
-        // trait-bound rule accepts it.
-        use std::Iterator as Iter;
-        fn count<T: Iter>(it: T) -> i64 {
+        fn count<T: std::Iterator>(it: T) -> i64 {
             let mut n: i64 = 0;
             for _ in it {
                 n = n + 1;
@@ -4483,4 +4476,49 @@ fn iter_nested_for_array_inside_iterator() {
         }
     "#;
     assert_eq!(run_main(src), 36);
+}
+
+#[test]
+fn path_bounded_generic_calls_method() {
+    // `<T: a::Foo>` — a multi-segment path in a trait bound.
+    // The resolver looks up `a::Foo` via `lookup_path`; everything
+    // downstream sees the same trait sym, so the bounded-generic
+    // method-lookup walk finds the impl method.
+    let src = r#"
+        mod a {
+            pub trait Foo { fn n(self: dyn Foo) -> i64; }
+        }
+        struct S { v: i64 }
+        impl a::Foo for S { fn n(self: S) -> i64 { self.v + 1 } }
+        fn ask<T: a::Foo>(x: T) -> i64 { x.n() }
+        fn main() -> i64 {
+            let s: S = S { v: 41 };
+            ask(s)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn path_supertrait_resolves() {
+    // `trait Sub: a::Super { ... }` — a module-qualified
+    // supertrait. The resolver records the parent's sym in
+    // `trait_supertraits`; the bounded-generic method-lookup
+    // walk finds `Super::greet` through the chain.
+    let src = r#"
+        mod a {
+            pub trait Super { fn greet(self: dyn Super) -> i64; }
+        }
+        trait Sub: a::Super { fn extra(self: dyn Sub) -> i64; }
+        struct S { v: i64 }
+        impl a::Super for S { fn greet(self: S) -> i64 { self.v } }
+        impl Sub        for S { fn extra(self: S) -> i64 { self.v + 1 } }
+        fn use_sub<T: Sub>(x: T) -> i64 { x.greet() + x.extra() }
+        fn main() -> i64 {
+            let s: S = S { v: 20 };
+            use_sub(s)
+        }
+    "#;
+    // 20 + 21 = 41
+    assert_eq!(run_main(src), 41);
 }
