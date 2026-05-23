@@ -101,6 +101,11 @@ pub struct Resolutions {
     /// The checker uses these for impl conformance + bounded-generic
     /// method-call resolution.
     pub trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    /// Associated-type names each trait declares, in source order.
+    pub trait_assoc_types: HashMap<SymbolId, Vec<String>>,
+    /// `(struct sym, associated-type name) → bound type`, from an
+    /// `impl`'s `type Item = Concrete;` binding.
+    pub impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     /// Generic-param symbol → trait-bound symbols. `<T: Display>`
     /// records `T_sym → [Display_sym]`.
     pub generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
@@ -147,6 +152,8 @@ pub struct Resolver {
     struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
     enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
+    trait_assoc_types: HashMap<SymbolId, Vec<String>>,
+    impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
     /// Names of the modules currently being declared / resolved,
     /// outermost first. Empty means the root module. Item lookups
@@ -198,6 +205,8 @@ impl Resolver {
             struct_generics: HashMap::new(),
             enum_generics: HashMap::new(),
             trait_methods: HashMap::new(),
+            trait_assoc_types: HashMap::new(),
+            impl_assoc_bindings: HashMap::new(),
             generic_bounds: HashMap::new(),
             current_path: Vec::new(),
             item_vis: HashMap::new(),
@@ -231,6 +240,8 @@ impl Resolver {
                 struct_generics: self.struct_generics,
                 enum_generics: self.enum_generics,
                 trait_methods: self.trait_methods,
+                trait_assoc_types: self.trait_assoc_types,
+                impl_assoc_bindings: self.impl_assoc_bindings,
                 generic_bounds: self.generic_bounds,
             },
             self.errors,
@@ -455,6 +466,22 @@ impl Resolver {
                 );
             }
             self.impl_methods.insert(key, id);
+        }
+        // Record this impl's associated-type bindings. The generic
+        // scope is re-entered so a `type Item = T` form resolves.
+        if !i.assoc_types.is_empty() {
+            self.enter_scope();
+            for g in &i.generics {
+                self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            }
+            for binding in &i.assoc_types {
+                self.resolve_type(&binding.value);
+                self.impl_assoc_bindings.insert(
+                    (struct_sym, binding.name.name.clone()),
+                    binding.value.clone(),
+                );
+            }
+            self.exit_scope();
         }
     }
 
@@ -832,6 +859,9 @@ impl Resolver {
         // validate impls and resolve bounded-generic method calls.
         if let Item::Trait(t) = item {
             self.trait_methods.insert(id, t.methods.clone());
+            let assoc: Vec<String> =
+                t.assoc_types.iter().map(|a| a.name.name.clone()).collect();
+            self.trait_assoc_types.insert(id, assoc);
         }
     }
 
@@ -1059,7 +1089,15 @@ impl Resolver {
 
     fn resolve_type(&mut self, t: &Type) {
         match t {
-            Type::Path(p) => self.resolve_path(p),
+            Type::Path(p) => {
+                // `Self::Item` — leave it for the checker, which
+                // resolves it against the enclosing trait/impl.
+                // Resolving here would report `Self` unresolved.
+                if p.segments.first().map(|s| s.name.as_str()) == Some("Self") {
+                    return;
+                }
+                self.resolve_path(p);
+            }
             Type::Dyn(p) => self.resolve_path(p),
             Type::Array { elem, .. } => self.resolve_type(elem),
         }

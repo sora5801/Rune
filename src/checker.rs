@@ -65,6 +65,16 @@ impl StructLayout {
     }
 }
 
+/// What `Self::Item` refers to while the checker is type-checking
+/// a particular item. `Impl(struct_sym)` resolves to the impl's
+/// concrete binding from `impl_assoc_bindings`; `Trait(trait_sym)`
+/// is abstract — `Self::Item` types as `Ty::Error` there.
+#[derive(Clone, Copy)]
+enum SelfContext {
+    Impl(SymbolId),
+    Trait(SymbolId),
+}
+
 pub struct Checker<'r> {
     res: &'r Resolutions,
     expr_types: HashMap<Span, Ty>,
@@ -75,6 +85,11 @@ pub struct Checker<'r> {
     dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
     errors: Vec<TypeError>,
     current_return: Ty,
+    /// The trait or impl whose signatures / bodies are currently
+    /// being checked — set around `register_signatures` and
+    /// `check_item` for traits and impls, used to resolve
+    /// `Self::Item` to a concrete type.
+    current_self: Option<SelfContext>,
 }
 
 impl<'r> Checker<'r> {
@@ -89,6 +104,7 @@ impl<'r> Checker<'r> {
             dyn_coercions: HashMap::new(),
             errors: Vec::new(),
             current_return: Ty::Unit,
+            current_self: None,
         }
     }
 
@@ -144,12 +160,29 @@ impl<'r> Checker<'r> {
                     self.local_types.insert(c.name.span, ty);
                 }
                 Item::Impl(i) => {
+                    // Set `current_self` so the method signatures'
+                    // `Self::Item` references resolve to this impl's
+                    // concrete binding — the stored `fn_signatures`
+                    // are then fully substituted.
+                    let prev = self.current_self.take();
+                    if let Some(&struct_sym) =
+                        self.res.path_to_sym.get(&i.type_path.span)
+                    {
+                        self.current_self = Some(SelfContext::Impl(struct_sym));
+                    }
                     for method in &i.methods {
                         let sig = self.fn_signature(method);
                         self.fn_signatures.insert(method.name.span, sig);
                     }
+                    self.current_self = prev;
                 }
                 Item::Trait(t) => {
+                    let prev = self.current_self.take();
+                    if let Some(&trait_sym) =
+                        self.res.decl_to_sym.get(&t.name.span)
+                    {
+                        self.current_self = Some(SelfContext::Trait(trait_sym));
+                    }
                     for m in &t.methods {
                         for p in &m.params {
                             self.resolve_type(&p.ty);
@@ -158,6 +191,7 @@ impl<'r> Checker<'r> {
                             self.resolve_type(rt);
                         }
                     }
+                    self.current_self = prev;
                 }
                 Item::Mod(md) => self.register_signatures(&md.items),
                 Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {}
@@ -195,6 +229,65 @@ impl<'r> Checker<'r> {
     fn resolve_type(&mut self, t: &Type) -> Ty {
         match t {
             Type::Path(p) => {
+                // `Self::Item` — resolve from the enclosing impl /
+                // trait. The resolver leaves these alone, so
+                // `path_to_sym` has no entry to consult.
+                if p.segments.len() == 2 && p.segments[0].name.as_str() == "Self" {
+                    let name = p.segments[1].name.as_str();
+                    let ty = match self.current_self {
+                        Some(SelfContext::Impl(struct_sym)) => {
+                            match self
+                                .res
+                                .impl_assoc_bindings
+                                .get(&(struct_sym, name.to_string()))
+                                .cloned()
+                            {
+                                Some(rhs_ast) => self.resolve_type(&rhs_ast),
+                                None => {
+                                    self.error(
+                                        p.span,
+                                        format!(
+                                            "no associated type `{}` bound by this impl",
+                                            name
+                                        ),
+                                    );
+                                    Ty::Error
+                                }
+                            }
+                        }
+                        Some(SelfContext::Trait(trait_sym)) => {
+                            let known = self
+                                .res
+                                .trait_assoc_types
+                                .get(&trait_sym)
+                                .map(|ns| ns.iter().any(|n| n == name))
+                                .unwrap_or(false);
+                            if !known {
+                                self.error(
+                                    p.span,
+                                    format!(
+                                        "trait declares no associated type `{}`",
+                                        name
+                                    ),
+                                );
+                            }
+                            // Abstract in a trait declaration — `Ty::Error`
+                            // is compatible with everything, so signatures
+                            // mentioning `Self::Item` don't propagate
+                            // spurious mismatches.
+                            Ty::Error
+                        }
+                        None => {
+                            self.error(
+                                p.span,
+                                "`Self` is only valid inside a trait or impl".to_string(),
+                            );
+                            Ty::Error
+                        }
+                    };
+                    self.type_resolutions.insert(p.span, ty.clone());
+                    return ty;
+                }
                 let Some(&sym_id) = self.res.path_to_sym.get(&p.span) else {
                     return Ty::Error;
                 };
@@ -292,10 +385,17 @@ impl<'r> Checker<'r> {
             Item::Fn(f) => self.check_fn(f),
             Item::Const(c) => self.check_const(c),
             Item::Impl(i) => {
+                let prev = self.current_self.take();
+                if let Some(&struct_sym) =
+                    self.res.path_to_sym.get(&i.type_path.span)
+                {
+                    self.current_self = Some(SelfContext::Impl(struct_sym));
+                }
                 for method in &i.methods {
                     self.check_fn(method);
                 }
                 self.check_trait_impl_conformance(i);
+                self.current_self = prev;
             }
             Item::Mod(md) => {
                 for inner in &md.items {
@@ -347,6 +447,55 @@ impl<'r> Checker<'r> {
                         );
                     }
                 }
+            }
+        }
+        // Associated-type conformance: every assoc type the trait
+        // declares must have a binding; the impl must not bind any
+        // name the trait did not declare; and no duplicates.
+        let declared: Vec<String> = self
+            .res
+            .trait_assoc_types
+            .get(&trait_sym)
+            .cloned()
+            .unwrap_or_default();
+        let Some(&struct_sym) = self.res.path_to_sym.get(&i.type_path.span) else {
+            return;
+        };
+        for name in &declared {
+            if !self
+                .res
+                .impl_assoc_bindings
+                .contains_key(&(struct_sym, name.clone()))
+            {
+                self.error(
+                    i.span,
+                    format!(
+                        "impl is missing associated type `{}` required by the trait",
+                        name
+                    ),
+                );
+            }
+        }
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for binding in &i.assoc_types {
+            if !declared.iter().any(|n| n == &binding.name.name) {
+                self.error(
+                    binding.span,
+                    format!(
+                        "trait declares no associated type `{}`",
+                        binding.name.name
+                    ),
+                );
+            }
+            if !seen.insert(binding.name.name.clone()) {
+                self.error(
+                    binding.span,
+                    format!(
+                        "associated type `{}` already bound in this impl",
+                        binding.name.name
+                    ),
+                );
             }
         }
     }

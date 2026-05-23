@@ -1456,3 +1456,39 @@ fn generic_impl_typechecks() {
         }
     "#);
 }
+
+#[test]
+fn impl_missing_assoc_type_rejected() {
+    check_has_error(
+        r#"
+        trait Iterator {
+            type Item;
+            fn next(self: dyn Iterator) -> i64;
+        }
+        struct C { n: i64 }
+        impl Iterator for C {
+            fn next(self: C) -> i64 { 0 }
+        }
+        fn main() -> i64 { 0 }
+        "#,
+        "missing associated type `Item`",
+    );
+}
+
+#[test]
+fn impl_unknown_assoc_type_rejected() {
+    check_has_error(
+        r#"
+        trait Iterator {
+            fn next(self: dyn Iterator) -> i64;
+        }
+        struct C { n: i64 }
+        impl Iterator for C {
+            type Other = i64;
+            fn next(self: C) -> i64 { 0 }
+        }
+        fn main() -> i64 { 0 }
+        "#,
+        "trait declares no associated type `Other`",
+    );
+}

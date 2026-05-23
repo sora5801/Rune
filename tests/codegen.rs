@@ -4073,3 +4073,27 @@ fn generic_impl_trait_bound() {
     // 17 + 25 = 42
     assert_eq!(run_main(src), 42);
 }
+
+#[test]
+fn assoc_type_concrete_method_call() {
+    // A trait declares `type Item;`; an impl binds `type Item = i64;`
+    // and uses `Self::Item` in the method's return position. The
+    // checker resolves `Self::Item` to `i64` from the impl's
+    // binding, so `c.next()` types and runs as `i64`.
+    let src = r#"
+        trait Iterator {
+            type Item;
+            fn next(self: dyn Iterator) -> Self::Item;
+        }
+        struct Counter { n: i64 }
+        impl Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> Self::Item { self.n + 1 }
+        }
+        fn main() -> i64 {
+            let c: Counter = Counter { n: 41 };
+            c.next()
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}

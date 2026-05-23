@@ -70,7 +70,25 @@ pub struct ImplBlock {
     /// inherent `impl Type`.
     pub trait_path: Option<Path>,
     pub type_path: Path,
+    /// `type Item = Concrete;` bindings — the impl's choices for the
+    /// trait's associated types.
+    pub assoc_types: Vec<AssocTypeBinding>,
     pub methods: Vec<FnDecl>,
+    pub span: Span,
+}
+
+/// `type Item;` — an associated type declared by a trait.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssocTypeDecl {
+    pub name: Ident,
+    pub span: Span,
+}
+
+/// `type Item = Concrete;` — an impl's binding for an associated type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssocTypeBinding {
+    pub name: Ident,
+    pub value: Type,
     pub span: Span,
 }
 
@@ -80,6 +98,9 @@ pub struct ImplBlock {
 pub struct TraitDecl {
     pub vis: Visibility,
     pub name: Ident,
+    /// `type Item;` members — associated types every implementor
+    /// must bind.
+    pub assoc_types: Vec<AssocTypeDecl>,
     pub methods: Vec<TraitMethodSig>,
     pub span: Span,
 }

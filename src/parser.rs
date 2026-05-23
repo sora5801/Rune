@@ -366,8 +366,25 @@ impl Parser {
             (None, first)
         };
         self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut assoc_types = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+            // `type Item = Concrete;` — this impl's binding for an
+            // associated type the trait declares.
+            if self.check_contextual("type") {
+                let t_start = self.peek_span().start;
+                self.bump();
+                let at_name = self.expect_ident()?;
+                self.expect(&TokenKind::Eq, "`=`")?;
+                let value = self.parse_type()?;
+                let semi = self.expect(&TokenKind::Semi, "`;`")?;
+                assoc_types.push(AssocTypeBinding {
+                    name: at_name,
+                    value,
+                    span: Span::new(t_start, semi.span.end),
+                });
+                continue;
+            }
             // No visibility on impl methods (`pub` ignored if present today).
             let _ = self.eat(&TokenKind::Pub);
             let fn_start = self.peek_span().start;
@@ -387,6 +404,7 @@ impl Parser {
             generics,
             trait_path,
             type_path,
+            assoc_types,
             methods,
             span: Span::new(start, rb.span.end),
         })
@@ -415,14 +433,32 @@ impl Parser {
         false
     }
 
+    /// Whether the current token is an identifier equal to `kw` — for
+    /// contextual keywords like `type` that are not reserved words.
+    fn check_contextual(&self, kw: &str) -> bool {
+        matches!(self.peek(), TokenKind::Ident(s) if s.as_str() == kw)
+    }
+
     fn parse_trait(&mut self, vis: Visibility, start: usize) -> ParseResult<TraitDecl> {
         self.expect(&TokenKind::Trait, "`trait`")?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
+        let mut assoc_types = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            // A trait method is a signature: `fn name(params) -> ret;`
             let m_start = self.peek_span().start;
+            // `type Item;` — an associated type the trait declares.
+            if self.check_contextual("type") {
+                self.bump();
+                let at_name = self.expect_ident()?;
+                let semi = self.expect(&TokenKind::Semi, "`;`")?;
+                assoc_types.push(AssocTypeDecl {
+                    name: at_name,
+                    span: Span::new(m_start, semi.span.end),
+                });
+                continue;
+            }
+            // A trait method is a signature: `fn name(params) -> ret;`
             self.expect(&TokenKind::Fn, "`fn`")?;
             let m_name = self.expect_ident()?;
             self.expect(&TokenKind::LParen, "`(`")?;
@@ -451,6 +487,7 @@ impl Parser {
         Ok(TraitDecl {
             vis,
             name,
+            assoc_types,
             methods,
             span: Span::new(start, rb.span.end),
         })
