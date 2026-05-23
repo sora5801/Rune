@@ -1716,3 +1716,48 @@ fn map_inferred_struct_arg_mismatch_rejected() {
         "field",
     );
 }
+
+#[test]
+fn closure_capture_rejected() {
+    // v0.x closures don't capture. The resolver checks each
+    // path inside the closure body — any Local/Param declared
+    // outside the closure's span fires a clear diagnostic.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mult: i64 = 3;
+            let f: fn(i64) -> i64 = |x| x * mult;
+            f(7)
+        }
+        "#,
+        "captures `mult`",
+    );
+}
+
+#[test]
+fn closure_arity_mismatch_rejected() {
+    // The contextual hint says one param; the closure has two.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let f: fn(i64) -> i64 = |x, y| x + y;
+            f(7)
+        }
+        "#,
+        "parameter",
+    );
+}
+
+#[test]
+fn closure_return_type_mismatch_rejected() {
+    // Body returns `bool` but the contextual hint says `i64`.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let f: fn(i64) -> i64 = |x| true;
+            0
+        }
+        "#,
+        "closure body returns",
+    );
+}

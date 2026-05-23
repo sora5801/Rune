@@ -97,11 +97,14 @@ rune: linked with clang -> primes.exe
   -> Vec<T::Item>` — the pipeline-style
   `collect(Filter { iter: Map { iter: v.iter(), f: double },
   pred: gt_three })` works end-to-end.
-- **Function-pointer values** — named `fn` items are first-class
-  values: assign one to a `let f: fn(i64) -> i64`, store one in a
-  struct field, or pass one to a parameter. The call site dispatches
-  through `call_indirect`. Closures (`|x| body`) are not yet
-  supported — callbacks must be named `fn` items.
+- **Function-pointer values + non-capturing closures** — named
+  `fn` items are first-class values, and closure literals
+  `|x| body` / `|x, y| body` / `|| body` desugar to anonymous
+  fn items. Callbacks at adapter call sites can be inline lambdas
+  as long as the body doesn't reference any binding from the
+  enclosing scope. Capturing closures (`|x| x * mult`) are
+  rejected with a clear diagnostic — they need env synthesis and
+  a `Fn` trait, deferred to a follow-up session.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -285,7 +288,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Closures (`|x| body`) + a `Fn` trait
+1. Capturing closures + a `Fn` trait — promotes lambdas to
+   first-class values that can close over their environment
 2. `HashMap<K, V>` — the bigger collections piece
 3. Range as a `RangeIter` struct — unify the for-over-range
    codegen with the Iterator protocol

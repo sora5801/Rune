@@ -4730,3 +4730,78 @@ fn vec_iter_exhausts_returns_none() {
     "#;
     assert_eq!(run_main(src), 0);
 }
+
+#[test]
+fn closure_non_capturing_basic() {
+    let src = r#"
+        fn main() -> i64 {
+            let f: fn(i64) -> i64 = |x| x * 2;
+            f(21)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn closure_in_map_pipeline() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: |x| x * 2 };
+            let mut total: i64 = 0;
+            for y in mapped {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn closure_in_filter_pipeline() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let filtered: std::Filter<std::VecIter<i64>> =
+                std::Filter { iter: v.iter(), pred: |x| x > 2 };
+            let mut total: i64 = 0;
+            for y in filtered {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn closure_chain_map_filter_collect() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: |x| x * 2 };
+            let filtered: std::Filter<std::Map<std::VecIter<i64>, i64>> =
+                std::Filter { iter: mapped, pred: |x| x > 3 };
+            let result: Vec<i64> = std::collect(filtered);
+            result.len() + result.get(0) + result.get(1)
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn closure_zero_args() {
+    let src = r#"
+        fn main() -> i64 {
+            let f: fn() -> i64 = || 42;
+            f()
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}

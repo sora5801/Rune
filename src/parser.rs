@@ -1139,6 +1139,49 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Continue(span))
             }
+            // `|x| body` / `|x, y| body` — non-capturing closure.
+            // (Bit-or `|` is infix, so we only see `|` at prefix
+            // position when it opens a closure.) Single-token `Pipe`
+            // expects at least one parameter before the closing `|`.
+            TokenKind::Pipe => {
+                self.bump(); // opening `|`
+                let mut params: Vec<ClosureParam> = Vec::new();
+                if !self.check(&TokenKind::Pipe) {
+                    loop {
+                        let name = self.expect_ident()?;
+                        let pty = if self.eat(&TokenKind::Colon) {
+                            Some(self.parse_type()?)
+                        } else {
+                            None
+                        };
+                        let pspan = name.span;
+                        params.push(ClosureParam { name, ty: pty, span: pspan });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&TokenKind::Pipe, "`|`")?;
+                let body = self.parse_expr()?;
+                let end = body.span().end;
+                Ok(Expr::Closure {
+                    params,
+                    body: Box::new(body),
+                    span: Span::new(span.start, end),
+                })
+            }
+            // `|| body` — zero-param closure. The lexer combines two
+            // `|`s into `PipePipe`, so we split it manually here.
+            TokenKind::PipePipe => {
+                self.bump(); // `||`
+                let body = self.parse_expr()?;
+                let end = body.span().end;
+                Ok(Expr::Closure {
+                    params: Vec::new(),
+                    body: Box::new(body),
+                    span: Span::new(span.start, end),
+                })
+            }
             _ => Err(ParseError {
                 message: format!("expected expression, found {}", describe_kind(self.peek())),
                 span,

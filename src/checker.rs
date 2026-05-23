@@ -47,6 +47,13 @@ pub struct CheckResults {
     /// resolves those once with `current_self = Impl(struct_sym)`
     /// so projections resolve at substitution time.
     pub impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
+    /// Per-closure inferred parameter types (in declaration order).
+    /// The lowerer uses these to build the synthesized `HirFn`'s
+    /// params for each `|x| body` expression.
+    pub closure_param_tys: HashMap<Span, Vec<Ty>>,
+    /// Per-closure inferred return type. From the body's tail (or
+    /// the contextual expected `Ty::Fn`'s ret).
+    pub closure_ret_tys: HashMap<Span, Ty>,
     pub errors: Vec<TypeError>,
 }
 
@@ -89,6 +96,8 @@ pub struct Checker<'r> {
     struct_layouts: HashMap<SymbolId, StructLayout>,
     dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
     impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
+    closure_param_tys: HashMap<Span, Vec<Ty>>,
+    closure_ret_tys: HashMap<Span, Ty>,
     errors: Vec<TypeError>,
     current_return: Ty,
     /// The trait or impl whose signatures / bodies are currently
@@ -109,6 +118,8 @@ impl<'r> Checker<'r> {
             struct_layouts: HashMap::new(),
             dyn_coercions: HashMap::new(),
             impl_assoc_bindings_ty: HashMap::new(),
+            closure_param_tys: HashMap::new(),
+            closure_ret_tys: HashMap::new(),
             errors: Vec::new(),
             current_return: Ty::Unit,
             current_self: None,
@@ -134,6 +145,8 @@ impl<'r> Checker<'r> {
             struct_layouts: self.struct_layouts,
             dyn_coercions: self.dyn_coercions,
             impl_assoc_bindings_ty: self.impl_assoc_bindings_ty,
+            closure_param_tys: self.closure_param_tys,
+            closure_ret_tys: self.closure_ret_tys,
             errors: self.errors,
         }
     }
@@ -716,7 +729,13 @@ impl<'r> Checker<'r> {
 
     fn check_let(&mut self, l: &LetStmt) {
         let declared = l.ty.as_ref().map(|t| self.resolve_type(t));
-        let inferred = l.init.as_ref().map(|e| self.check_expr(e));
+        // Pass `declared` as a hint to closure inits so an
+        // unannotated `|x| body` picks up its param types from
+        // the declared `fn(...) -> ...` annotation.
+        let inferred = l
+            .init
+            .as_ref()
+            .map(|e| self.check_expr_with_hint(e, declared.as_ref()));
         let final_ty = match (declared, inferred) {
             (Some(d), Some(i)) => {
                 let init_span =
@@ -1392,6 +1411,123 @@ impl<'r> Checker<'r> {
             }
             Expr::Return { value, span } => self.check_return(value.as_deref(), *span),
             Expr::Break(_) | Expr::Continue(_) => Ty::Never,
+            Expr::Closure { params, body, span } => {
+                self.check_closure(params, body, *span, None)
+            }
+        }
+    }
+
+    /// Type-check `e` with a contextual expected type. For a
+    /// closure literal, the hint feeds bidirectional inference of
+    /// unannotated params and tightens the body's return-type
+    /// check. For any other expression, falls through to the
+    /// bottom-up `check_expr`. Called from `check_let`,
+    /// `check_struct_lit` pass 2, and `check_call` argument
+    /// positions.
+    fn check_expr_with_hint(&mut self, e: &Expr, expected: Option<&Ty>) -> Ty {
+        if let (Expr::Closure { params, body, span }, Some(_)) = (e, expected) {
+            let ty = self.check_closure(params, body, *span, expected);
+            self.expr_types.insert(*span, ty.clone());
+            return ty;
+        }
+        self.check_expr(e)
+    }
+
+    /// Type-check a closure literal `|x, y| body`. The contextual
+    /// `expected` is an optional `Ty::Fn { params, ret }` from the
+    /// surrounding binding/field/argument position — used for
+    /// bidirectional inference of unannotated closure params and
+    /// to constrain the body's expected type. With no hint and no
+    /// annotations, the params type as `Ty::Error` (with a
+    /// diagnostic), since Rune has no top-down inference outside
+    /// the threading hooks the checker provides.
+    fn check_closure(
+        &mut self,
+        params: &[crate::ast::ClosureParam],
+        body: &Expr,
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // Pull `(expected_params, expected_ret)` from a Ty::Fn hint.
+        let (exp_params, exp_ret) = match expected {
+            Some(Ty::Fn { params: ep, ret: er }) => {
+                (Some(ep.clone()), Some((**er).clone()))
+            }
+            _ => (None, None),
+        };
+        if let Some(ref ep) = exp_params {
+            if ep.len() != params.len() {
+                self.error(
+                    span,
+                    format!(
+                        "closure expects {} parameter{} but the context wants {}",
+                        params.len(),
+                        if params.len() == 1 { "" } else { "s" },
+                        ep.len()
+                    ),
+                );
+            }
+        }
+        // Bind each parameter's type: annotation if present,
+        // otherwise the hint's corresponding param. Missing both
+        // is a hard error.
+        let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let pty = if let Some(t) = &p.ty {
+                self.resolve_type(t)
+            } else if let Some(ep) = exp_params.as_ref().and_then(|ep| ep.get(i)) {
+                ep.clone()
+            } else {
+                self.error(
+                    p.span,
+                    format!(
+                        "closure parameter `{}` needs a type annotation \
+                         (no contextual hint at this position)",
+                        p.name.name
+                    ),
+                );
+                Ty::Error
+            };
+            // Record the param's type at its declaration span so
+            // the body's reads of the param resolve correctly via
+            // `path_value_type → local_types`.
+            self.local_types.insert(p.name.span, pty.clone());
+            param_tys.push(pty);
+        }
+        self.closure_param_tys.insert(span, param_tys.clone());
+        // Check the body. If the hint provided an expected return
+        // type, use it as a structural check after the fact —
+        // bottom-up typing for the body itself; the hint just
+        // tightens what we'll claim the closure's overall type is.
+        let body_ty = self.check_expr(body);
+        // The return type comes from the body. The hint's ret is
+        // only used to *check* compatibility — when the hint is a
+        // bare TypeVar (e.g. Map's `U`), the body type is the
+        // authoritative ground truth and feeds back through
+        // `unify_typevars` at the call site to pin the outer
+        // generic. When the hint is concrete and disagrees, the
+        // body's type wins for downstream substitution and the
+        // diagnostic surfaces.
+        let ret_ty = match exp_ret {
+            Some(er) => {
+                if !body_ty.compatible(&er) {
+                    self.error(
+                        body.span(),
+                        format!(
+                            "closure body returns `{}` but the context wants `{}`",
+                            body_ty.display(),
+                            er.display()
+                        ),
+                    );
+                }
+                body_ty
+            }
+            None => body_ty,
+        };
+        self.closure_ret_tys.insert(span, ret_ty.clone());
+        Ty::Fn {
+            params: param_tys,
+            ret: Box::new(ret_ty),
         }
     }
 
@@ -2051,31 +2187,52 @@ impl<'r> Checker<'r> {
         };
 
         // Track which fields have been provided so we can flag missing/duplicates.
-        // Two passes: (1) typecheck each value AND infer the struct's
-        // generic-arg substitution from the field types, (2) check
-        // each value's assignability against the substituted declared
-        // field type. The two-pass split matters for fields whose
-        // declared type *references* a sibling field's type — e.g.
-        // `Map<I, U> { iter: I, f: fn(I::Item) -> U }`. With one
-        // pass, checking `f`'s assignability would see the unresolved
-        // `fn(I::Item) -> U`; with two, `I` is bound to whatever
-        // `iter`'s value provided.
+        // Two passes: (1) typecheck each non-closure value AND infer
+        // the struct's generic-arg substitution from the field
+        // types, (2) substitute the declared field types, then
+        // typecheck closure values with the substituted-field-type
+        // hint and assignability-check every field.
+        //
+        // Closures are deferred to pass 2 because their parameter
+        // types depend on contextual inference: `Map { iter:
+        // v.iter(), f: |x| x * 2 }` needs `iter`'s value type to
+        // pin `I = VecIter<i64>` so `f: fn(I::Item) -> U`
+        // substitutes to `fn(i64) -> U` — the hint a closure needs
+        // to bind `x: i64`. Pass-1-with-no-hint would error on
+        // every unannotated closure.
         let mut provided = std::collections::HashSet::new();
         let mut subst: std::collections::HashMap<SymbolId, Ty> =
             std::collections::HashMap::new();
-        let mut value_tys: Vec<(usize, Ty)> = Vec::with_capacity(fields.len());
+        let mut value_tys: Vec<(usize, Option<Ty>)> = Vec::with_capacity(fields.len());
         for (idx, init) in fields.iter().enumerate() {
+            if matches!(init.value, Expr::Closure { .. }) {
+                // Pass-1 deferral — pass 2 re-checks with the hint.
+                value_tys.push((idx, None));
+                if let Some(decl_field) = layout.field(&init.name.name) {
+                    // We still know the declared field type at
+                    // pass 1 (it may carry TypeVars). No subst
+                    // contribution from a deferred closure.
+                    let _ = decl_field;
+                }
+                if !provided.insert(init.name.name.clone()) {
+                    self.error(
+                        init.name.span,
+                        format!("field `{}` set more than once", init.name.name),
+                    );
+                }
+                continue;
+            }
             let value_ty = self.check_expr(&init.value);
             let Some(decl_field) = layout.field(&init.name.name) else {
                 self.error(
                     init.name.span,
                     format!("`{}` has no field `{}`", sym_name, init.name.name),
                 );
-                value_tys.push((idx, value_ty));
+                value_tys.push((idx, Some(value_ty)));
                 continue;
             };
             unify_typevars(&decl_field.ty, &value_ty, &mut subst);
-            value_tys.push((idx, value_ty));
+            value_tys.push((idx, Some(value_ty)));
             if !provided.insert(init.name.name.clone()) {
                 self.error(
                     init.name.span,
@@ -2084,14 +2241,32 @@ impl<'r> Checker<'r> {
             }
         }
         // Pass 2: substitute the gathered subst into each declared
-        // field type, then check assignability.
-        for (idx, value_ty) in &value_tys {
+        // field type, then check assignability. Closure values
+        // (deferred in pass 1) get type-checked here with the
+        // substituted field type as the bidirectional hint so
+        // unannotated closure params bind from the declared
+        // `fn(...) -> ...` shape.
+        for (idx, value_ty_in) in &value_tys {
             let init = &fields[*idx];
             let Some(decl_field) = layout.field(&init.name.name) else {
                 continue;
             };
             let expected = self.apply_subst(&decl_field.ty, &subst, None);
-            if !self.check_assignable(init.value.span(), value_ty, &expected) {
+            let value_ty = match value_ty_in {
+                Some(t) => t.clone(),
+                None => {
+                    // Deferred closure — typecheck now with the
+                    // substituted field type as the hint. Then
+                    // contribute its inferred type back to `subst`
+                    // so any generic params it pinned (e.g. `U` in
+                    // Map's `f: fn(I::Item) -> U`) propagate to
+                    // the struct's resulting type arg list.
+                    let ty = self.check_expr_with_hint(&init.value, Some(&expected));
+                    unify_typevars(&decl_field.ty, &ty, &mut subst);
+                    ty
+                }
+            };
+            if !self.check_assignable(init.value.span(), &value_ty, &expected) {
                 self.error(
                     init.value.span(),
                     format!(

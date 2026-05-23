@@ -19,6 +19,13 @@ pub struct Lowerer<'a> {
     /// `?` desugar's match-arm bindings). Starts past every resolver
     /// symbol so it can't collide with one.
     next_sym: Cell<u32>,
+    /// Closure-literal `|x| body` expressions get desugared into
+    /// anonymous `fn` items. They accumulate here during expression
+    /// lowering and `lower_module` drains the list into
+    /// `HirModule.items` after the user's fns are lowered. v0.x
+    /// only handles non-capturing closures; the resolver rejects
+    /// any reference to a binding outside the closure's body.
+    synthesized_fns: std::cell::RefCell<Vec<HirFn>>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -27,6 +34,7 @@ impl<'a> Lowerer<'a> {
             res,
             check,
             next_sym: Cell::new(res.symbols.len() as u32),
+            synthesized_fns: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -40,6 +48,13 @@ impl<'a> Lowerer<'a> {
     pub fn lower_module(&self, m: &ast::Module) -> HirModule {
         let mut items = Vec::new();
         self.lower_items(&m.items, &mut items);
+        // Drain any closure-synthesized HirFns. The resolver minted
+        // their syms; the lowerer built them while walking
+        // expressions; they're standalone fn items from the
+        // monomorphizer's and codegen's perspective.
+        for f in self.synthesized_fns.borrow_mut().drain(..) {
+            items.push(HirItem::Fn(f));
+        }
         // Compute the ARC-field map for every struct that contains one or
         // more ARC-managed fields. A struct is considered ARC-managed
         // transitively if it contains a Vec, Str, or another ARC struct.
@@ -588,7 +603,75 @@ impl<'a> Lowerer<'a> {
                 "range expressions are only supported inside string slicing (e.g. `s[a..b]`)"
                     .into(),
             ),
+            ast::Expr::Closure { params, body, span } => self.lower_closure(params, body, *span),
         }
+    }
+
+    /// Lower a closure literal into a synthesized anonymous `HirFn`
+    /// and replace the expression with the fn-pointer value. v0.x
+    /// is non-capturing — the resolver already rejected anything
+    /// that would need an env. The resulting HirFn lives at module
+    /// scope: same shape as any other generic-free `fn` item, so
+    /// the monomorphizer treats it as a concrete function and
+    /// codegen takes its address with `func_addr`.
+    fn lower_closure(
+        &self,
+        params: &[ast::ClosureParam],
+        body: &ast::Expr,
+        span: crate::token::Span,
+    ) -> HirExprKind {
+        let Some(&fn_sym) = self.res.closure_fn_sym.get(&span) else {
+            return HirExprKind::Unsupported(
+                "internal: closure expression has no resolver-minted sym"
+                    .into(),
+            );
+        };
+        let param_syms = self
+            .res
+            .closure_params
+            .get(&span)
+            .cloned()
+            .unwrap_or_default();
+        let param_tys = self
+            .check
+            .closure_param_tys
+            .get(&span)
+            .cloned()
+            .unwrap_or_default();
+        let ret_ty = self
+            .check
+            .closure_ret_tys
+            .get(&span)
+            .cloned()
+            .unwrap_or(Ty::Error);
+        let hir_params: Vec<HirParam> = params
+            .iter()
+            .zip(param_syms.iter())
+            .zip(param_tys.iter())
+            .map(|((p, &sym), ty)| HirParam {
+                sym,
+                name: p.name.name.clone(),
+                ty: ty.clone(),
+            })
+            .collect();
+        let body_hir = self.lower_expr(body);
+        let body_block = match body_hir.kind {
+            HirExprKind::Block(b) => b,
+            _ => HirBlock {
+                stmts: vec![HirStmt::Expr(body_hir, false)],
+                ty: ret_ty.clone(),
+            },
+        };
+        let synthesized = HirFn {
+            sym: fn_sym,
+            name: format!("__lambda_{}", fn_sym.0),
+            generics: Vec::new(),
+            params: hir_params,
+            ret_ty: ret_ty.clone(),
+            body: body_block,
+        };
+        self.synthesized_fns.borrow_mut().push(synthesized);
+        HirExprKind::Fn(fn_sym)
     }
 
     fn lower_lit(&self, lit: &ast::Lit, e: &ast::Expr) -> HirLit {

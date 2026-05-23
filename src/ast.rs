@@ -339,6 +339,23 @@ pub enum Expr {
     Return { value: Option<Box<Expr>>, span: Span },
     Break(Span),
     Continue(Span),
+    /// `|x| body` / `|x, y| body` / `|| body` — a closure literal.
+    /// v0.x: non-capturing only — closure bodies may not reference
+    /// any binding from the enclosing scope. The lowerer synthesizes
+    /// an anonymous `fn` item and replaces the closure expression
+    /// with that fn-pointer value.
+    Closure { params: Vec<ClosureParam>, body: Box<Expr>, span: Span },
+}
+
+/// One parameter of a closure literal. The type annotation is
+/// optional; when omitted, the checker infers from contextual
+/// "expected type" hints (a `Ty::Fn(params, ret)` on the
+/// surrounding binding, struct field, or argument position).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosureParam {
+    pub name: Ident,
+    pub ty: Option<Type>,
+    pub span: Span,
 }
 
 impl Expr {
@@ -362,7 +379,8 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::StructLit { span, .. }
             | Expr::Range { span, .. }
-            | Expr::Return { span, .. } => *span,
+            | Expr::Return { span, .. }
+            | Expr::Closure { span, .. } => *span,
             Expr::Path(p) => p.span,
             Expr::Block(b) => b.span,
             Expr::Break(s) | Expr::Continue(s) => *s,

@@ -117,6 +117,15 @@ pub struct Resolutions {
     /// shadowing a trait method do *not* count as implementing the
     /// trait. The checker reads this for supertrait conformance.
     pub impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
+    /// For each closure expression, the synthetic fn `SymbolId` the
+    /// resolver minted. The checker uses this to register the
+    /// closure's signature; the lowerer uses it as the `HirExprKind::Fn(sym)`
+    /// payload at the closure's source position.
+    pub closure_fn_sym: HashMap<Span, SymbolId>,
+    /// Closures' parameter symbols, in declaration order. The lowerer
+    /// needs these to build the synthesized `HirFn`'s params; the
+    /// checker reads them to bind types under contextual inference.
+    pub closure_params: HashMap<Span, Vec<SymbolId>>,
     /// Associated-type names each trait declares, in source order.
     pub trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     /// `(struct sym, associated-type name) → bound type`, from an
@@ -170,6 +179,20 @@ pub struct Resolver {
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
     trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
     impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
+    closure_fn_sym: HashMap<Span, SymbolId>,
+    closure_params: HashMap<Span, Vec<SymbolId>>,
+    /// Stack of currently-open closure-body spans, outermost first.
+    /// Inside a closure body, a Local/Param path that resolves to a
+    /// sym whose declaration span lies *outside* the innermost
+    /// stack entry is a capture — rejected in v0.x. The stack
+    /// supports nested closures (the outer one still rejects
+    /// captures from its caller's frame).
+    open_closure_spans: Vec<Span>,
+    /// Per-module counter for mangling synthetic lambda fn names
+    /// (`__lambda_0`, `__lambda_1`, ...). Reset to 0 nowhere — the
+    /// counter is global to the compilation; collisions across
+    /// modules avoided by module-path prefix mangling.
+    lambda_counter: u32,
     assoc_proj_bases: HashMap<Span, SymbolId>,
     trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
@@ -226,6 +249,10 @@ impl Resolver {
             trait_methods: HashMap::new(),
             trait_supertraits: HashMap::new(),
             impls_for: HashMap::new(),
+            closure_fn_sym: HashMap::new(),
+            closure_params: HashMap::new(),
+            open_closure_spans: Vec::new(),
+            lambda_counter: 0,
             assoc_proj_bases: HashMap::new(),
             trait_assoc_types: HashMap::new(),
             impl_assoc_bindings: HashMap::new(),
@@ -267,6 +294,8 @@ impl Resolver {
                 trait_methods: self.trait_methods,
                 trait_supertraits: self.trait_supertraits,
                 impls_for: self.impls_for,
+                closure_fn_sym: self.closure_fn_sym,
+                closure_params: self.closure_params,
                 assoc_proj_bases: self.assoc_proj_bases,
                 trait_assoc_types: self.trait_assoc_types,
                 impl_assoc_bindings: self.impl_assoc_bindings,
@@ -642,6 +671,34 @@ impl Resolver {
     /// `decl_to_sym`; subsequent calls hit the cached sym and only
     /// re-add it to the current scope. Mirrors `resolve_fn`'s
     /// existing pattern (session 048).
+    /// If we're inside a closure body (`open_closure_spans`
+    /// non-empty), reject any `Local`/`Param` resolution whose
+    /// declaration span lies outside the innermost closure's span.
+    /// v0.x closures don't capture; the diagnostic is the
+    /// definitive signal the user can fix.
+    fn check_closure_capture(&mut self, resolved: SymbolId, use_span: Span) {
+        let Some(&closure_span) = self.open_closure_spans.last() else {
+            return;
+        };
+        let sym = &self.symbols[resolved.0 as usize];
+        if !matches!(sym.kind, SymbolKind::Local { .. } | SymbolKind::Param) {
+            return;
+        }
+        if sym.span.start >= closure_span.start && sym.span.end <= closure_span.end {
+            return;
+        }
+        let name = sym.name.clone();
+        self.error(
+            format!(
+                "closure captures `{}` from the enclosing scope; \
+                 capturing closures are not yet supported in v0.x — \
+                 use a named `fn` item or inline the value",
+                name
+            ),
+            use_span,
+        );
+    }
+
     fn intern_generic_param(&mut self, g: &crate::ast::GenericParam) -> SymbolId {
         if let Some(&existing) = self.decl_to_sym.get(&g.name.span) {
             self.scopes
@@ -1269,6 +1326,7 @@ impl Resolver {
         if let Some((id, key)) = self.lookup_path(&p.segments) {
             self.check_path_visibility(&key, p.span);
             self.path_to_sym.insert(p.span, id);
+            self.check_closure_capture(id, p.span);
             return;
         }
         // 2. `Enum::Variant` — the leading segments name an enum
@@ -1407,7 +1465,62 @@ impl Resolver {
                 }
             }
             Expr::Break(_) | Expr::Continue(_) => {}
+            Expr::Closure { params, body, span } => {
+                self.resolve_closure(params, body, *span);
+            }
         }
+    }
+
+    /// Resolve a closure expression. Mints a synthetic fn `SymbolId`
+    /// (kind `Fn`) keyed by the closure's source span so the
+    /// checker and lowerer agree on its identity, opens a body
+    /// scope, declares each param as `Param`, resolves param types
+    /// + body, and rejects any path inside the body that escapes
+    /// to a Local/Param declared outside the closure's span (v0.x
+    /// non-capturing only).
+    fn resolve_closure(
+        &mut self,
+        params: &[crate::ast::ClosureParam],
+        body: &Expr,
+        span: Span,
+    ) {
+        // Mint the synthetic fn sym at the global level (its
+        // mangled name lives in scopes[0] so the lowerer's lookup
+        // by sym works). Use a module-prefix-aware name so two
+        // closures in different modules don't collide on codegen
+        // names.
+        let counter = self.lambda_counter;
+        self.lambda_counter += 1;
+        let lambda_name = format!("__lambda_{}", counter);
+        let module_qualified = if self.current_path.is_empty() {
+            lambda_name.clone()
+        } else {
+            format!("{}::{}", self.current_path.join("::"), lambda_name)
+        };
+        let fn_sym = SymbolId(self.symbols.len() as u32);
+        self.symbols.push(Symbol {
+            name: lambda_name,
+            span,
+            kind: SymbolKind::Fn,
+        });
+        self.scopes[0].insert(module_qualified, fn_sym);
+        self.closure_fn_sym.insert(span, fn_sym);
+        // Closure body scope.
+        self.enter_scope();
+        self.open_closure_spans.push(span);
+        let mut param_syms: Vec<SymbolId> = Vec::with_capacity(params.len());
+        for p in params {
+            let id = self.intern(p.name.name.clone(), p.name.span, SymbolKind::Param);
+            self.decl_to_sym.insert(p.name.span, id);
+            if let Some(t) = &p.ty {
+                self.resolve_type(t);
+            }
+            param_syms.push(id);
+        }
+        self.closure_params.insert(span, param_syms);
+        self.resolve_expr(body);
+        self.open_closure_spans.pop();
+        self.exit_scope();
     }
 }
 
