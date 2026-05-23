@@ -1220,6 +1220,14 @@ impl Resolver {
             }
             Type::Dyn(p) => self.resolve_path(p),
             Type::Array { elem, .. } => self.resolve_type(elem),
+            Type::Fn { params, ret, .. } => {
+                for p in params {
+                    self.resolve_type(p);
+                }
+                if let Some(r) = ret {
+                    self.resolve_type(r);
+                }
+            }
         }
     }
 

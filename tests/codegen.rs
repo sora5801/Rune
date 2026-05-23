@@ -4522,3 +4522,87 @@ fn path_supertrait_resolves() {
     // 20 + 21 = 41
     assert_eq!(run_main(src), 41);
 }
+
+#[test]
+fn fn_pointer_basic() {
+    // A named fn item stored in a struct field of `fn(...) -> ...`
+    // type, called through field access. The end-to-end check that
+    // session 055's fn-pointer plumbing works.
+    let src = r#"
+        fn double(x: i64) -> i64 { x * 2 }
+        struct Box { f: fn(i64) -> i64 }
+        fn main() -> i64 {
+            let b: Box = Box { f: double };
+            (b.f)(21)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn fn_pointer_through_local() {
+    // A local of `fn(i64) -> i64` type — assignment from a named
+    // fn item, then call through the local.
+    let src = r#"
+        fn add_one(x: i64) -> i64 { x + 1 }
+        fn main() -> i64 {
+            let f: fn(i64) -> i64 = add_one;
+            f(41)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn vec_iter_via_next() {
+    // `v.iter()` constructs a `std::VecIter<i64>`; calling `.next()`
+    // directly walks the underlying Vec one element at a time. The
+    // builtin `vec.iter()` method is checker-recognized and lowered
+    // to a struct literal; the resulting iterator implements the
+    // Iterator trait through plain user-defined `impl<T>` plumbing.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20); v.push(12);
+            let it: std::VecIter<i64> = v.iter();
+            let mut total: i64 = 0;
+            match it.next() {
+                std::Option::Some(a) => { total = total + a; }
+                std::Option::None => {}
+            }
+            match it.next() {
+                std::Option::Some(b) => { total = total + b; }
+                std::Option::None => {}
+            }
+            match it.next() {
+                std::Option::Some(c) => { total = total + c; }
+                std::Option::None => {}
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn vec_iter_exhausts_returns_none() {
+    // After the last element, `next` returns None. Confirms the
+    // index bookkeeping advances and the `< len` guard fires.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(99);
+            let it: std::VecIter<i64> = v.iter();
+            // First call: Some(99). Second call: None.
+            match it.next() {
+                std::Option::Some(_) => {}
+                std::Option::None => { return 1; }
+            }
+            match it.next() {
+                std::Option::Some(_) => 2,
+                std::Option::None => 0,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}

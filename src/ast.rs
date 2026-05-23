@@ -208,6 +208,12 @@ pub enum Type {
     Dyn(Path),
     /// `[T; N]` — a fixed-size array type.
     Array { elem: Box<Type>, len: usize, span: Span },
+    /// `fn(T1, T2, ..) -> R` — a function-pointer type. Used in
+    /// type annotations on struct fields, locals, parameters, and
+    /// return types. `ret` is `None` when the source writes
+    /// `fn(...)` without an explicit `-> R`, which the checker
+    /// treats as `Ty::Unit`. Resolved to `Ty::Fn`.
+    Fn { params: Vec<Type>, ret: Option<Box<Type>>, span: Span },
 }
 
 impl Type {
@@ -216,6 +222,7 @@ impl Type {
             Type::Path(p) => p.span,
             Type::Dyn(p) => p.span,
             Type::Array { span, .. } => *span,
+            Type::Fn { span, .. } => *span,
         }
     }
 }

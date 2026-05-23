@@ -426,11 +426,43 @@ impl<'a> Lowerer<'a> {
                             payloads: args.iter().map(|a| self.lower_expr(a)).collect(),
                         }
                     }
+                    // A Local of `Ty::Fn` type — calling through a
+                    // function-pointer-typed binding (e.g. a struct
+                    // field accessed via `let f = m.f; f(x)`). Goes
+                    // through IndirectCall.
+                    SymbolKind::Local { .. } | SymbolKind::Param => {
+                        let callee_hir = self.lower_expr(callee);
+                        if matches!(callee_hir.ty, Ty::Fn { .. }) {
+                            HirExprKind::IndirectCall {
+                                callee: Box::new(callee_hir),
+                                args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                            }
+                        } else {
+                            HirExprKind::Unsupported(
+                                "call target other than a named function".into(),
+                            )
+                        }
+                    }
                     _ => HirExprKind::Unsupported(
                         "call target other than a named function".into(),
                     ),
                 },
-                _ => HirExprKind::Unsupported("call target other than a named function".into()),
+                // Non-path callee — typically a parenthesized field
+                // access like `(self.f)(x)` where `self.f: Ty::Fn`.
+                // Lower the callee expression and emit IndirectCall.
+                None => {
+                    let callee_hir = self.lower_expr(callee);
+                    if matches!(callee_hir.ty, Ty::Fn { .. }) {
+                        HirExprKind::IndirectCall {
+                            callee: Box::new(callee_hir),
+                            args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                        }
+                    } else {
+                        HirExprKind::Unsupported(
+                            "call target other than a named function".into(),
+                        )
+                    }
+                }
             },
             ast::Expr::Block(b) => HirExprKind::Block(self.lower_block(b)),
             ast::Expr::If { cond, then_branch, else_branch, .. } => HirExprKind::If {
@@ -458,6 +490,15 @@ impl<'a> Lowerer<'a> {
                         method: method.name.clone(),
                         args: args.iter().map(|a| self.lower_expr(a)).collect(),
                     };
+                }
+                // `vec.iter()` — the builtin Vec → VecIter constructor.
+                // Desugar to a struct literal so the rest of the
+                // pipeline (monomorphization, ARC, codegen) sees an
+                // ordinary `Ty::Struct(VecIterSym, [elem])` value.
+                if matches!(&receiver_hir.ty, Ty::Vec(_)) && method.name == "iter" {
+                    if let Some(desugar) = self.lower_vec_iter(receiver_hir.clone()) {
+                        return desugar;
+                    }
                 }
                 // User-defined methods on structs (via `impl`) are lowered
                 // to a regular Call with the receiver as the first
@@ -1082,10 +1123,24 @@ impl<'a> Lowerer<'a> {
             {
                 return None;
             }
-            self.check
+            // The impl binding stored for `(s, "Item")` may reference
+            // the impl-block's own generic param (e.g. `type Item =
+            // T` inside `impl<T> Iterator for VecIter<T>` records
+            // `Ty::TypeVar(T)`). When the call-site iter has concrete
+            // type args, substitute them in so the desugar's match
+            // pattern is fully concrete; otherwise codegen sees a
+            // TypeVar leaked into the IR. Mirrors the checker's
+            // `apply_subst_inner_with` struct-arg fix.
+            let raw_item = self
+                .check
                 .impl_assoc_bindings_ty
                 .get(&(s, "Item".to_string()))
-                .cloned()?
+                .cloned()?;
+            let struct_args: Vec<Ty> = match &iter_hir.ty {
+                Ty::Struct(_, args) => args.clone(),
+                _ => Vec::new(),
+            };
+            self.subst_struct_typevars(s, &struct_args, &raw_item)
         } else {
             // Bounded-generic body — item is `T::Item`.
             Ty::Assoc(Box::new(iter_hir.ty.clone()), "Item".into())
@@ -1220,6 +1275,124 @@ impl<'a> Lowerer<'a> {
             }
         }
         None
+    }
+
+    /// Substitute a struct's impl-side generic params using the
+    /// struct's use-site type args. `subst_struct_typevars(VecIterSym,
+    /// [i64], TypeVar(T_VecIter))` returns `i64`. Walks `Ty::Fn`,
+    /// `Ty::Struct`, etc. recursively so an `Option<T>` binding
+    /// resolves to `Option<i64>` at a Vec<i64> use site.
+    fn subst_struct_typevars(
+        &self,
+        struct_sym: SymbolId,
+        struct_args: &[Ty],
+        ty: &Ty,
+    ) -> Ty {
+        let Some(generics) = self.res.struct_generics.get(&struct_sym) else {
+            return ty.clone();
+        };
+        let mut subst: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
+        for (gsym, arg) in generics.iter().zip(struct_args.iter()) {
+            subst.insert(*gsym, arg.clone());
+        }
+        Self::apply_subst_ty(ty, &subst)
+    }
+
+    /// Free-standing Ty substitution used by the lowerer when
+    /// resolving impl bindings against the call-site struct args.
+    /// Mirrors the checker's `apply_subst_inner` minus the bindings
+    /// and self_ty machinery — those layers handle their own resolution
+    /// at the checker, by the time the lowerer sees a type any
+    /// remaining substitution is purely TypeVar -> concrete.
+    fn apply_subst_ty(
+        ty: &Ty,
+        subst: &std::collections::HashMap<SymbolId, Ty>,
+    ) -> Ty {
+        match ty {
+            Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
+            Ty::Array(elem, n) => {
+                Ty::Array(Box::new(Self::apply_subst_ty(elem, subst)), *n)
+            }
+            Ty::Vec(elem) => Ty::Vec(Box::new(Self::apply_subst_ty(elem, subst))),
+            Ty::Fn { params, ret } => Ty::Fn {
+                params: params.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
+                ret: Box::new(Self::apply_subst_ty(ret, subst)),
+            },
+            Ty::Struct(s, args) => Ty::Struct(
+                *s,
+                args.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
+            ),
+            Ty::Enum(s, args) => Ty::Enum(
+                *s,
+                args.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
+            ),
+            Ty::Weak(inner) => Ty::Weak(Box::new(Self::apply_subst_ty(inner, subst))),
+            Ty::Assoc(base, name) => Ty::Assoc(
+                Box::new(Self::apply_subst_ty(base, subst)),
+                name.clone(),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Walk the resolver's symbol table for a prelude struct by
+    /// name. Same first-wins heuristic as `find_iterator_sym` /
+    /// `find_option_sym` — prelude symbols are interned first.
+    fn find_struct_sym(&self, name: &str) -> Option<SymbolId> {
+        for (idx, sym) in self.res.symbols.iter().enumerate() {
+            if sym.name == name && matches!(sym.kind, SymbolKind::Struct) {
+                return Some(SymbolId(idx as u32));
+            }
+        }
+        None
+    }
+
+    /// Build `std::VecIter<elem> { vec: <receiver>, idx: 0 }` from a
+    /// `Vec<elem>` receiver. The checker types `vec.iter()` as the
+    /// resulting struct type; the lowerer is responsible for the
+    /// concrete construction so the rest of the pipeline sees an
+    /// ordinary struct literal.
+    fn lower_vec_iter(&self, receiver_hir: HirExpr) -> Option<HirExprKind> {
+        let elem_ty = match &receiver_hir.ty {
+            Ty::Vec(e) => (**e).clone(),
+            _ => return None,
+        };
+        let vec_iter_sym = self.find_struct_sym("VecIter")?;
+        let layout = self.check.struct_layouts.get(&vec_iter_sym)?;
+        // Locate the two fields by name so the result tolerates a
+        // future re-ordering in std.rn.
+        let vec_offset = layout
+            .fields
+            .iter()
+            .find(|f| f.name == "vec")
+            .map(|f| f.offset)?;
+        let idx_offset = layout
+            .fields
+            .iter()
+            .find(|f| f.name == "idx")
+            .map(|f| f.offset)?;
+        let vec_ty_hir = Ty::Vec(Box::new(elem_ty));
+        let idx_lit = HirExpr {
+            kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+            ty: Ty::Int(IntTy::I64),
+        };
+        let mut fields_in_decl_order: Vec<(u32, HirExpr)> = Vec::with_capacity(2);
+        for decl in &layout.fields {
+            match decl.name.as_str() {
+                "vec" => fields_in_decl_order.push((vec_offset, HirExpr {
+                    kind: receiver_hir.kind.clone(),
+                    ty: vec_ty_hir.clone(),
+                })),
+                "idx" => fields_in_decl_order.push((idx_offset, idx_lit.clone())),
+                _ => return None,
+            }
+        }
+        Some(HirExprKind::StructLit {
+            sym: vec_iter_sym,
+            fields: fields_in_decl_order,
+            size: layout.size,
+        })
     }
 
     /// Discriminant of a variant on an enum, looked up by name.

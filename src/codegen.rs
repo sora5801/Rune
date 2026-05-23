@@ -1398,8 +1398,59 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     .ok_or_else(|| CodegenError("unknown local".into()))?;
                 Ok(Some(self.builder.use_var(var)))
             }
-            HirExprKind::Fn(_) => {
-                Err(CodegenError("first-class function values are not supported".into()))
+            HirExprKind::Fn(sym) => {
+                // Take the function's address. Used to pass a named
+                // fn as a value into a struct field or a parameter of
+                // `Ty::Fn` type — `Map { iter, f: double }` and
+                // similar. The address is an 8-byte pointer; codegen
+                // for an `IndirectCall` on this value emits
+                // `call_indirect` with the signature built from the
+                // expression's `Ty::Fn`.
+                let func_id = *self.sym_to_func.get(sym).ok_or_else(|| {
+                    CodegenError("fn-value references an unknown function".into())
+                })?;
+                let fref = self.module.declare_func_in_func(func_id, self.builder.func);
+                Ok(Some(self.builder.ins().func_addr(types::I64, fref)))
+            }
+            HirExprKind::IndirectCall { callee, args } => {
+                // Build the call signature from the callee's Ty::Fn,
+                // compile each arg, load the function pointer, emit
+                // `call_indirect`. Mirrors compile_dyn_call without
+                // the box-slot indirection.
+                let (param_tys, ret_ty) = match &callee.ty {
+                    Ty::Fn { params, ret } => (params.clone(), (**ret).clone()),
+                    other => {
+                        return Err(CodegenError(format!(
+                            "indirect call callee has non-fn type `{}`",
+                            other.display()
+                        )));
+                    }
+                };
+                let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_vals.push(
+                        self.compile_expr(a)?
+                            .ok_or_else(|| CodegenError("indirect call arg produced no value".into()))?,
+                    );
+                }
+                let fnptr = self
+                    .compile_expr(callee)?
+                    .ok_or_else(|| CodegenError("indirect call callee produced no value".into()))?;
+                let mut sig = self.module.make_signature();
+                for t in &param_tys {
+                    sig.params.push(AbiParam::new(cranelift_type(t)?));
+                }
+                if !matches!(ret_ty, Ty::Unit | Ty::Never) {
+                    sig.returns.push(AbiParam::new(cranelift_type(&ret_ty)?));
+                }
+                let sig_ref = self.builder.import_signature(sig);
+                let inst = self.builder.ins().call_indirect(sig_ref, fnptr, &arg_vals);
+                let results = self.builder.inst_results(inst);
+                if results.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(results[0]))
+                }
             }
             HirExprKind::EnumVariant { discriminant } => {
                 // Unit variant. If the enum has any payload-bearing
@@ -3276,6 +3327,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Weak(_) => types::I64,
         // A trait object is a pointer to its boxed method table.
         Ty::Dyn(_) => types::I64,
+        // A function pointer — same shape as any other pointer.
+        Ty::Fn { .. } => types::I64,
         // A projection or Self that survived to codegen means the
         // checker or monomorphizer failed to resolve it. Diagnose
         // clearly rather than masking the bug as "unsupported type".

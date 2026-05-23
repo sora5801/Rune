@@ -28,6 +28,31 @@ pub mod std {
         fn next(self: dyn Iterator) -> Option<Self::Item>;
     }
 
+    /* Iterator over the elements of a `Vec<T>`. Holds the source
+       vec and the current index; constructed by the builtin
+       `vec.iter()` method. Use it directly with `.next()` for
+       step-by-step iteration. (Iterator adapters `map`/`filter`/
+       `collect` are deferred — they need fuller projection
+       resolution through impl generics; session 055 ships only
+       the basic VecIter.) */
+    pub struct VecIter<T> {
+        vec: Vec<T>,
+        idx: i64,
+    }
+
+    pub impl<T> Iterator for VecIter<T> {
+        type Item = T;
+        fn next(self: VecIter<T>) -> Option<T> {
+            if self.idx < self.vec.len() {
+                let v: T = self.vec.get(self.idx);
+                self.idx = self.idx + 1;
+                Option::Some(v)
+            } else {
+                Option::None
+            }
+        }
+    }
+
     /* Return the contained value, or `default` when the Option is
        None. */
     pub fn unwrap_or<T>(o: Option<T>, default: T) -> T {

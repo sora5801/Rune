@@ -305,6 +305,12 @@ impl MonoState {
                     self.collect_requests_in_expr(v);
                 }
             }
+            HirExprKind::IndirectCall { callee, args } => {
+                self.collect_requests_in_expr(callee);
+                for a in args {
+                    self.collect_requests_in_expr(a);
+                }
+            }
             _ => {}
         }
     }
@@ -363,6 +369,23 @@ fn unify(param: &Ty, arg: &Ty, subst: &mut HashMap<SymbolId, Ty>) -> bool {
         (Ty::Array(p_elem, _), Ty::Array(a_elem, _)) => unify(p_elem, a_elem, subst),
         (Ty::Vec(p_elem), Ty::Vec(a_elem)) => unify(p_elem, a_elem, subst),
         (Ty::Weak(p_inner), Ty::Weak(a_inner)) => unify(p_inner, a_inner, subst),
+        // `fn(T) -> U` on the param side unifies component-wise so a
+        // call like `map(double)` whose param is `fn(I::Item) -> U`
+        // can bind `U = i64` from `double: fn(i64) -> i64`.
+        (
+            Ty::Fn { params: p_params, ret: p_ret },
+            Ty::Fn { params: a_params, ret: a_ret },
+        ) => {
+            if p_params.len() != a_params.len() {
+                return false;
+            }
+            for (p, a) in p_params.iter().zip(a_params.iter()) {
+                if !unify(p, a, subst) {
+                    return false;
+                }
+            }
+            unify(p_ret, a_ret, subst)
+        }
         (a, b) => a == b,
     }
 }
@@ -620,6 +643,10 @@ fn subst_expr_kind(k: &HirExprKind, subst: &HashMap<SymbolId, Ty>) -> HirExprKin
         },
         Return(v) => Return(v.as_ref().map(|e| Box::new(subst_expr(e, subst)))),
         Break => Break,
+        IndirectCall { callee, args } => IndirectCall {
+            callee: Box::new(subst_expr(callee, subst)),
+            args: args.iter().map(|e| subst_expr(e, subst)).collect(),
+        },
         Unsupported(m) => Unsupported(m.clone()),
     }
 }
@@ -760,6 +787,12 @@ fn rewrite_calls_in_expr(
                 rewrite_calls_in_expr(v, cache, generics);
             }
         }
+        IndirectCall { callee, args } => {
+            rewrite_calls_in_expr(callee, cache, generics);
+            for a in args.iter_mut() {
+                rewrite_calls_in_expr(a, cache, generics);
+            }
+        }
         _ => {}
     }
 }
@@ -891,6 +924,12 @@ fn resolve_method_calls_in_expr(
         Return(v) => {
             if let Some(v) = v {
                 resolve_method_calls_in_expr(v, impl_methods);
+            }
+        }
+        IndirectCall { callee, args } => {
+            resolve_method_calls_in_expr(callee, impl_methods);
+            for a in args {
+                resolve_method_calls_in_expr(a, impl_methods);
             }
         }
         _ => {}
@@ -1102,6 +1141,12 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
                 walk_tys_expr(p, f);
             }
         }
+        IndirectCall { callee, args } => {
+            walk_tys_expr(callee, f);
+            for a in args {
+                walk_tys_expr(a, f);
+            }
+        }
         Unary { expr, .. } | Cast { expr } => walk_tys_expr(expr, f),
         Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
             walk_tys_expr(lhs, f);
@@ -1231,6 +1276,12 @@ fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
     match &e.kind {
         Lit(_) | EnumVariant { .. } | Unsupported(_) | Break => {}
         Local(s) | Fn(s) => *max = (*max).max(s.0),
+        IndirectCall { callee, args } => {
+            walk_expr_collect_syms(callee, max);
+            for a in args {
+                walk_expr_collect_syms(a, max);
+            }
+        }
         Assign { lhs, rhs } => {
             *max = (*max).max(lhs.0);
             walk_expr_collect_syms(rhs, max);

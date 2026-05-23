@@ -598,6 +598,37 @@ impl Parser {
                 span: Span::new(start, close.span.end),
             });
         }
+        // `fn(T1, T2, ..) -> R` — a function-pointer type. Used in
+        // type annotations like `let f: fn(i64) -> i64 = double;`
+        // or in a struct field that holds a callback. `-> R` is
+        // optional; an omitted return clause resolves to `Ty::Unit`.
+        if self.check(&TokenKind::Fn) {
+            let start = self.peek_span().start;
+            self.bump(); // `fn`
+            self.expect(&TokenKind::LParen, "`(`")?;
+            let mut params: Vec<Type> = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    params.push(self.parse_type()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            let close = self.expect(&TokenKind::RParen, "`)`")?;
+            let (ret, end) = if self.eat(&TokenKind::Arrow) {
+                let ret_ty = self.parse_type()?;
+                let end = ret_ty.span().end;
+                (Some(Box::new(ret_ty)), end)
+            } else {
+                (None, close.span.end)
+            };
+            return Ok(Type::Fn {
+                params,
+                ret,
+                span: Span::new(start, end),
+            });
+        }
         // `dyn TraitName` — a trait object. v0.x: the trait path
         // carries no generic args.
         if self.eat(&TokenKind::Dyn) {

@@ -90,7 +90,15 @@ rune: linked with clang -> primes.exe
   loop. Composes with bounded generics — `fn count<T: Iterator>(it: T)`
   works for any concrete implementor. `break` is a real control-flow
   construct, threaded through codegen's per-loop exit-block stack
-  with ARC-local cleanup at the snapshot.
+  with ARC-local cleanup at the snapshot. `Vec<T>` joins the protocol
+  through `v.iter() -> std::VecIter<T>` (use it manually with
+  `.next()`; the `for x in v.iter()` desugar and iterator adapters
+  wait on a follow-up session).
+- **Function-pointer values** — named `fn` items are first-class
+  values: assign one to a `let f: fn(i64) -> i64`, store one in a
+  struct field, or pass one to a parameter. The call site dispatches
+  through `call_indirect`. Closures (`|x| body`) are not yet
+  supported — callbacks must be named `fn` items.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -274,14 +282,17 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `Vec::iter()` / `slice::iter()` — built-in collections become
-   iterable through the now-shipped `Iterator` trait
-2. Iterator adapters (`map`, `filter`, `collect`) in the prelude
-3. `HashMap<K, V>` — the bigger collections piece
-4. `From`-based error conversion for `?`
-5. `continue` keyword — mirror of `break` over the existing
+1. Projection-through-impl-generic resolution in the monomorphizer
+   (closes session 055's deferred gap, unblocking iterator
+   adapters)
+2. Iterator adapters (`map`, `filter`, `collect`) + `for x in
+   v.iter()` desugar
+3. Closures (`|x| body`) + a `Fn` trait
+4. `HashMap<K, V>` — the bigger collections piece
+5. `From`-based error conversion for `?`
+6. `continue` keyword — mirror of `break` over the existing
    loop-exit-stack pattern
-6. Self-hosted bootstrap (long-term)
+7. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -265,6 +265,12 @@ pub enum HirExprKind {
     /// short-circuit `Return` uses, so a `break` inside a match arm is a
     /// valid never-typed body.
     Break,
+    /// Call through a function-pointer value (`(map.f)(x)`, or a local
+    /// of `Ty::Fn` type). `callee` evaluates to a function-pointer
+    /// value; codegen builds the signature from the callee's `Ty::Fn`
+    /// and emits a `call_indirect`. Distinct from `Call`, which uses
+    /// a known `SymbolId`.
+    IndirectCall { callee: Box<HirExpr>, args: Vec<HirExpr> },
     /// Stub for features not yet handled in codegen. Lowering succeeds
     /// to allow inspection, codegen fails with the embedded message.
     Unsupported(String),

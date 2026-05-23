@@ -141,10 +141,27 @@ impl Ty {
         if matches!(self, Ty::TypeVar(_)) || matches!(other, Ty::TypeVar(_)) {
             return true;
         }
+        // An unresolved projection (`T::Item`) is opaque at
+        // typecheck time. Treat it as compatible with anything so a
+        // struct literal like `Map { iter, f: double }` can flow
+        // a concrete `fn(i64) -> i64` into a field declared as
+        // `fn(I::Item) -> U` — monomorphization resolves the
+        // projection later, and a real mismatch surfaces then.
+        if matches!(self, Ty::Assoc(_, _)) || matches!(other, Ty::Assoc(_, _)) {
+            return true;
+        }
         match (self, other) {
             (Ty::Struct(s1, _), Ty::Struct(s2, _)) => s1 == s2,
             (Ty::Enum(s1, _), Ty::Enum(s2, _)) => s1 == s2,
             (Ty::Vec(_), Ty::Vec(_)) => true,
+            (
+                Ty::Fn { params: p1, ret: r1 },
+                Ty::Fn { params: p2, ret: r2 },
+            ) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2.iter()).all(|(a, b)| a.compatible(b))
+                    && r1.compatible(r2)
+            }
             _ => self == other,
         }
     }

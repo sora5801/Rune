@@ -246,7 +246,13 @@ impl<'r> Checker<'r> {
         subst: &std::collections::HashMap<SymbolId, Ty>,
         self_ty: Option<&Ty>,
     ) -> Ty {
-        apply_subst_inner(ty, subst, self_ty, Some(&self.impl_assoc_bindings_ty))
+        apply_subst_inner_with(
+            ty,
+            subst,
+            self_ty,
+            Some(&self.impl_assoc_bindings_ty),
+            Some(self.res),
+        )
     }
 
     fn fn_signature(&mut self, f: &FnDecl) -> Ty {
@@ -425,6 +431,20 @@ impl<'r> Checker<'r> {
             Type::Array { elem, len, span } => {
                 let elem_ty = self.resolve_type(elem);
                 let ty = Ty::Array(Box::new(elem_ty), *len);
+                self.type_resolutions.insert(*span, ty.clone());
+                ty
+            }
+            Type::Fn { params, ret, span } => {
+                let param_tys: Vec<Ty> =
+                    params.iter().map(|t| self.resolve_type(t)).collect();
+                let ret_ty = ret
+                    .as_ref()
+                    .map(|r| self.resolve_type(r))
+                    .unwrap_or(Ty::Unit);
+                let ty = Ty::Fn {
+                    params: param_tys,
+                    ret: Box::new(ret_ty),
+                };
                 self.type_resolutions.insert(*span, ty.clone());
                 ty
             }
@@ -1999,37 +2019,55 @@ impl<'r> Checker<'r> {
         };
 
         // Track which fields have been provided so we can flag missing/duplicates.
-        // Also infer the struct's generic args from field types so the
-        // resulting Ty::Struct carries them — downstream field access
-        // can then resolve TypeVar to the concrete instantiation.
+        // Two passes: (1) typecheck each value AND infer the struct's
+        // generic-arg substitution from the field types, (2) check
+        // each value's assignability against the substituted declared
+        // field type. The two-pass split matters for fields whose
+        // declared type *references* a sibling field's type — e.g.
+        // `Map<I, U> { iter: I, f: fn(I::Item) -> U }`. With one
+        // pass, checking `f`'s assignability would see the unresolved
+        // `fn(I::Item) -> U`; with two, `I` is bound to whatever
+        // `iter`'s value provided.
         let mut provided = std::collections::HashSet::new();
         let mut subst: std::collections::HashMap<SymbolId, Ty> =
             std::collections::HashMap::new();
-        for init in fields {
+        let mut value_tys: Vec<(usize, Ty)> = Vec::with_capacity(fields.len());
+        for (idx, init) in fields.iter().enumerate() {
             let value_ty = self.check_expr(&init.value);
             let Some(decl_field) = layout.field(&init.name.name) else {
                 self.error(
                     init.name.span,
                     format!("`{}` has no field `{}`", sym_name, init.name.name),
                 );
+                value_tys.push((idx, value_ty));
                 continue;
             };
             unify_typevars(&decl_field.ty, &value_ty, &mut subst);
-            if !self.check_assignable(init.value.span(), &value_ty, &decl_field.ty) {
+            value_tys.push((idx, value_ty));
+            if !provided.insert(init.name.name.clone()) {
+                self.error(
+                    init.name.span,
+                    format!("field `{}` set more than once", init.name.name),
+                );
+            }
+        }
+        // Pass 2: substitute the gathered subst into each declared
+        // field type, then check assignability.
+        for (idx, value_ty) in &value_tys {
+            let init = &fields[*idx];
+            let Some(decl_field) = layout.field(&init.name.name) else {
+                continue;
+            };
+            let expected = self.apply_subst(&decl_field.ty, &subst, None);
+            if !self.check_assignable(init.value.span(), value_ty, &expected) {
                 self.error(
                     init.value.span(),
                     format!(
                         "field `{}` declared `{}` but value has type `{}`",
                         init.name.name,
-                        decl_field.ty.display(),
+                        expected.display(),
                         value_ty.display()
                     ),
-                );
-            }
-            if !provided.insert(init.name.name.clone()) {
-                self.error(
-                    init.name.span,
-                    format!("field `{}` set more than once", init.name.name),
                 );
             }
         }
@@ -2211,6 +2249,7 @@ impl<'r> Checker<'r> {
         let recv_ty = self.check_expr(receiver);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
         let sig = resolve_method(&recv_ty, &method.name)
+            .or_else(|| self.builtin_vec_iter_sig(&recv_ty, &method.name))
             .or_else(|| self.user_method_sig(&recv_ty, &method.name))
             .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name))
             .or_else(|| self.dyn_method_sig(&recv_ty, &method.name).map(|(s, _)| s));
@@ -2643,6 +2682,36 @@ impl<'r> Checker<'r> {
         None
     }
 
+    /// Find the prelude's struct of a given name. Same heuristic as
+    /// `find_iterator_sym` — first `Struct` whose name matches; the
+    /// prelude is parsed first so its symbols are interned first.
+    fn find_struct_sym(&self, name: &str) -> Option<SymbolId> {
+        for (idx, sym) in self.res.symbols.iter().enumerate() {
+            if sym.name == name
+                && matches!(sym.kind, crate::resolver::SymbolKind::Struct)
+            {
+                return Some(SymbolId(idx as u32));
+            }
+        }
+        None
+    }
+
+    /// `vec.iter()` builtin method. Constructs a `std::VecIter<elem>`
+    /// from a `Vec<elem>`. The actual heap construction is emitted
+    /// by the lowerer (`MethodCall` on a `Ty::Vec` with name "iter"
+    /// is intercepted there).
+    fn builtin_vec_iter_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+        if name != "iter" {
+            return None;
+        }
+        let Ty::Vec(elem) = recv else { return None };
+        let vec_iter_sym = self.find_struct_sym("VecIter")?;
+        Some(MethodSig {
+            params: vec![],
+            ret: Ty::Struct(vec_iter_sym, vec![(**elem).clone()]),
+        })
+    }
+
     fn check_match(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Ty {
         let st = self.check_expr(scrutinee);
         let mut result_ty: Option<Ty> = None;
@@ -2794,6 +2863,18 @@ fn unify_typevars(
         (Ty::Array(p_elem, _), Ty::Array(a_elem, _)) => {
             unify_typevars(p_elem, a_elem, subst);
         }
+        (Ty::Vec(p_elem), Ty::Vec(a_elem)) => {
+            unify_typevars(p_elem, a_elem, subst);
+        }
+        (
+            Ty::Fn { params: p_params, ret: p_ret },
+            Ty::Fn { params: a_params, ret: a_ret },
+        ) if p_params.len() == a_params.len() => {
+            for (p, a) in p_params.iter().zip(a_params.iter()) {
+                unify_typevars(p, a, subst);
+            }
+            unify_typevars(p_ret, a_ret, subst);
+        }
         _ => {}
     }
 }
@@ -2835,51 +2916,91 @@ fn apply_subst_inner(
     self_ty: Option<&Ty>,
     bindings: Option<&std::collections::HashMap<(SymbolId, String), Ty>>,
 ) -> Ty {
+    apply_subst_inner_with(ty, subst, self_ty, bindings, None)
+}
+
+/// Same as `apply_subst_inner` but takes the resolver so that a
+/// concrete-struct projection lookup can substitute the impl's own
+/// generic params using the struct's type args. Without that step,
+/// `VecIter<i64>::Item` resolves to the impl-block's `TypeVar(T)`
+/// rather than the concrete `i64` — a partial resolution that leaks
+/// to codegen.
+fn apply_subst_inner_with(
+    ty: &Ty,
+    subst: &std::collections::HashMap<SymbolId, Ty>,
+    self_ty: Option<&Ty>,
+    bindings: Option<&std::collections::HashMap<(SymbolId, String), Ty>>,
+    res: Option<&crate::resolver::Resolutions>,
+) -> Ty {
     match ty {
         Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
         Ty::SelfType => self_ty.cloned().unwrap_or_else(|| ty.clone()),
         Ty::Assoc(base, name) => {
-            let new_base = apply_subst_inner(base, subst, self_ty, bindings);
+            let new_base = apply_subst_inner_with(base, subst, self_ty, bindings, res);
             // If the projection's base is now a concrete struct and
             // an impl binding is known, resolve. Otherwise the
             // projection stays unresolved for the monomorphizer.
-            if let Ty::Struct(s, _) = &new_base {
+            if let Ty::Struct(s, args) = &new_base {
                 if let Some(map) = bindings {
                     if let Some(resolved) = map.get(&(*s, name.clone())) {
-                        return apply_subst_inner(resolved, subst, self_ty, bindings);
+                        // Build a struct-generic-arg substitution if
+                        // the resolver is available — turns the
+                        // impl-block's `Ty::TypeVar(T)` into the
+                        // user-site arg type. Without this,
+                        // `VecIter<i64>::Item` would resolve only to
+                        // `Ty::TypeVar(T_VecIter)`.
+                        let struct_subst = if let Some(r) = res {
+                            build_struct_subst(r, *s, args)
+                        } else {
+                            std::collections::HashMap::new()
+                        };
+                        let after_struct = apply_subst_inner_with(
+                            resolved,
+                            &struct_subst,
+                            self_ty,
+                            bindings,
+                            res,
+                        );
+                        return apply_subst_inner_with(
+                            &after_struct,
+                            subst,
+                            self_ty,
+                            bindings,
+                            res,
+                        );
                     }
                 }
             }
             Ty::Assoc(Box::new(new_base), name.clone())
         }
         Ty::Array(elem, n) => Ty::Array(
-            Box::new(apply_subst_inner(elem, subst, self_ty, bindings)),
+            Box::new(apply_subst_inner_with(elem, subst, self_ty, bindings, res)),
             *n,
         ),
-        Ty::Vec(elem) => {
-            Ty::Vec(Box::new(apply_subst_inner(elem, subst, self_ty, bindings)))
-        }
+        Ty::Vec(elem) => Ty::Vec(Box::new(apply_subst_inner_with(
+            elem, subst, self_ty, bindings, res,
+        ))),
         Ty::Fn { params, ret } => Ty::Fn {
             params: params
                 .iter()
-                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .map(|t| apply_subst_inner_with(t, subst, self_ty, bindings, res))
                 .collect(),
-            ret: Box::new(apply_subst_inner(ret, subst, self_ty, bindings)),
+            ret: Box::new(apply_subst_inner_with(ret, subst, self_ty, bindings, res)),
         },
         Ty::Struct(s, args) => Ty::Struct(
             *s,
             args.iter()
-                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .map(|t| apply_subst_inner_with(t, subst, self_ty, bindings, res))
                 .collect(),
         ),
         Ty::Enum(s, args) => Ty::Enum(
             *s,
             args.iter()
-                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .map(|t| apply_subst_inner_with(t, subst, self_ty, bindings, res))
                 .collect(),
         ),
-        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst_inner(
-            inner, subst, self_ty, bindings,
+        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst_inner_with(
+            inner, subst, self_ty, bindings, res,
         ))),
         _ => ty.clone(),
     }
@@ -2961,6 +3082,12 @@ fn vec_element_supported(ty: &Ty) -> bool {
             | Ty::Vec(_)
             | Ty::Dyn(_)
             | Ty::TypeVar(_)
+            // An unresolved projection (`T::Item`) is opaque at
+            // typecheck time; monomorphization replaces it with a
+            // concrete type that the check above accepts. Allow it
+            // through so generic helpers like `collect<T: Iterator>
+            // -> Vec<T::Item>` typecheck.
+            | Ty::Assoc(_, _)
             | Ty::Error
     )
 }
