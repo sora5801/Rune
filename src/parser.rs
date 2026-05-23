@@ -442,6 +442,11 @@ impl Parser {
     fn parse_trait(&mut self, vis: Visibility, start: usize) -> ParseResult<TraitDecl> {
         self.expect(&TokenKind::Trait, "`trait`")?;
         let name = self.expect_ident()?;
+        // Optional generic params `<A, R>` — same shape as
+        // `fn f<T, U>` and `struct S<T>`. Generic params are in
+        // scope while resolving the trait's method signatures and
+        // associated-type bindings.
+        let generics = self.parse_optional_generic_params()?;
         // Optional supertrait list: `trait Sub: A + B { .. }` or
         // `trait Sub: std::Iterator { .. }`. Each entry is a path so
         // module-qualified supertraits work without a `use`.
@@ -499,6 +504,7 @@ impl Parser {
         Ok(TraitDecl {
             vis,
             name,
+            generics,
             supertraits,
             assoc_types,
             methods,
@@ -629,10 +635,26 @@ impl Parser {
                 span: Span::new(start, end),
             });
         }
-        // `dyn TraitName` — a trait object. v0.x: the trait path
-        // carries no generic args.
+        // `dyn TraitName<args>` — a trait object. Generic args
+        // after the trait path are parsed the same way as for any
+        // type-position path (`Vec<i64>`).
         if self.eat(&TokenKind::Dyn) {
-            let path = self.parse_path()?;
+            let mut path = self.parse_path()?;
+            if self.check(&TokenKind::Lt) {
+                self.bump();
+                let mut args = Vec::new();
+                if !self.check(&TokenKind::Gt) {
+                    loop {
+                        args.push(self.parse_type()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                let gt = self.expect_generic_close()?;
+                path.generic_args = args;
+                path.span = Span::new(path.span.start, gt.end);
+            }
             return Ok(Type::Dyn(path));
         }
         // At type position, `Vec<i64>` is unambiguous — the parser

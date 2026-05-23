@@ -4796,6 +4796,75 @@ fn closure_chain_map_filter_collect() {
 }
 
 #[test]
+fn generic_trait_basic() {
+    // Declare a trait with generic params, impl it for a struct,
+    // call the method through a `dyn TheTrait<...>` value. The
+    // generic args resolve correctly through the dyn dispatch
+    // and the impl's method body works on the concrete types.
+    let src = r#"
+        trait Producer<T> {
+            fn make(self: dyn Producer<T>) -> T;
+        }
+        struct IntBox { v: i64 }
+        impl Producer<i64> for IntBox {
+            fn make(self: IntBox) -> i64 { self.v + 1 }
+        }
+        fn main() -> i64 {
+            let b: IntBox = IntBox { v: 41 };
+            let d: dyn Producer<i64> = b;
+            d.make()
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generic_trait_two_params() {
+    // Two generic params on the trait — exercises the multi-arg
+    // substitution path through dyn_method_sig.
+    let src = r#"
+        trait Pair<A, B> {
+            fn first(self: dyn Pair<A, B>) -> A;
+            fn second(self: dyn Pair<A, B>) -> B;
+        }
+        struct IntBoolPair { a: i64, b: bool }
+        impl Pair<i64, bool> for IntBoolPair {
+            fn first(self: IntBoolPair) -> i64 { self.a }
+            fn second(self: IntBoolPair) -> bool { self.b }
+        }
+        fn main() -> i64 {
+            let p: IntBoolPair = IntBoolPair { a: 42, b: true };
+            let d: dyn Pair<i64, bool> = p;
+            let n: i64 = d.first();
+            if d.second() { n } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn generic_trait_in_method_arg_position() {
+    // The trait's generic param `T` appears in a method's argument
+    // position too — substitution must apply to params, not just
+    // returns.
+    let src = r#"
+        trait Receiver<T> {
+            fn take(self: dyn Receiver<T>, value: T) -> i64;
+        }
+        struct Counter { n: i64 }
+        impl Receiver<i64> for Counter {
+            fn take(self: Counter, value: i64) -> i64 { self.n + value }
+        }
+        fn main() -> i64 {
+            let c: Counter = Counter { n: 30 };
+            let d: dyn Receiver<i64> = c;
+            d.take(12)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
 fn closure_zero_args() {
     let src = r#"
         fn main() -> i64 {

@@ -106,6 +106,11 @@ pub struct Resolutions {
     /// Transitive walk is the caller's job; an empty entry (or no
     /// entry) means a free-standing trait.
     pub trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Generic type-parameter symbols per generic trait, in
+    /// declaration order. `trait Fn1<A, R>` records `[A_sym,
+    /// R_sym]`. The checker substitutes through these at use sites
+    /// like `dyn Fn1<i64, str>` and at impl declarations.
+    pub trait_generics: HashMap<SymbolId, Vec<SymbolId>>,
     /// For a path `T::Item` where `T` is a TypeParam, the path's
     /// span maps to `T`'s symbol. The checker reads this to build
     /// `Ty::Assoc(TypeVar(T), name)` projections — kept separate
@@ -178,6 +183,7 @@ pub struct Resolver {
     enum_generics: HashMap<SymbolId, Vec<SymbolId>>,
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
     trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
+    trait_generics: HashMap<SymbolId, Vec<SymbolId>>,
     impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
     closure_fn_sym: HashMap<Span, SymbolId>,
     closure_params: HashMap<Span, Vec<SymbolId>>,
@@ -248,6 +254,7 @@ impl Resolver {
             enum_generics: HashMap::new(),
             trait_methods: HashMap::new(),
             trait_supertraits: HashMap::new(),
+            trait_generics: HashMap::new(),
             impls_for: HashMap::new(),
             closure_fn_sym: HashMap::new(),
             closure_params: HashMap::new(),
@@ -293,6 +300,7 @@ impl Resolver {
                 enum_generics: self.enum_generics,
                 trait_methods: self.trait_methods,
                 trait_supertraits: self.trait_supertraits,
+                trait_generics: self.trait_generics,
                 impls_for: self.impls_for,
                 closure_fn_sym: self.closure_fn_sym,
                 closure_params: self.closure_params,
@@ -1072,6 +1080,22 @@ impl Resolver {
                 // Resolve the parameter / return types of each trait
                 // method signature so `Self` and any referenced types
                 // bind. The bodies don't exist (signatures only).
+                // The trait's `<A, R>` generic params are in scope
+                // for every method signature (and any assoc-type
+                // binding). Mint them via `intern_generic_param`
+                // so the checker / lowerer agree on a single sym
+                // per param across the trait's surface — session
+                // 056's pattern for impl/struct generics.
+                self.enter_scope();
+                let mut trait_gen_syms: Vec<SymbolId> = Vec::with_capacity(t.generics.len());
+                for g in &t.generics {
+                    trait_gen_syms.push(self.intern_generic_param(g));
+                }
+                if !trait_gen_syms.is_empty() {
+                    if let Some(&trait_sym) = self.decl_to_sym.get(&t.name.span) {
+                        self.trait_generics.insert(trait_sym, trait_gen_syms);
+                    }
+                }
                 for m in &t.methods {
                     self.enter_scope();
                     for p in &m.params {
@@ -1082,6 +1106,7 @@ impl Resolver {
                     }
                     self.exit_scope();
                 }
+                self.exit_scope();
             }
             Item::Mod(md) => {
                 self.current_path.push(md.name.name.clone());

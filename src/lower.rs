@@ -324,9 +324,12 @@ impl<'a> Lowerer<'a> {
             ty,
         };
         // A `dyn Trait` coercion the checker recorded at this span:
-        // wrap the value in a `DynBox`.
-        if let Some(&(struct_sym, trait_sym)) =
-            self.check.dyn_coercions.get(&span)
+        // wrap the value in a `DynBox`. Trait args (for generic
+        // traits like `dyn Fn1<i64, i64>`) ride along on the
+        // resulting Ty::Dyn so downstream method-sig resolution
+        // can substitute correctly.
+        if let Some((struct_sym, trait_sym, trait_args)) =
+            self.check.dyn_coercions.get(&span).cloned()
         {
             return HirExpr {
                 kind: HirExprKind::DynBox {
@@ -334,7 +337,7 @@ impl<'a> Lowerer<'a> {
                     struct_sym,
                     trait_sym,
                 },
-                ty: Ty::Dyn(trait_sym),
+                ty: Ty::Dyn(trait_sym, trait_args),
             };
         }
         inner
@@ -499,7 +502,7 @@ impl<'a> Lowerer<'a> {
                 let receiver_hir = self.lower_expr(receiver);
                 // A method call on a `dyn Trait` receiver dispatches
                 // dynamically through the boxed method table.
-                if let Ty::Dyn(trait_sym) = &receiver_hir.ty {
+                if let Ty::Dyn(trait_sym, _) = &receiver_hir.ty {
                     return HirExprKind::DynCall {
                         receiver: Box::new(receiver_hir.clone()),
                         trait_sym: *trait_sym,
@@ -1582,7 +1585,7 @@ fn field_ty_is_arc(
         Ty::Vec(_) | Ty::Str => true,
         Ty::Struct(inner, _) => known.contains_key(inner),
         Ty::Array(_, _) => true,
-        Ty::Dyn(_) => true,
+        Ty::Dyn(_, _) => true,
         _ => false,
     }
 }

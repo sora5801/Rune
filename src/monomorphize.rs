@@ -447,6 +447,10 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
         ),
         Ty::Weak(inner) => Ty::Weak(Box::new(subst_ty(inner, subst))),
         Ty::Vec(elem) => Ty::Vec(Box::new(subst_ty(elem, subst))),
+        Ty::Dyn(s, args) => Ty::Dyn(
+            *s,
+            args.iter().map(|t| subst_ty(t, subst)).collect(),
+        ),
         // `T::Item` projection — first substitute the base. If `T`
         // resolved to a concrete struct that has a known `type Item`
         // binding, replace the whole `Assoc` with that binding (and
@@ -1039,7 +1043,7 @@ fn mangle_ty(t: &Ty) -> String {
 /// refcount and need a release on drop.
 fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -> bool {
     match t {
-        Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_) => true,
+        Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_, _) => true,
         Ty::Array(_, _) => true,
         Ty::Enum(s, _) => enum_has_payload.contains(s),
         _ => false,

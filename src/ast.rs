@@ -98,6 +98,10 @@ pub struct AssocTypeBinding {
 pub struct TraitDecl {
     pub vis: Visibility,
     pub name: Ident,
+    /// Generic type parameters declared on the trait itself
+    /// (`trait Fn1<A, R> { .. }`). Empty for non-generic traits.
+    /// Each method signature is checked with these in scope.
+    pub generics: Vec<GenericParam>,
     /// Supertraits after `:` (`trait Sub: A + B { .. }`, or
     /// `trait Sub: std::Iterator { .. }`). Empty for a
     /// free-standing trait. Each entry is a path so module-qualified

@@ -79,7 +79,14 @@ pub enum Ty {
     /// `dyn Trait` — a trait object. Carries the trait's `SymbolId`.
     /// At runtime an 8-byte pointer to a heap cell holding the method
     /// pointers followed by the concrete data pointer.
-    Dyn(SymbolId),
+    /// Trait object: `Ty::Dyn(trait_sym, args)`. Generic traits
+    /// carry their use-site type args here (`dyn Fn1<i64, str>`
+    /// produces `Ty::Dyn(Fn1Sym, [i64, str])`); non-generic
+    /// traits use an empty args list. The args are stored so the
+    /// checker's `dyn_method_sig` can substitute the trait's
+    /// generic params at each call site, and so two `dyn`s of the
+    /// same trait with different args mangle distinctly.
+    Dyn(SymbolId, Vec<Ty>),
     /// `Self` as a stand-in inside a trait method signature — the
     /// position where the implementor's type will be substituted.
     /// Appears only after `Self::Item` resolves trait-side; the
@@ -227,7 +234,14 @@ impl Ty {
             }
             Ty::TypeVar(id) => format!("T#{}", id.0),
             Ty::Weak(inner) => format!("Weak<{}>", inner.display()),
-            Ty::Dyn(id) => format!("dyn#{}", id.0),
+            Ty::Dyn(id, args) => {
+                if args.is_empty() {
+                    format!("dyn#{}", id.0)
+                } else {
+                    let s: Vec<String> = args.iter().map(|t| t.display()).collect();
+                    format!("dyn#{}<{}>", id.0, s.join(", "))
+                }
+            }
             Ty::SelfType => "Self".into(),
             Ty::Assoc(base, name) => format!("{}::{}", base.display(), name),
             Ty::Never => "!".into(),

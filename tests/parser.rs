@@ -466,6 +466,21 @@ fn parses_path_bounded_generic() {
 }
 
 #[test]
+fn parses_generic_trait() {
+    // `trait Producer<T> { fn make(self: dyn Producer<T>) -> T; }`
+    // The trait declaration carries generic params; method sigs
+    // can reference them.
+    let m = parse_ok(
+        "trait Producer<T> { fn make(self: dyn Producer<T>) -> T; }",
+    );
+    let Item::Trait(t) = m.items.into_iter().next().unwrap() else { panic!() };
+    assert_eq!(t.generics.len(), 1);
+    assert_eq!(t.generics[0].name.name, "T");
+    assert_eq!(t.methods.len(), 1);
+    assert_eq!(t.methods[0].name.name, "make");
+}
+
+#[test]
 fn parses_multi_bound_generic() {
     let m = parse_ok("fn show<T: A + B>(x: T) -> i64 { 0 }");
     let Item::Fn(f) = m.items.into_iter().next().unwrap() else { panic!() };

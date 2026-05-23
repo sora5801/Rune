@@ -78,10 +78,13 @@ rune: linked with clang -> primes.exe
   generic `impl<T> Trait for Foo<T>` blocks; supertraits
   (`trait Dog: Animal`) with transitive method lookup; associated
   types (`type Item;` in the trait, `type Item = i64;` in the
-  impl, `Self::Item` in method signatures); and `T::Item`
+  impl, `Self::Item` in method signatures); `T::Item`
   projection through a type parameter — the projection is resolved
   to the impl's binding at monomorphization, so the iterator-protocol
-  shape `fn next<T: Iterator>(x: T) -> T::Item` compiles.
+  shape `fn next<T: Iterator>(x: T) -> T::Item` compiles; and
+  **generic trait declarations** (`trait Producer<T> { fn make(...)
+  -> T; }`) where the trait's generic args substitute through
+  every method signature at the dyn call site.
 - **Iterator protocol** — the prelude declares
   `trait Iterator { type Item; fn next(self: dyn Iterator) -> Option<Self::Item>; }`.
   A user struct that implements `Iterator` is iterable through
@@ -288,8 +291,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Capturing closures + a `Fn` trait — promotes lambdas to
-   first-class values that can close over their environment
+1. Capturing closures + `Fn1<A, R>` trait — now that generic
+   traits land, the closure-as-struct design from session 057
+   can build on the new `trait Fn1<A, R> { ... }` and unblock
+   the `|x| x * mult` headline
 2. `HashMap<K, V>` — the bigger collections piece
 3. Range as a `RangeIter` struct — unify the for-over-range
    codegen with the Iterator protocol

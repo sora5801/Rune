@@ -545,7 +545,7 @@ impl<M: Module> Codegen<M> {
             return Ok(());
         }
         // Trait object: the synthesized per-trait release.
-        if let Ty::Dyn(sym) = ty {
+        if let Ty::Dyn(sym, _) = ty {
             let func_id = *self
                 .dyn_release_funcs
                 .get(sym)
@@ -1269,7 +1269,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // the N method pointers + data + drop); release dispatches to
         // the synthesized per-trait release, which drops the boxed
         // concrete value and frees the box.
-        if let Ty::Dyn(sym) = ty {
+        if let Ty::Dyn(sym, _) = ty {
             let n = self
                 .trait_methods_flat
                 .get(sym)
@@ -3254,7 +3254,14 @@ fn mangle_ty_name(ty: &Ty) -> String {
             }
         }
         Ty::TypeVar(s) => format!("T{}", s.0),
-        Ty::Dyn(s) => format!("dyn{}", s.0),
+        Ty::Dyn(s, args) => {
+            if args.is_empty() {
+                format!("dyn{}", s.0)
+            } else {
+                let inner: Vec<String> = args.iter().map(mangle_ty_name).collect();
+                format!("dyn{}_{}", s.0, inner.join("_"))
+            }
+        }
         Ty::Fn { .. } => "fn".into(),
         // SelfType and Assoc should never reach mangling — they're
         // resolved away in the checker/monomorphizer. Defensive only.
@@ -3277,7 +3284,7 @@ fn is_arc_type(
         Ty::Weak(_) => true,
         // A trait object is a heap box reclaimed by ARC; its release
         // also drops the boxed concrete value.
-        Ty::Dyn(_) => true,
+        Ty::Dyn(_, _) => true,
         // A heap array is a refcounted block in its own right.
         Ty::Array(_, _) => true,
         _ => false,
@@ -3326,7 +3333,7 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         // retain/release helpers we call on it.
         Ty::Weak(_) => types::I64,
         // A trait object is a pointer to its boxed method table.
-        Ty::Dyn(_) => types::I64,
+        Ty::Dyn(_, _) => types::I64,
         // A function pointer — same shape as any other pointer.
         Ty::Fn { .. } => types::I64,
         // A projection or Self that survived to codegen means the
@@ -3366,7 +3373,7 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
         Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec(_) | Ty::Enum(_, _) | Ty::Weak(_)
-        | Ty::Dyn(_) => 8,
+        | Ty::Dyn(_, _) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",

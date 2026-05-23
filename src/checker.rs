@@ -41,7 +41,13 @@ pub struct CheckResults {
     /// Spans of expressions that coerce a concrete struct into a
     /// `dyn Trait` — `expr span → (struct sym, trait sym)`. The
     /// lowerer wraps each such expression in a `DynBox`.
-    pub dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
+    /// Coercion sites where a concrete struct is wrapped into a
+    /// trait object. Keyed by the value's source span; the value
+    /// is `(struct_sym, trait_sym, trait_args)`. The trait args
+    /// carry generic-trait instantiation info (`dyn Fn1<i64, i64>`
+    /// vs `dyn Fn1<str, bool>`); non-generic traits use an empty
+    /// args list.
+    pub dyn_coercions: HashMap<Span, (SymbolId, SymbolId, Vec<Ty>)>,
     /// `(struct sym, associated-type name) → resolved `Ty``. The
     /// resolver records the AST type each impl binds; the checker
     /// resolves those once with `current_self = Impl(struct_sym)`
@@ -94,7 +100,7 @@ pub struct Checker<'r> {
     local_types: HashMap<Span, Ty>,
     type_resolutions: HashMap<Span, Ty>,
     struct_layouts: HashMap<SymbolId, StructLayout>,
-    dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
+    dyn_coercions: HashMap<Span, (SymbolId, SymbolId, Vec<Ty>)>,
     impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
     closure_param_tys: HashMap<Span, Vec<Ty>>,
     closure_ret_tys: HashMap<Span, Ty>,
@@ -469,7 +475,11 @@ impl<'r> Checker<'r> {
                     );
                     return Ty::Error;
                 }
-                let ty = Ty::Dyn(sym_id);
+                // Resolve any generic args on the trait path:
+                // `dyn Producer<i64>` → `Ty::Dyn(ProducerSym, [i64])`.
+                let type_args: Vec<Ty> =
+                    p.generic_args.iter().map(|t| self.resolve_type(t)).collect();
+                let ty = Ty::Dyn(sym_id, type_args);
                 self.type_resolutions.insert(p.span, ty.clone());
                 ty
             }
@@ -1880,9 +1890,9 @@ impl<'r> Checker<'r> {
         if actual.compatible(expected) {
             return true;
         }
-        if let (Ty::Struct(c, _), Ty::Dyn(t)) = (actual, expected) {
+        if let (Ty::Struct(c, _), Ty::Dyn(t, t_args)) = (actual, expected) {
             if self.struct_impls_trait(*c, *t) {
-                self.dyn_coercions.insert(span, (*c, *t));
+                self.dyn_coercions.insert(span, (*c, *t, t_args.clone()));
                 return true;
             }
         }
@@ -2404,7 +2414,7 @@ impl<'r> Checker<'r> {
         recv: &Ty,
         name: &str,
     ) -> Option<(MethodSig, bool)> {
-        let Ty::Dyn(trait_sym) = recv else { return None };
+        let Ty::Dyn(trait_sym, trait_args) = recv else { return None };
         let mut worklist: Vec<SymbolId> = vec![*trait_sym];
         let mut visited: std::collections::HashSet<SymbolId> =
             std::collections::HashSet::new();
@@ -2414,8 +2424,19 @@ impl<'r> Checker<'r> {
             }
             if let Some(methods) = self.res.trait_methods.get(&t) {
                 if let Some(m) = methods.iter().find(|m| m.name.name == name) {
-                    let empty: std::collections::HashMap<SymbolId, Ty> =
+                    // Build the trait-generic-arg substitution from
+                    // the use-site's `Ty::Dyn(t, trait_args)`. The
+                    // declared method types reference the trait's
+                    // generic params (e.g. `fn make(...) -> T`);
+                    // substitute them through to the use-site types
+                    // (`fn make(...) -> i64` for `dyn Producer<i64>`).
+                    let mut trait_subst: std::collections::HashMap<SymbolId, Ty> =
                         std::collections::HashMap::new();
+                    if let Some(params_decl) = self.res.trait_generics.get(&t) {
+                        for (g, a) in params_decl.iter().zip(trait_args.iter()) {
+                            trait_subst.insert(*g, a.clone());
+                        }
+                    }
                     let mut params: Vec<Ty> = Vec::new();
                     let mut had_assoc_collapse = false;
                     for p in m.params.iter().skip(1) {
@@ -2424,7 +2445,8 @@ impl<'r> Checker<'r> {
                             .get(&p.ty.span())
                             .cloned()
                             .unwrap_or(Ty::Error);
-                        let subst_ty = self.apply_subst(&raw, &empty, Some(recv));
+                        let subst_ty =
+                            self.apply_subst(&raw, &trait_subst, Some(recv));
                         had_assoc_collapse |= is_dyn_assoc(&subst_ty);
                         params.push(collapse_dyn_assoc(subst_ty));
                     }
@@ -2433,7 +2455,7 @@ impl<'r> Checker<'r> {
                         .as_ref()
                         .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
                         .unwrap_or(Ty::Unit);
-                    let subst_ret = self.apply_subst(&raw_ret, &empty, Some(recv));
+                    let subst_ret = self.apply_subst(&raw_ret, &trait_subst, Some(recv));
                     had_assoc_collapse |= is_dyn_assoc(&subst_ret);
                     let ret = collapse_dyn_assoc(subst_ret);
                     return Some((MethodSig { params, ret }, had_assoc_collapse));
@@ -3117,7 +3139,7 @@ fn collapse_dyn_assoc(ty: Ty) -> Ty {
 /// the collapse so the caller can emit a precise diagnostic.
 fn is_dyn_assoc(ty: &Ty) -> bool {
     if let Ty::Assoc(base, _) = ty {
-        return matches!(**base, Ty::Dyn(_));
+        return matches!(**base, Ty::Dyn(_, _));
     }
     false
 }
@@ -3296,7 +3318,7 @@ fn vec_element_supported(ty: &Ty) -> bool {
             | Ty::Struct(_, _)
             | Ty::Enum(_, _)
             | Ty::Vec(_)
-            | Ty::Dyn(_)
+            | Ty::Dyn(_, _)
             | Ty::TypeVar(_)
             // An unresolved projection (`T::Item`) is opaque at
             // typecheck time; monomorphization replaces it with a
