@@ -2138,44 +2138,61 @@ impl<'r> Checker<'r> {
     }
 
     /// Method signature for a call on a `dyn Trait` receiver — looked
-    /// up directly in the trait, with the leading `self` dropped.
+    /// up across the trait and its transitive supertraits (mirrors
+    /// `trait_bound_method_sig`'s walk for static dispatch). The
+    /// leading `self` param is dropped.
     /// An associated-type projection on a `dyn` receiver
     /// (`(it: dyn Iterator).next() -> Self::Item` substituting to
     /// `Ty::Assoc(Dyn, "Item")`) cannot be resolved without an
-    /// upcast or a flattened vtable — collapse to `Ty::Error` so it
-    /// doesn't reach the monomorphizer. The collapse is recorded so
-    /// the caller can produce a precise diagnostic at the call site.
+    /// upcast or a flattened-Item vtable — collapse to `Ty::Error`
+    /// so it doesn't reach the monomorphizer. The collapse is
+    /// recorded so the caller can produce a precise diagnostic at
+    /// the call site.
     fn dyn_method_sig(
         &self,
         recv: &Ty,
         name: &str,
     ) -> Option<(MethodSig, bool)> {
         let Ty::Dyn(trait_sym) = recv else { return None };
-        let methods = self.res.trait_methods.get(trait_sym)?;
-        let m = methods.iter().find(|m| m.name.name == name)?;
-        let empty: std::collections::HashMap<SymbolId, Ty> =
-            std::collections::HashMap::new();
-        let mut params: Vec<Ty> = Vec::new();
-        let mut had_assoc_collapse = false;
-        for p in m.params.iter().skip(1) {
-            let raw = self
-                .type_resolutions
-                .get(&p.ty.span())
-                .cloned()
-                .unwrap_or(Ty::Error);
-            let subst_ty = self.apply_subst(&raw, &empty, Some(recv));
-            had_assoc_collapse |= is_dyn_assoc(&subst_ty);
-            params.push(collapse_dyn_assoc(subst_ty));
+        let mut worklist: Vec<SymbolId> = vec![*trait_sym];
+        let mut visited: std::collections::HashSet<SymbolId> =
+            std::collections::HashSet::new();
+        while let Some(t) = worklist.pop() {
+            if !visited.insert(t) {
+                continue;
+            }
+            if let Some(methods) = self.res.trait_methods.get(&t) {
+                if let Some(m) = methods.iter().find(|m| m.name.name == name) {
+                    let empty: std::collections::HashMap<SymbolId, Ty> =
+                        std::collections::HashMap::new();
+                    let mut params: Vec<Ty> = Vec::new();
+                    let mut had_assoc_collapse = false;
+                    for p in m.params.iter().skip(1) {
+                        let raw = self
+                            .type_resolutions
+                            .get(&p.ty.span())
+                            .cloned()
+                            .unwrap_or(Ty::Error);
+                        let subst_ty = self.apply_subst(&raw, &empty, Some(recv));
+                        had_assoc_collapse |= is_dyn_assoc(&subst_ty);
+                        params.push(collapse_dyn_assoc(subst_ty));
+                    }
+                    let raw_ret = m
+                        .return_type
+                        .as_ref()
+                        .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
+                        .unwrap_or(Ty::Unit);
+                    let subst_ret = self.apply_subst(&raw_ret, &empty, Some(recv));
+                    had_assoc_collapse |= is_dyn_assoc(&subst_ret);
+                    let ret = collapse_dyn_assoc(subst_ret);
+                    return Some((MethodSig { params, ret }, had_assoc_collapse));
+                }
+            }
+            if let Some(supers) = self.res.trait_supertraits.get(&t) {
+                worklist.extend(supers);
+            }
         }
-        let raw_ret = m
-            .return_type
-            .as_ref()
-            .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
-            .unwrap_or(Ty::Unit);
-        let subst_ret = self.apply_subst(&raw_ret, &empty, Some(recv));
-        had_assoc_collapse |= is_dyn_assoc(&subst_ret);
-        let ret = collapse_dyn_assoc(subst_ret);
-        Some((MethodSig { params, ret }, had_assoc_collapse))
+        None
     }
 
     fn check_method_call(

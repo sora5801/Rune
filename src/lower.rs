@@ -128,6 +128,54 @@ impl<'a> Lowerer<'a> {
             }
             enum_payload_tys.insert(enum_sym, per_variant);
         }
+        let trait_methods: std::collections::HashMap<SymbolId, Vec<String>> = self
+            .res
+            .trait_methods
+            .iter()
+            .map(|(t, ms)| {
+                (*t, ms.iter().map(|m| m.name.name.clone()).collect())
+            })
+            .collect();
+        // Build the flat method list per trait: the trait's own
+        // methods first (decl order), then each supertrait in
+        // declaration order, deduped first-wins by method name.
+        // The visited set against the supertrait DAG is a HashSet
+        // so each trait contributes at most once; declaration-order
+        // BFS makes the slot ordering deterministic, which matters
+        // because the box layout and the call-site offset both read
+        // this list keyed by the call-site trait sym.
+        let mut trait_methods_flat: std::collections::HashMap<
+            SymbolId,
+            Vec<(SymbolId, String)>,
+        > = std::collections::HashMap::new();
+        for &trait_sym in trait_methods.keys() {
+            let mut flat: Vec<(SymbolId, String)> = Vec::new();
+            let mut seen_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut visited: std::collections::HashSet<SymbolId> =
+                std::collections::HashSet::new();
+            let mut queue: std::collections::VecDeque<SymbolId> =
+                std::collections::VecDeque::new();
+            queue.push_back(trait_sym);
+            visited.insert(trait_sym);
+            while let Some(t) = queue.pop_front() {
+                if let Some(methods) = trait_methods.get(&t) {
+                    for name in methods {
+                        if seen_names.insert(name.clone()) {
+                            flat.push((t, name.clone()));
+                        }
+                    }
+                }
+                if let Some(supers) = self.res.trait_supertraits.get(&t) {
+                    for &s in supers {
+                        if visited.insert(s) {
+                            queue.push_back(s);
+                        }
+                    }
+                }
+            }
+            trait_methods_flat.insert(trait_sym, flat);
+        }
         HirModule {
             items,
             struct_arc_fields,
@@ -138,14 +186,8 @@ impl<'a> Lowerer<'a> {
             // Filled by the monomorphizer once every type is concrete.
             vec_arc_elem_tys: Vec::new(),
             array_tys: Vec::new(),
-            trait_methods: self
-                .res
-                .trait_methods
-                .iter()
-                .map(|(t, ms)| {
-                    (*t, ms.iter().map(|m| m.name.name.clone()).collect())
-                })
-                .collect(),
+            trait_methods,
+            trait_methods_flat,
             impl_assoc_bindings_ty: self.check.impl_assoc_bindings_ty.clone(),
         }
     }

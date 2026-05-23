@@ -4218,3 +4218,88 @@ fn assoc_type_projection_distinct_impls() {
     "#;
     assert_eq!(run_main(src), 42);
 }
+
+#[test]
+fn dyn_supertrait_method() {
+    // `Dog: Animal`. A value bounded as `dyn Dog` can call both
+    // `Dog`'s `bark` and the supertrait's `speak` — the box's
+    // method table is laid out flat (Dog's methods first, then
+    // Animal's), and `dyn_method_sig` walks the supertrait chain
+    // when resolving the method name.
+    let src = r#"
+        trait Animal { fn speak(self: dyn Animal) -> i64; }
+        trait Dog: Animal { fn bark(self: dyn Dog) -> i64; }
+        struct Lab { volume: i64 }
+        impl Animal for Lab {
+            fn speak(self: Lab) -> i64 { self.volume + 10 }
+        }
+        impl Dog for Lab {
+            fn bark(self: Lab) -> i64 { self.volume + 20 }
+        }
+        fn handle(d: dyn Dog) -> i64 {
+            d.bark() + d.speak()
+        }
+        fn main() -> i64 {
+            let l: Lab = Lab { volume: 6 };
+            handle(l)
+        }
+    "#;
+    // (6 + 20) + (6 + 10) = 42
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn dyn_supertrait_two_level_chain() {
+    // `A: B`, `B: C`. A `dyn A` value can call methods from A, B,
+    // and C — the flat method list contains all three traits'
+    // methods, and the supertrait BFS in `dyn_method_sig` finds
+    // each one regardless of which ancestor declared it.
+    let src = r#"
+        trait C { fn c(self: dyn C) -> i64; }
+        trait B: C { fn b(self: dyn B) -> i64; }
+        trait A: B { fn a(self: dyn A) -> i64; }
+        struct S { n: i64 }
+        impl C for S { fn c(self: S) -> i64 { self.n } }
+        impl B for S { fn b(self: S) -> i64 { self.n + 1 } }
+        impl A for S { fn a(self: S) -> i64 { self.n + 2 } }
+        fn all(x: dyn A) -> i64 {
+            x.a() + x.b() + x.c()
+        }
+        fn main() -> i64 {
+            let s: S = S { n: 13 };
+            all(s)
+        }
+    "#;
+    // 15 + 14 + 13 = 42
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn dyn_supertrait_box_arc_under_loop() {
+    // The flat layout grows the box (one slot per supertrait
+    // method), and `define_dyn_release` reads the new size to
+    // pick rc/drop offsets. Run a tight loop that constructs and
+    // releases a `dyn Sub` box every iteration — if the size or
+    // any offset is off, the heap accounting double-frees or
+    // leaks within a small number of iterations.
+    let src = r#"
+        trait Animal { fn speak(self: dyn Animal) -> i64; }
+        trait Dog: Animal { fn bark(self: dyn Dog) -> i64; }
+        struct Lab { volume: i64 }
+        impl Animal for Lab { fn speak(self: Lab) -> i64 { self.volume + 1 } }
+        impl Dog for Lab    { fn bark(self: Lab) -> i64 { self.volume + 2 } }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            let mut i: i64 = 0;
+            while i < 100 {
+                let l: Lab = Lab { volume: i };
+                let d: dyn Dog = l;
+                total = total + d.bark() + d.speak();
+                i = i + 1;
+            }
+            // sum_{i=0}^{99} (2*i + 3) = 99*100 + 3*100 = 10200
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 10200);
+}

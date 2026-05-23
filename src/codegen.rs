@@ -71,6 +71,15 @@ pub struct Codegen<M: Module> {
     /// Per-trait ordered method names — the trait-object method-table
     /// layout. `(type_sym, method) → impl fn sym` for building tables.
     trait_methods: HashMap<SymbolId, Vec<String>>,
+    /// Per-trait *flattened* method list: the trait's own methods
+    /// followed by every supertrait method in BFS order, deduped
+    /// first-wins. The vec's index is the method's slot in a `dyn`
+    /// box laid out for that trait. A `dyn Sub` box and a `dyn Super`
+    /// box are distinct types with distinct slot orderings — both
+    /// keys exist here. Each entry's first component is the
+    /// *owning* trait sym (kept for documentation; `impl_methods` is
+    /// keyed by `(struct, method_name)` and doesn't need it today).
+    trait_methods_flat: HashMap<SymbolId, Vec<(SymbolId, String)>>,
     impl_methods: HashMap<(SymbolId, String), SymbolId>,
     /// FuncId of the synthesized per-trait `dyn` release function. The
     /// box decrements its rc and, at zero, drops the boxed data
@@ -127,6 +136,7 @@ impl<M: Module> Codegen<M> {
         self.enum_has_payload = hir.enum_has_payload.clone();
         self.enum_payload_tys = hir.enum_payload_tys.clone();
         self.trait_methods = hir.trait_methods.clone();
+        self.trait_methods_flat = hir.trait_methods_flat.clone();
         self.impl_methods = hir.impl_methods.clone();
         // Pass 0: declare per-struct + per-enum release functions so
         // they can call each other (e.g. a struct with a nested
@@ -654,16 +664,21 @@ impl<M: Module> Codegen<M> {
 
     /// Build a trait object's release function. The `dyn` box is a
     /// heap cell `[fnptr_0..fnptr_{N-1}, data, drop, rc]` — field area
-    /// `(N+2)*8`, rc appended by `struct_new`. Decrement rc; at zero,
-    /// call the drop slot (the concrete struct's synthesized release)
-    /// on the data pointer, then free the box itself.
+    /// `(N+2)*8`, rc appended by `struct_new`. `N` is the flattened
+    /// method count (the trait's own methods + every supertrait
+    /// method); a `dyn Sub` and `dyn Super` box thus have different
+    /// sizes and ordering even though they ultimately hand off to
+    /// the same per-struct release function via the drop slot.
+    /// Decrement rc; at zero, call the drop slot (the concrete
+    /// struct's synthesized release) on the data pointer, then free
+    /// the box itself.
     fn define_dyn_release(
         &mut self,
         trait_sym: SymbolId,
         func_id: FuncId,
     ) -> Result<(), CodegenError> {
         let n = self
-            .trait_methods
+            .trait_methods_flat
             .get(&trait_sym)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -778,7 +793,7 @@ impl<M: Module> Codegen<M> {
             enum_release_funcs: &self.enum_release_funcs,
             enum_payload_tys: &self.enum_payload_tys,
             vec_release_funcs: &self.vec_release_funcs,
-            trait_methods: &self.trait_methods,
+            trait_methods_flat: &self.trait_methods_flat,
             impl_methods: &self.impl_methods,
             dyn_release_funcs: &self.dyn_release_funcs,
             array_release_funcs: &self.array_release_funcs,
@@ -890,6 +905,7 @@ impl Codegen<JITModule> {
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
+            trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
             array_release_funcs: HashMap::new(),
@@ -949,6 +965,7 @@ impl Codegen<ObjectModule> {
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
+            trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
             array_release_funcs: HashMap::new(),
@@ -1028,7 +1045,7 @@ struct FnCodegen<'a, M: Module> {
     enum_release_funcs: &'a HashMap<SymbolId, FuncId>,
     enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
     vec_release_funcs: &'a HashMap<Ty, FuncId>,
-    trait_methods: &'a HashMap<SymbolId, Vec<String>>,
+    trait_methods_flat: &'a HashMap<SymbolId, Vec<(SymbolId, String)>>,
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
     array_release_funcs: &'a HashMap<Ty, FuncId>,
@@ -1246,7 +1263,11 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // the synthesized per-trait release, which drops the boxed
         // concrete value and frees the box.
         if let Ty::Dyn(sym) = ty {
-            let n = self.trait_methods.get(sym).map(|m| m.len()).unwrap_or(0);
+            let n = self
+                .trait_methods_flat
+                .get(sym)
+                .map(|m| m.len())
+                .unwrap_or(0);
             let rc_offset = ((n + 2) * 8) as i32;
             match action {
                 "retain" => {
@@ -2351,8 +2372,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         if let HirExprKind::Local(_) = &value.kind {
             self.emit_arc_call("retain", &value.ty, data)?;
         }
+        // The box's method-pointer area follows the *flat* layout:
+        // the trait's own methods first, then every supertrait
+        // method in BFS order (deduped first-wins). For `dyn Dog`
+        // where `Dog: Animal`, slot 0 = bark, slot 1 = speak, then
+        // data, drop, rc. The owning-trait sym in each entry is
+        // ignored at codegen — `impl_methods` is keyed by
+        // `(struct_sym, method_name)` so the lookup is uniform.
         let methods = self
-            .trait_methods
+            .trait_methods_flat
             .get(&trait_sym)
             .cloned()
             .ok_or_else(|| CodegenError("dyn: unknown trait".into()))?;
@@ -2365,7 +2393,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let size_v = self.builder.ins().iconst(types::I64, cell_size);
         let inst = self.builder.ins().call(new_local, &[size_v]);
         let cell = self.builder.inst_results(inst)[0];
-        for (i, m) in methods.iter().enumerate() {
+        for (i, (_owner, m)) in methods.iter().enumerate() {
             let fn_sym = *self
                 .impl_methods
                 .get(&(struct_sym, m.clone()))
@@ -2411,15 +2439,19 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         result_ty: &Ty,
     ) -> Result<Option<Value>, CodegenError> {
         let cell = recv_val;
+        // Look up in the flat list keyed by the call-site trait sym.
+        // `d.speak()` on `dyn Dog` (where `Dog: Animal`) finds the
+        // supertrait method at its slot in Dog's flat layout — not
+        // Animal's flat layout, which would have different offsets.
         let methods = self
-            .trait_methods
+            .trait_methods_flat
             .get(&trait_sym)
             .cloned()
             .ok_or_else(|| CodegenError("dyn: unknown trait".into()))?;
         let n = methods.len();
         let index = methods
             .iter()
-            .position(|m| m == method)
+            .position(|(_owner, m)| m == method)
             .ok_or_else(|| CodegenError(format!("dyn: no method `{}`", method)))?;
         // Compile the explicit args before reading the box slots.
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);

@@ -54,6 +54,17 @@ pub struct HirModule {
     /// out a trait object's method-pointer table and to find a
     /// method's slot for an indirect call.
     pub trait_methods: HashMap<SymbolId, Vec<String>>,
+    /// Per-trait flattened method list including transitive supertrait
+    /// methods. Each entry is `(owning_trait_sym, method_name)` —
+    /// the owning sym names the trait whose `impl Trait for S` block
+    /// holds the method body; the name keys `impl_methods`. The
+    /// vec's index is the method's slot in a `dyn` box laid out for
+    /// the outer key trait. Built by `lower.rs` in BFS order: the
+    /// trait's own methods first, then each supertrait in declaration
+    /// order, deduped first-wins by method name. A `dyn Dog` box and
+    /// a `dyn Animal` box are distinct types with distinct slot
+    /// orderings — both keys exist in this map.
+    pub trait_methods_flat: HashMap<SymbolId, Vec<(SymbolId, String)>>,
     /// Resolved `(struct sym, associated-type name) → Ty` bindings —
     /// the checker pre-resolved every impl's `type Item = ..;` so
     /// the monomorphizer can resolve `Ty::Assoc(Struct(s,_), name)`

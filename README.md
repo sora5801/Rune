@@ -87,7 +87,11 @@ rune: linked with clang -> primes.exe
   dispatches through it via `call_indirect`. The box is ARC-managed —
   it carries a refcount and a drop slot, so a `dyn` local reclaims
   itself and the value it wraps at scope exit. `Vec<dyn Trait>`
-  collects trait objects of different concrete types.
+  collects trait objects of different concrete types. **`dyn Sub`
+  exposes supertrait methods**: the box's method table is laid out
+  flat (Sub's methods first, then each supertrait in BFS order), so
+  a value of type `dyn Dog` can call both `Dog`'s and `Animal`'s
+  methods.
 - **Modules**: inline `mod name { items... }` (nestable) and
   file-based `mod name;` (loads `name.rn`; nested — `mod bar;` inside
   `foo.rn` loads `foo/bar.rn`). `use a::b::c;` imports, `use x as y;`
@@ -261,11 +265,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `dyn Sub` exposing supertrait methods, and dyn-projection
-   via a flattened vtable / `dyn Sub → dyn Super` upcast
-2. A `collections` module — `HashMap<K, V>`, an iterator protocol
+1. A `collections` module — `HashMap<K, V>`, an iterator protocol
    on top of `T::Item` — built on the now-generic `Vec<T>`
-3. `From`-based error conversion for `?`
+2. `From`-based error conversion for `?`
+3. `dyn Sub → dyn Super` explicit upcast (the layout admits a
+   zero-copy upcast for single-supertrait chains; diamond needs
+   box-rewriting)
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

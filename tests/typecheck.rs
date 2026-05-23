@@ -1560,3 +1560,45 @@ fn assoc_type_projection_without_bound_rejects_method_call() {
         "no method `.next`",
     );
 }
+
+#[test]
+fn dyn_supertrait_missing_impl_rejected() {
+    // Coercing `Lab` to `dyn Dog` requires `Lab` to implement
+    // every supertrait in Dog's chain. Without `impl Animal for
+    // Lab`, the impl-side conformance check (session 050) fires
+    // long before the dyn coercion runs, so the diagnostic
+    // points at the offending `impl Dog for Lab` block.
+    check_has_error(
+        r#"
+        trait Animal { fn speak(self: dyn Animal) -> i64; }
+        trait Dog: Animal { fn bark(self: dyn Dog) -> i64; }
+        struct Lab { n: i64 }
+        impl Dog for Lab {
+            fn bark(self: Lab) -> i64 { self.n }
+        }
+        fn handle(d: dyn Dog) -> i64 { d.bark() }
+        fn main() -> i64 { 0 }
+        "#,
+        "requires supertrait `Animal`",
+    );
+}
+
+#[test]
+fn dyn_method_not_on_chain_rejected() {
+    // `dyn Dog` exposes Dog's and Animal's methods — nothing
+    // else. A method that's on neither produces the existing
+    // "no method" diagnostic; the supertrait walk in
+    // `dyn_method_sig` runs to exhaustion and returns None.
+    check_has_error(
+        r#"
+        trait Animal { fn speak(self: dyn Animal) -> i64; }
+        trait Dog: Animal { fn bark(self: dyn Dog) -> i64; }
+        struct Lab { n: i64 }
+        impl Animal for Lab { fn speak(self: Lab) -> i64 { self.n } }
+        impl Dog for Lab    { fn bark(self: Lab) -> i64 { self.n + 1 } }
+        fn handle(d: dyn Dog) -> i64 { d.purr() }
+        fn main() -> i64 { 0 }
+        "#,
+        "no method `.purr`",
+    );
+}
