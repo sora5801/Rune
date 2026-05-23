@@ -3137,6 +3137,10 @@ fn mangle_ty_name(ty: &Ty) -> String {
         Ty::TypeVar(s) => format!("T{}", s.0),
         Ty::Dyn(s) => format!("dyn{}", s.0),
         Ty::Fn { .. } => "fn".into(),
+        // SelfType and Assoc should never reach mangling — they're
+        // resolved away in the checker/monomorphizer. Defensive only.
+        Ty::SelfType => "Self".into(),
+        Ty::Assoc(base, name) => format!("Assoc_{}_{}", mangle_ty_name(base), name),
         Ty::Never => "never".into(),
         Ty::Error => "err".into(),
     }
@@ -3204,6 +3208,15 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Weak(_) => types::I64,
         // A trait object is a pointer to its boxed method table.
         Ty::Dyn(_) => types::I64,
+        // A projection or Self that survived to codegen means the
+        // checker or monomorphizer failed to resolve it. Diagnose
+        // clearly rather than masking the bug as "unsupported type".
+        Ty::Assoc(_, _) | Ty::SelfType => {
+            return Err(CodegenError(format!(
+                "internal: unresolved associated-type projection `{}` reached codegen",
+                ty.display()
+            )));
+        }
         _ => {
             return Err(CodegenError(format!(
                 "type `{}` not supported in codegen",

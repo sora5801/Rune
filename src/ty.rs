@@ -80,6 +80,18 @@ pub enum Ty {
     /// At runtime an 8-byte pointer to a heap cell holding the method
     /// pointers followed by the concrete data pointer.
     Dyn(SymbolId),
+    /// `Self` as a stand-in inside a trait method signature — the
+    /// position where the implementor's type will be substituted.
+    /// Appears only after `Self::Item` resolves trait-side; the
+    /// checker substitutes it away at the call site. Must not reach
+    /// the monomorphizer.
+    SelfType,
+    /// `T::Item` — the projection of an associated type through a
+    /// base. The base is the type parameter (or `Ty::SelfType` in a
+    /// trait sig); the string is the associated-type name. Resolves
+    /// at monomorphization once the base becomes a concrete struct
+    /// for which `impl_assoc_bindings` has an entry.
+    Assoc(Box<Ty>, String),
     /// Diverging — `return`, `break`, `continue`.
     Never,
     /// Cascades silently; comparisons against `Error` succeed to avoid
@@ -177,6 +189,8 @@ impl Ty {
             Ty::TypeVar(id) => format!("T#{}", id.0),
             Ty::Weak(inner) => format!("Weak<{}>", inner.display()),
             Ty::Dyn(id) => format!("dyn#{}", id.0),
+            Ty::SelfType => "Self".into(),
+            Ty::Assoc(base, name) => format!("{}::{}", base.display(), name),
             Ty::Never => "!".into(),
             Ty::Error => "?".into(),
         }

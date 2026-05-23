@@ -1519,3 +1519,44 @@ fn unresolved_supertrait_rejected() {
         "unresolved trait `Unknown`",
     );
 }
+
+#[test]
+fn assoc_type_method_rejected_through_dyn() {
+    // A method whose return type is `Self::Item` cannot be called
+    // through a `dyn Trait` — there is no impl-side binding to
+    // resolve the projection against. The checker emits a precise
+    // diagnostic at the call site instead of silently producing
+    // a `Ty::Error` that confuses downstream errors.
+    check_has_error(
+        r#"
+        trait Iterator {
+            type Item;
+            fn next(self: dyn Iterator) -> Self::Item;
+        }
+        fn drive(it: dyn Iterator) -> i64 { it.next() }
+        fn main() -> i64 { 0 }
+        "#,
+        "cannot be projected through `dyn",
+    );
+}
+
+#[test]
+fn assoc_type_projection_without_bound_rejects_method_call() {
+    // `T` has no trait bound, so `x.next()` finds no method on a
+    // bare type-parameter. The diagnostic surfaces here even
+    // though the function's return is declared as the projection
+    // `T::Item` — that part stays an opaque `Ty::Assoc` until
+    // monomorphization, which is when a concrete `T` would be
+    // available to look up `Item` against.
+    check_has_error(
+        r#"
+        trait Iterator {
+            type Item;
+            fn next(self: dyn Iterator) -> Self::Item;
+        }
+        fn bad<T>(x: T) -> T::Item { x.next() }
+        fn main() -> i64 { 0 }
+        "#,
+        "no method `.next`",
+    );
+}

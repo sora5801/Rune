@@ -42,6 +42,11 @@ pub struct CheckResults {
     /// `dyn Trait` — `expr span → (struct sym, trait sym)`. The
     /// lowerer wraps each such expression in a `DynBox`.
     pub dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
+    /// `(struct sym, associated-type name) → resolved `Ty``. The
+    /// resolver records the AST type each impl binds; the checker
+    /// resolves those once with `current_self = Impl(struct_sym)`
+    /// so projections resolve at substitution time.
+    pub impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
     pub errors: Vec<TypeError>,
 }
 
@@ -83,6 +88,7 @@ pub struct Checker<'r> {
     type_resolutions: HashMap<Span, Ty>,
     struct_layouts: HashMap<SymbolId, StructLayout>,
     dyn_coercions: HashMap<Span, (SymbolId, SymbolId)>,
+    impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
     errors: Vec<TypeError>,
     current_return: Ty,
     /// The trait or impl whose signatures / bodies are currently
@@ -102,6 +108,7 @@ impl<'r> Checker<'r> {
             type_resolutions: HashMap::new(),
             struct_layouts: HashMap::new(),
             dyn_coercions: HashMap::new(),
+            impl_assoc_bindings_ty: HashMap::new(),
             errors: Vec::new(),
             current_return: Ty::Unit,
             current_self: None,
@@ -126,6 +133,7 @@ impl<'r> Checker<'r> {
             type_resolutions: self.type_resolutions,
             struct_layouts: self.struct_layouts,
             dyn_coercions: self.dyn_coercions,
+            impl_assoc_bindings_ty: self.impl_assoc_bindings_ty,
             errors: self.errors,
         }
     }
@@ -165,10 +173,19 @@ impl<'r> Checker<'r> {
                     // concrete binding — the stored `fn_signatures`
                     // are then fully substituted.
                     let prev = self.current_self.take();
-                    if let Some(&struct_sym) =
-                        self.res.path_to_sym.get(&i.type_path.span)
-                    {
-                        self.current_self = Some(SelfContext::Impl(struct_sym));
+                    let struct_sym = self.res.path_to_sym.get(&i.type_path.span).copied();
+                    if let Some(sym) = struct_sym {
+                        self.current_self = Some(SelfContext::Impl(sym));
+                    }
+                    // Pre-resolve every `type Item = ..;` binding to
+                    // a concrete `Ty` so substitution-time projection
+                    // resolution doesn't need the resolver's AST.
+                    if let Some(sym) = struct_sym {
+                        for binding in &i.assoc_types {
+                            let ty = self.resolve_type(&binding.value);
+                            self.impl_assoc_bindings_ty
+                                .insert((sym, binding.name.name.clone()), ty);
+                        }
                     }
                     for method in &i.methods {
                         let sig = self.fn_signature(method);
@@ -214,6 +231,22 @@ impl<'r> Checker<'r> {
             offset += 8;
         }
         StructLayout { fields, size: offset }
+    }
+
+    /// Substitute type parameters in `ty`, resolving any associated-
+    /// type projection (`Ty::Assoc`) once its base becomes a
+    /// concrete struct known in `impl_assoc_bindings_ty`. Pass a
+    /// `self_ty` to substitute `Ty::SelfType` — the trait-side
+    /// stand-in produced by `Self::Item` in a trait method
+    /// signature. Most callers pass `None`; only the trait-bound
+    /// method-lookup path supplies a `Self` replacement.
+    fn apply_subst(
+        &self,
+        ty: &Ty,
+        subst: &std::collections::HashMap<SymbolId, Ty>,
+        self_ty: Option<&Ty>,
+    ) -> Ty {
+        apply_subst_inner(ty, subst, self_ty, Some(&self.impl_assoc_bindings_ty))
     }
 
     fn fn_signature(&mut self, f: &FnDecl) -> Ty {
@@ -270,12 +303,20 @@ impl<'r> Checker<'r> {
                                         name
                                     ),
                                 );
+                                Ty::Error
+                            } else {
+                                // Trait side: leave the position as a
+                                // projection through `Ty::SelfType`.
+                                // `trait_bound_method_sig` substitutes
+                                // it to the bound type at the call
+                                // site, yielding `Ty::Assoc(TypeVar(T),
+                                // "Item")` which resolves at
+                                // monomorphization.
+                                Ty::Assoc(
+                                    Box::new(Ty::SelfType),
+                                    name.to_string(),
+                                )
                             }
-                            // Abstract in a trait declaration — `Ty::Error`
-                            // is compatible with everything, so signatures
-                            // mentioning `Self::Item` don't propagate
-                            // spurious mismatches.
-                            Ty::Error
                         }
                         None => {
                             self.error(
@@ -285,6 +326,16 @@ impl<'r> Checker<'r> {
                             Ty::Error
                         }
                     };
+                    self.type_resolutions.insert(p.span, ty.clone());
+                    return ty;
+                }
+                // `T::Item` — the resolver records the base TypeParam
+                // symbol; the checker builds `Ty::Assoc(TypeVar(T),
+                // name)` and the monomorphizer resolves once `T`
+                // becomes concrete.
+                if let Some(&base_sym) = self.res.assoc_proj_bases.get(&p.span) {
+                    let name = p.segments[1].name.clone();
+                    let ty = Ty::Assoc(Box::new(Ty::TypeVar(base_sym)), name);
                     self.type_resolutions.insert(p.span, ty.clone());
                     return ty;
                 }
@@ -1710,7 +1761,7 @@ impl<'r> Checker<'r> {
                         );
                     }
                 }
-                apply_subst(&ret, &subst)
+                self.apply_subst(&ret, &subst, None)
             }
             Ty::Error => Ty::Error,
             other => {
@@ -1908,8 +1959,8 @@ impl<'r> Checker<'r> {
             std::collections::HashMap::new();
         unify_typevars(self_ty, recv, &mut subst);
         Some(MethodSig {
-            params: rest.iter().map(|p| apply_subst(p, &subst)).collect(),
-            ret: apply_subst(ret, &subst),
+            params: rest.iter().map(|p| self.apply_subst(p, &subst, None)).collect(),
+            ret: self.apply_subst(ret, &subst, None),
         })
     }
 
@@ -2030,7 +2081,7 @@ impl<'r> Checker<'r> {
         // generic args so `b.value` on `Box<i64>` returns i64 instead
         // of TypeVar(T).
         let subst = build_struct_subst(self.res, sym_id, &recv_args);
-        apply_subst(&field.ty, &subst)
+        self.apply_subst(&field.ty, &subst, None)
     }
 
     /// Resolve a method call where the receiver is a bounded generic
@@ -2054,20 +2105,28 @@ impl<'r> Checker<'r> {
             if let Some(methods) = self.res.trait_methods.get(&trait_sym) {
                 if let Some(m) = methods.iter().find(|m| m.name.name == name) {
                     // Skip the leading `self` param; resolve the rest.
+                    // The recorded types may carry `Ty::SelfType` from
+                    // the trait-side `Self::Item` resolution; substitute
+                    // it to the bound type `recv` (a `Ty::TypeVar(T)`),
+                    // yielding `Ty::Assoc(TypeVar(T), name)` which
+                    // monomorphization resolves once `T` is concrete.
+                    let empty: std::collections::HashMap<SymbolId, Ty> =
+                        std::collections::HashMap::new();
                     let mut params: Vec<Ty> = Vec::new();
                     for p in m.params.iter().skip(1) {
-                        params.push(
-                            self.type_resolutions
-                                .get(&p.ty.span())
-                                .cloned()
-                                .unwrap_or(Ty::Error),
-                        );
+                        let raw = self
+                            .type_resolutions
+                            .get(&p.ty.span())
+                            .cloned()
+                            .unwrap_or(Ty::Error);
+                        params.push(self.apply_subst(&raw, &empty, Some(recv)));
                     }
-                    let ret = m
+                    let raw_ret = m
                         .return_type
                         .as_ref()
                         .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
                         .unwrap_or(Ty::Unit);
+                    let ret = self.apply_subst(&raw_ret, &empty, Some(recv));
                     return Some(MethodSig { params, ret });
                 }
             }
@@ -2080,25 +2139,43 @@ impl<'r> Checker<'r> {
 
     /// Method signature for a call on a `dyn Trait` receiver — looked
     /// up directly in the trait, with the leading `self` dropped.
-    fn dyn_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+    /// An associated-type projection on a `dyn` receiver
+    /// (`(it: dyn Iterator).next() -> Self::Item` substituting to
+    /// `Ty::Assoc(Dyn, "Item")`) cannot be resolved without an
+    /// upcast or a flattened vtable — collapse to `Ty::Error` so it
+    /// doesn't reach the monomorphizer. The collapse is recorded so
+    /// the caller can produce a precise diagnostic at the call site.
+    fn dyn_method_sig(
+        &self,
+        recv: &Ty,
+        name: &str,
+    ) -> Option<(MethodSig, bool)> {
         let Ty::Dyn(trait_sym) = recv else { return None };
         let methods = self.res.trait_methods.get(trait_sym)?;
         let m = methods.iter().find(|m| m.name.name == name)?;
+        let empty: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
         let mut params: Vec<Ty> = Vec::new();
+        let mut had_assoc_collapse = false;
         for p in m.params.iter().skip(1) {
-            params.push(
-                self.type_resolutions
-                    .get(&p.ty.span())
-                    .cloned()
-                    .unwrap_or(Ty::Error),
-            );
+            let raw = self
+                .type_resolutions
+                .get(&p.ty.span())
+                .cloned()
+                .unwrap_or(Ty::Error);
+            let subst_ty = self.apply_subst(&raw, &empty, Some(recv));
+            had_assoc_collapse |= is_dyn_assoc(&subst_ty);
+            params.push(collapse_dyn_assoc(subst_ty));
         }
-        let ret = m
+        let raw_ret = m
             .return_type
             .as_ref()
             .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
             .unwrap_or(Ty::Unit);
-        Some(MethodSig { params, ret })
+        let subst_ret = self.apply_subst(&raw_ret, &empty, Some(recv));
+        had_assoc_collapse |= is_dyn_assoc(&subst_ret);
+        let ret = collapse_dyn_assoc(subst_ret);
+        Some((MethodSig { params, ret }, had_assoc_collapse))
     }
 
     fn check_method_call(
@@ -2113,7 +2190,7 @@ impl<'r> Checker<'r> {
         let sig = resolve_method(&recv_ty, &method.name)
             .or_else(|| self.user_method_sig(&recv_ty, &method.name))
             .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name))
-            .or_else(|| self.dyn_method_sig(&recv_ty, &method.name));
+            .or_else(|| self.dyn_method_sig(&recv_ty, &method.name).map(|(s, _)| s));
         let Some(sig) = sig else {
             if !recv_ty.is_error() {
                 self.error(
@@ -2127,6 +2204,25 @@ impl<'r> Checker<'r> {
             }
             return Ty::Error;
         };
+        // The `dyn` lookup collapses `Self::Item` to `Ty::Error` to
+        // keep the IR well-formed; surface that as a real diagnostic
+        // at the call site so the user sees *why* downstream code
+        // looks broken. (Re-resolving is cheap; calling it twice
+        // keeps the `or_else` chain unchanged.)
+        if let Some((_, had_collapse)) = self.dyn_method_sig(&recv_ty, &method.name) {
+            if had_collapse {
+                self.error(
+                    span,
+                    format!(
+                        "method `.{}` returns an associated type that cannot \
+                         be projected through `{}`; call it on a concrete \
+                         receiver instead",
+                        method.name,
+                        recv_ty.display()
+                    ),
+                );
+            }
+        }
         if sig.params.len() != arg_tys.len() {
             self.error(
                 span,
@@ -2598,23 +2694,89 @@ fn unify_typevars(
     }
 }
 
+/// Back-compat free shim — used in pattern-binding sites where
+/// associated-type projection resolution is not needed.
 fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
+    apply_subst_inner(ty, subst, None, None)
+}
+
+/// A projection through a `dyn Trait` (`Ty::Assoc(Ty::Dyn(_), _)`)
+/// has no concrete impl binding to consult — the type system would
+/// need either an upcast or a flattened vtable. Collapse to
+/// `Ty::Error` so it's compatible with everything and never reaches
+/// the monomorphizer with an unresolvable projection.
+fn collapse_dyn_assoc(ty: Ty) -> Ty {
+    if is_dyn_assoc(&ty) {
+        return Ty::Error;
+    }
+    ty
+}
+
+/// Predicate for the same shape — used by `dyn_method_sig` to flag
+/// the collapse so the caller can emit a precise diagnostic.
+fn is_dyn_assoc(ty: &Ty) -> bool {
+    if let Ty::Assoc(base, _) = ty {
+        return matches!(**base, Ty::Dyn(_));
+    }
+    false
+}
+
+/// Substitute type parameters in `ty`. Recurses through `Array`,
+/// `Vec`, `Fn`, `Struct`, `Enum`, `Weak`, and `Assoc` base types;
+/// substitutes `Ty::SelfType` when `self_ty` is provided; resolves
+/// `Ty::Assoc(Struct(s, _), name)` via `bindings` when available.
+fn apply_subst_inner(
+    ty: &Ty,
+    subst: &std::collections::HashMap<SymbolId, Ty>,
+    self_ty: Option<&Ty>,
+    bindings: Option<&std::collections::HashMap<(SymbolId, String), Ty>>,
+) -> Ty {
     match ty {
         Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::Array(elem, n) => Ty::Array(Box::new(apply_subst(elem, subst)), *n),
+        Ty::SelfType => self_ty.cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Assoc(base, name) => {
+            let new_base = apply_subst_inner(base, subst, self_ty, bindings);
+            // If the projection's base is now a concrete struct and
+            // an impl binding is known, resolve. Otherwise the
+            // projection stays unresolved for the monomorphizer.
+            if let Ty::Struct(s, _) = &new_base {
+                if let Some(map) = bindings {
+                    if let Some(resolved) = map.get(&(*s, name.clone())) {
+                        return apply_subst_inner(resolved, subst, self_ty, bindings);
+                    }
+                }
+            }
+            Ty::Assoc(Box::new(new_base), name.clone())
+        }
+        Ty::Array(elem, n) => Ty::Array(
+            Box::new(apply_subst_inner(elem, subst, self_ty, bindings)),
+            *n,
+        ),
+        Ty::Vec(elem) => {
+            Ty::Vec(Box::new(apply_subst_inner(elem, subst, self_ty, bindings)))
+        }
         Ty::Fn { params, ret } => Ty::Fn {
-            params: params.iter().map(|t| apply_subst(t, subst)).collect(),
-            ret: Box::new(apply_subst(ret, subst)),
+            params: params
+                .iter()
+                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .collect(),
+            ret: Box::new(apply_subst_inner(ret, subst, self_ty, bindings)),
         },
         Ty::Struct(s, args) => Ty::Struct(
             *s,
-            args.iter().map(|t| apply_subst(t, subst)).collect(),
+            args.iter()
+                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .collect(),
         ),
         Ty::Enum(s, args) => Ty::Enum(
             *s,
-            args.iter().map(|t| apply_subst(t, subst)).collect(),
+            args.iter()
+                .map(|t| apply_subst_inner(t, subst, self_ty, bindings))
+                .collect(),
         ),
-        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst(inner, subst))),
+        Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst_inner(
+            inner, subst, self_ty, bindings,
+        ))),
         _ => ty.clone(),
     }
 }

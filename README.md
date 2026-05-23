@@ -74,7 +74,14 @@ rune: linked with clang -> primes.exe
 - **Traits + bounded generics**: `trait Display { fn fmt(...); }`,
   `impl Display for Point { ... }`, `fn show<T: Display>(x: T)`.
   Static dispatch — trait method calls in a bounded-generic body
-  are resolved per-specialization by the monomorphizer.
+  are resolved per-specialization by the monomorphizer. Supports
+  generic `impl<T> Trait for Foo<T>` blocks; supertraits
+  (`trait Dog: Animal`) with transitive method lookup; associated
+  types (`type Item;` in the trait, `type Item = i64;` in the
+  impl, `Self::Item` in method signatures); and `T::Item`
+  projection through a type parameter — the projection is resolved
+  to the impl's binding at monomorphization, so the iterator-protocol
+  shape `fn next<T: Iterator>(x: T) -> T::Item` compiles.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -254,10 +261,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `T::Item` projection through a type parameter; `dyn Sub`
-   exposing supertrait methods
-2. A `collections` module — `HashMap<K, V>`, an iterator protocol —
-   built on the now-generic `Vec<T>`
+1. `dyn Sub` exposing supertrait methods, and dyn-projection
+   via a flattened vtable / `dyn Sub → dyn Super` upcast
+2. A `collections` module — `HashMap<K, V>`, an iterator protocol
+   on top of `T::Item` — built on the now-generic `Vec<T>`
 3. `From`-based error conversion for `?`
 4. Self-hosted bootstrap (long-term)
 

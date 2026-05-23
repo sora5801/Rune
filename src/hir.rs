@@ -54,6 +54,11 @@ pub struct HirModule {
     /// out a trait object's method-pointer table and to find a
     /// method's slot for an indirect call.
     pub trait_methods: HashMap<SymbolId, Vec<String>>,
+    /// Resolved `(struct sym, associated-type name) → Ty` bindings —
+    /// the checker pre-resolved every impl's `type Item = ..;` so
+    /// the monomorphizer can resolve `Ty::Assoc(Struct(s,_), name)`
+    /// projections at substitution time.
+    pub impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
 }
 
 #[derive(Debug, Clone)]

@@ -30,6 +30,13 @@ use crate::hir::*;
 use crate::ty::{SymbolId, Ty};
 
 pub fn monomorphize_module(module: &mut HirModule) {
+    // Make the impl-side `type Item = Concrete` bindings visible to
+    // every `subst_*` call that follows. Substitution recursion is
+    // already deep — threading another argument through it would
+    // touch ~80 sites. Per-thread storage keeps `cargo test`'s
+    // parallel runners isolated; each `monomorphize_module` call
+    // overwrites the previous contents.
+    IMPL_ASSOC_BINDINGS.with(|b| *b.borrow_mut() = module.impl_assoc_bindings_ty.clone());
     let mut state = MonoState::new(module);
     state.run();
     state.finish(module);
@@ -47,6 +54,18 @@ struct MonoState {
     /// Counter for fresh SymbolIds used by specialized functions.
     /// Starts above any sym present in the input module.
     next_sym: u32,
+}
+
+thread_local! {
+    /// `impl_assoc_bindings_ty` made accessible to the free `subst_*`
+    /// functions without threading another argument through the
+    /// dense substitution tree. Set at the start of every
+    /// `monomorphize_module` call. Per-thread, so concurrent tests
+    /// (cargo's test thread pool) each see their own bindings —
+    /// any subsequent call in the same thread overwrites cleanly.
+    static IMPL_ASSOC_BINDINGS: std::cell::RefCell<
+        HashMap<(SymbolId, String), Ty>
+    > = std::cell::RefCell::new(HashMap::new());
 }
 
 impl MonoState {
@@ -389,6 +408,27 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
         ),
         Ty::Weak(inner) => Ty::Weak(Box::new(subst_ty(inner, subst))),
         Ty::Vec(elem) => Ty::Vec(Box::new(subst_ty(elem, subst))),
+        // `T::Item` projection — first substitute the base. If `T`
+        // resolved to a concrete struct that has a known `type Item`
+        // binding, replace the whole `Assoc` with that binding (and
+        // recurse to chase further substitutions inside it). Otherwise
+        // keep `Assoc(new_base, name)` so a later pass can finish it.
+        Ty::Assoc(base, name) => {
+            let new_base = subst_ty(base, subst);
+            if let Ty::Struct(s, _) = &new_base {
+                let resolved = IMPL_ASSOC_BINDINGS
+                    .with(|b| b.borrow().get(&(*s, name.clone())).cloned());
+                if let Some(r) = resolved {
+                    return subst_ty(&r, subst);
+                }
+            }
+            Ty::Assoc(Box::new(new_base), name.clone())
+        }
+        // `Self` only appears in trait method signatures pulled out
+        // for typecheck-time substitution; by the time monomorphize
+        // sees one it's already been rewritten upstream. Clone keeps
+        // the IR well-formed if a stray Self leaks through.
+        Ty::SelfType => ty.clone(),
         _ => ty.clone(),
     }
 }

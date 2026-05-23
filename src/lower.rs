@@ -146,6 +146,7 @@ impl<'a> Lowerer<'a> {
                     (*t, ms.iter().map(|m| m.name.name.clone()).collect())
                 })
                 .collect(),
+            impl_assoc_bindings_ty: self.check.impl_assoc_bindings_ty.clone(),
         }
     }
 

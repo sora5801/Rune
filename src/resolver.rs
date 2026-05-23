@@ -106,6 +106,12 @@ pub struct Resolutions {
     /// Transitive walk is the caller's job; an empty entry (or no
     /// entry) means a free-standing trait.
     pub trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
+    /// For a path `T::Item` where `T` is a TypeParam, the path's
+    /// span maps to `T`'s symbol. The checker reads this to build
+    /// `Ty::Assoc(TypeVar(T), name)` projections — kept separate
+    /// from `path_to_sym` so the "this is a projection, not a bare
+    /// TypeParam path" distinction is unambiguous.
+    pub assoc_proj_bases: HashMap<Span, SymbolId>,
     /// For each struct, the set of traits explicitly implemented by
     /// an `impl Trait for Struct` block. Strict — inherent methods
     /// shadowing a trait method do *not* count as implementing the
@@ -164,6 +170,7 @@ pub struct Resolver {
     trait_methods: HashMap<SymbolId, Vec<crate::ast::TraitMethodSig>>,
     trait_supertraits: HashMap<SymbolId, Vec<SymbolId>>,
     impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
+    assoc_proj_bases: HashMap<Span, SymbolId>,
     trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
@@ -219,6 +226,7 @@ impl Resolver {
             trait_methods: HashMap::new(),
             trait_supertraits: HashMap::new(),
             impls_for: HashMap::new(),
+            assoc_proj_bases: HashMap::new(),
             trait_assoc_types: HashMap::new(),
             impl_assoc_bindings: HashMap::new(),
             generic_bounds: HashMap::new(),
@@ -259,6 +267,7 @@ impl Resolver {
                 trait_methods: self.trait_methods,
                 trait_supertraits: self.trait_supertraits,
                 impls_for: self.impls_for,
+                assoc_proj_bases: self.assoc_proj_bases,
                 trait_assoc_types: self.trait_assoc_types,
                 impl_assoc_bindings: self.impl_assoc_bindings,
                 generic_bounds: self.generic_bounds,
@@ -1181,6 +1190,24 @@ impl Resolver {
                 // Resolving here would report `Self` unresolved.
                 if p.segments.first().map(|s| s.name.as_str()) == Some("Self") {
                     return;
+                }
+                // `T::Item` where `T` is a type parameter in scope —
+                // the checker turns this into a `Ty::Assoc(TypeVar(T),
+                // name)` projection. Resolving the path here would
+                // search for a global `T::Item` and report it
+                // unresolved.
+                if p.segments.len() == 2 {
+                    if let Some(sym) = self.lookup(&p.segments[0].name) {
+                        if matches!(
+                            self.symbols[sym.0 as usize].kind,
+                            SymbolKind::TypeParam
+                        ) {
+                            // Record the base TypeParam so the checker
+                            // builds `Ty::Assoc(TypeVar(T), name)`.
+                            self.assoc_proj_bases.insert(p.span, sym);
+                            return;
+                        }
+                    }
                 }
                 self.resolve_path(p);
             }

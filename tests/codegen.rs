@@ -4152,3 +4152,69 @@ fn supertrait_two_level_chain() {
     // 15 + 14 + 13 = 42
     assert_eq!(run_main(src), 42);
 }
+
+#[test]
+fn assoc_type_projection_through_type_param() {
+    // Iterator-protocol shape: the generic function `bump` bounds
+    // `T: Iterator` and returns `T::Item`. The checker keeps
+    // `T::Item` as `Ty::Assoc(Ty::TypeVar(T), "Item")`; the
+    // monomorphizer walks `T` to `Counter`, looks up the impl's
+    // `type Item = i64` binding, and substitutes the call site's
+    // result type to `i64`.
+    let src = r#"
+        trait Iterator {
+            type Item;
+            fn next(self: dyn Iterator) -> Self::Item;
+        }
+        struct Counter { n: i64 }
+        impl Iterator for Counter {
+            type Item = i64;
+            fn next(self: Counter) -> Self::Item { self.n + 1 }
+        }
+        fn bump<T: Iterator>(x: T) -> T::Item {
+            x.next()
+        }
+        fn main() -> i64 {
+            let c: Counter = Counter { n: 41 };
+            bump(c)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn assoc_type_projection_distinct_impls() {
+    // Two impls bind `Item` to different concrete types. Each
+    // monomorphization of `pluck` picks up the right binding —
+    // `pluck::<Counter>` returns `i64`, `pluck::<Banner>`
+    // returns `str`. The caller never names the projection
+    // itself; the test exercises that two specializations of
+    // the same generic see independent substitutions.
+    let src = r#"
+        trait Producer {
+            type Item;
+            fn make(self: dyn Producer) -> Self::Item;
+        }
+        struct Counter { seed: i64 }
+        impl Producer for Counter {
+            type Item = i64;
+            fn make(self: Counter) -> Self::Item { self.seed * 2 }
+        }
+        struct Banner { tag: str }
+        impl Producer for Banner {
+            type Item = str;
+            fn make(self: Banner) -> Self::Item { self.tag }
+        }
+        fn pluck<T: Producer>(x: T) -> T::Item {
+            x.make()
+        }
+        fn main() -> i64 {
+            let c: Counter = Counter { seed: 17 };
+            let b: Banner = Banner { tag: "abcdefgh" };
+            // pluck(c): T::Item = i64 = 17*2 = 34
+            // pluck(b): T::Item = str = "abcdefgh"; .len() = 8
+            pluck(c) + pluck(b).len()
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
