@@ -91,9 +91,12 @@ rune: linked with clang -> primes.exe
   works for any concrete implementor. `break` is a real control-flow
   construct, threaded through codegen's per-loop exit-block stack
   with ARC-local cleanup at the snapshot. `Vec<T>` joins the protocol
-  through `v.iter() -> std::VecIter<T>` (use it manually with
-  `.next()`; the `for x in v.iter()` desugar and iterator adapters
-  wait on a follow-up session).
+  through `v.iter() -> std::VecIter<T>`, plus prelude adapters
+  `std::Map<I, U>` (with a named-fn callback), `std::Filter<I>`
+  (with a named-fn predicate), and `std::collect<T: Iterator>(it: T)
+  -> Vec<T::Item>` — the pipeline-style
+  `collect(Filter { iter: Map { iter: v.iter(), f: double },
+  pred: gt_three })` works end-to-end.
 - **Function-pointer values** — named `fn` items are first-class
   values: assign one to a `let f: fn(i64) -> i64`, store one in a
   struct field, or pass one to a parameter. The call site dispatches
@@ -282,16 +285,14 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Projection-through-impl-generic resolution in the monomorphizer
-   (closes session 055's deferred gap, unblocking iterator
-   adapters)
-2. Iterator adapters (`map`, `filter`, `collect`) + `for x in
-   v.iter()` desugar
-3. Closures (`|x| body`) + a `Fn` trait
-4. `HashMap<K, V>` — the bigger collections piece
-5. `From`-based error conversion for `?`
-6. `continue` keyword — mirror of `break` over the existing
+1. Closures (`|x| body`) + a `Fn` trait
+2. `HashMap<K, V>` — the bigger collections piece
+3. Range as a `RangeIter` struct — unify the for-over-range
+   codegen with the Iterator protocol
+4. `From`-based error conversion for `?`
+5. `continue` keyword — mirror of `break` over the existing
    loop-exit-stack pattern
+6. Trait default-method bodies — `.collect()` as a chained method
 7. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

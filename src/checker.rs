@@ -180,11 +180,43 @@ impl<'r> Checker<'r> {
                     // Pre-resolve every `type Item = ..;` binding to
                     // a concrete `Ty` so substitution-time projection
                     // resolution doesn't need the resolver's AST.
+                    //
+                    // Subtle: the impl block's own `<T>` is interned
+                    // as a *different* SymbolId from the struct's
+                    // `<T>` (resolver passes intern them in distinct
+                    // scopes — see the `intern_generic_param`
+                    // comment). The binding `type Item = T` records
+                    // `Ty::TypeVar(T_impl)`, but downstream
+                    // substitution uses the struct's generic params
+                    // (`struct_generics[s] = [T_struct]`). Remap
+                    // here so the stored binding speaks the
+                    // struct's language. The impl's type-path is
+                    // resolved to `Ty::Struct(s, [TypeVar(T_impl)])`;
+                    // zip with `[T_struct]` to build the remap.
                     if let Some(sym) = struct_sym {
+                        // Build the impl-T → struct-T remap by
+                        // resolving each of the impl type-path's
+                        // generic args (their AST nodes are already
+                        // walked by the resolver, so `resolve_type`
+                        // returns a `Ty::TypeVar(impl_T)`) and
+                        // pairing with the struct's declared generic
+                        // params in declaration order.
+                        let mut impl_to_struct: std::collections::HashMap<SymbolId, Ty> =
+                            std::collections::HashMap::new();
+                        if let Some(struct_params) = self.res.struct_generics.get(&sym).cloned() {
+                            for (ast_arg, &sg) in
+                                i.type_path.generic_args.iter().zip(struct_params.iter())
+                            {
+                                if let Ty::TypeVar(tv) = self.resolve_type(ast_arg) {
+                                    impl_to_struct.insert(tv, Ty::TypeVar(sg));
+                                }
+                            }
+                        }
                         for binding in &i.assoc_types {
-                            let ty = self.resolve_type(&binding.value);
+                            let raw_ty = self.resolve_type(&binding.value);
+                            let remapped = self.apply_subst(&raw_ty, &impl_to_struct, None);
                             self.impl_assoc_bindings_ty
-                                .insert((sym, binding.name.name.clone()), ty);
+                                .insert((sym, binding.name.name.clone()), remapped);
                         }
                     }
                     for method in &i.methods {
@@ -2592,12 +2624,21 @@ impl<'r> Checker<'r> {
             // a `while-true + match iter.next()` loop. The item type
             // is the impl's `type Item = ...` binding, which the
             // checker recorded in `impl_assoc_bindings_ty` during
-            // pass 1.
-            Ty::Struct(s, _) if self.struct_implements_iterator(s) => {
-                self.impl_assoc_bindings_ty
+            // pass 1 *as the impl-block's own `Ty::TypeVar(T)`* —
+            // so the call-site type args (`Ty::Struct(s, recv_args)`)
+            // must be substituted in before we hand the pattern
+            // variable its type. Without this step, `for x in
+            // v.iter()` where v is `Vec<i64>` would type `x` as
+            // `Ty::TypeVar(T_VecIter)` and that TypeVar would leak
+            // through every body type-check downstream.
+            Ty::Struct(s, recv_args) if self.struct_implements_iterator(s) => {
+                let raw = self
+                    .impl_assoc_bindings_ty
                     .get(&(s, "Item".to_string()))
                     .cloned()
-                    .unwrap_or(Ty::Error)
+                    .unwrap_or(Ty::Error);
+                let subst = build_struct_subst(self.res, s, &recv_args);
+                self.apply_subst(&raw, &subst, None)
             }
             // A generic type parameter bounded by `Iterator` is also
             // iterable — the desugar runs in the bounded-generic

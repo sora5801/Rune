@@ -189,6 +189,7 @@ impl<'a> Lowerer<'a> {
             trait_methods,
             trait_methods_flat,
             impl_assoc_bindings_ty: self.check.impl_assoc_bindings_ty.clone(),
+            struct_generics: self.res.struct_generics.clone(),
         }
     }
 
@@ -1280,8 +1281,11 @@ impl<'a> Lowerer<'a> {
     /// Substitute a struct's impl-side generic params using the
     /// struct's use-site type args. `subst_struct_typevars(VecIterSym,
     /// [i64], TypeVar(T_VecIter))` returns `i64`. Walks `Ty::Fn`,
-    /// `Ty::Struct`, etc. recursively so an `Option<T>` binding
-    /// resolves to `Option<i64>` at a Vec<i64> use site.
+    /// `Ty::Struct`, etc. recursively. For `Ty::Assoc`, looks up the
+    /// projection through `impl_assoc_bindings_ty` so a binding
+    /// stored as `Ty::Assoc(TypeVar(I), "Item")` (e.g. Filter's
+    /// `type Item = I::Item`) resolves fully when `I` becomes a
+    /// concrete struct with a known Item binding.
     fn subst_struct_typevars(
         &self,
         struct_sym: SymbolId,
@@ -1296,42 +1300,66 @@ impl<'a> Lowerer<'a> {
         for (gsym, arg) in generics.iter().zip(struct_args.iter()) {
             subst.insert(*gsym, arg.clone());
         }
-        Self::apply_subst_ty(ty, &subst)
+        self.apply_subst_ty(ty, &subst)
     }
 
-    /// Free-standing Ty substitution used by the lowerer when
-    /// resolving impl bindings against the call-site struct args.
-    /// Mirrors the checker's `apply_subst_inner` minus the bindings
-    /// and self_ty machinery — those layers handle their own resolution
-    /// at the checker, by the time the lowerer sees a type any
-    /// remaining substitution is purely TypeVar -> concrete.
+    /// Ty substitution used by the lowerer. Substitutes TypeVars
+    /// against `subst` and resolves `Ty::Assoc` projections through
+    /// the checker's `impl_assoc_bindings_ty` map — same two-layer
+    /// approach as the monomorphizer's runtime `subst_ty` (session
+    /// 056). Recurses through every type constructor.
     fn apply_subst_ty(
+        &self,
         ty: &Ty,
         subst: &std::collections::HashMap<SymbolId, Ty>,
     ) -> Ty {
         match ty {
             Ty::TypeVar(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
             Ty::Array(elem, n) => {
-                Ty::Array(Box::new(Self::apply_subst_ty(elem, subst)), *n)
+                Ty::Array(Box::new(self.apply_subst_ty(elem, subst)), *n)
             }
-            Ty::Vec(elem) => Ty::Vec(Box::new(Self::apply_subst_ty(elem, subst))),
+            Ty::Vec(elem) => Ty::Vec(Box::new(self.apply_subst_ty(elem, subst))),
             Ty::Fn { params, ret } => Ty::Fn {
-                params: params.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
-                ret: Box::new(Self::apply_subst_ty(ret, subst)),
+                params: params.iter().map(|t| self.apply_subst_ty(t, subst)).collect(),
+                ret: Box::new(self.apply_subst_ty(ret, subst)),
             },
             Ty::Struct(s, args) => Ty::Struct(
                 *s,
-                args.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
+                args.iter().map(|t| self.apply_subst_ty(t, subst)).collect(),
             ),
             Ty::Enum(s, args) => Ty::Enum(
                 *s,
-                args.iter().map(|t| Self::apply_subst_ty(t, subst)).collect(),
+                args.iter().map(|t| self.apply_subst_ty(t, subst)).collect(),
             ),
-            Ty::Weak(inner) => Ty::Weak(Box::new(Self::apply_subst_ty(inner, subst))),
-            Ty::Assoc(base, name) => Ty::Assoc(
-                Box::new(Self::apply_subst_ty(base, subst)),
-                name.clone(),
-            ),
+            Ty::Weak(inner) => Ty::Weak(Box::new(self.apply_subst_ty(inner, subst))),
+            // Projection: substitute the base, then if it landed on
+            // a concrete struct with a known impl binding, resolve
+            // through that binding using a per-struct substitution
+            // (impl's T -> call-site args). Mirrors the checker's
+            // `apply_subst_inner_with` and the monomorphizer's
+            // `subst_ty` Assoc arm.
+            Ty::Assoc(base, name) => {
+                let new_base = self.apply_subst_ty(base, subst);
+                if let Ty::Struct(s, args) = &new_base {
+                    if let Some(raw) = self
+                        .check
+                        .impl_assoc_bindings_ty
+                        .get(&(*s, name.clone()))
+                        .cloned()
+                    {
+                        let mut struct_subst: std::collections::HashMap<SymbolId, Ty> =
+                            std::collections::HashMap::new();
+                        if let Some(gens) = self.res.struct_generics.get(s) {
+                            for (gsym, arg) in gens.iter().zip(args.iter()) {
+                                struct_subst.insert(*gsym, arg.clone());
+                            }
+                        }
+                        let after_struct = self.apply_subst_ty(&raw, &struct_subst);
+                        return self.apply_subst_ty(&after_struct, subst);
+                    }
+                }
+                Ty::Assoc(Box::new(new_base), name.clone())
+            }
             _ => ty.clone(),
         }
     }

@@ -30,11 +30,7 @@ pub mod std {
 
     /* Iterator over the elements of a `Vec<T>`. Holds the source
        vec and the current index; constructed by the builtin
-       `vec.iter()` method. Use it directly with `.next()` for
-       step-by-step iteration. (Iterator adapters `map`/`filter`/
-       `collect` are deferred — they need fuller projection
-       resolution through impl generics; session 055 ships only
-       the basic VecIter.) */
+       `vec.iter()` method. */
     pub struct VecIter<T> {
         vec: Vec<T>,
         idx: i64,
@@ -51,6 +47,59 @@ pub mod std {
                 Option::None
             }
         }
+    }
+
+    /* Adapter: yields `f(x)` for each `x` in the wrapped iterator.
+       `f` is a named function pointer (no closures in v0.x). */
+    pub struct Map<I, U> {
+        iter: I,
+        f: fn(I::Item) -> U,
+    }
+
+    pub impl<I: Iterator, U> Iterator for Map<I, U> {
+        type Item = U;
+        fn next(self: Map<I, U>) -> Option<U> {
+            match self.iter.next() {
+                Option::Some(x) => Option::Some((self.f)(x)),
+                Option::None    => Option::None,
+            }
+        }
+    }
+
+    /* Adapter: yields only those `x` for which `pred(x)` is true. */
+    pub struct Filter<I> {
+        iter: I,
+        pred: fn(I::Item) -> bool,
+    }
+
+    pub impl<I: Iterator> Iterator for Filter<I> {
+        type Item = I::Item;
+        fn next(self: Filter<I>) -> Option<I::Item> {
+            while true {
+                match self.iter.next() {
+                    Option::Some(x) => {
+                        if (self.pred)(x) {
+                            return Option::Some(x);
+                        }
+                    }
+                    Option::None => { return Option::None; }
+                }
+            }
+            // Unreachable; the while-true loop only exits via return.
+            Option::None
+        }
+    }
+
+    /* Drain an iterator into a `Vec<T::Item>`. Free function (not
+       a method): chained `.collect()` would need default-method
+       trait bodies, which v0.x doesn't have — so the user writes
+       `collect(v.iter().map(double))` instead. */
+    pub fn collect<T: Iterator>(it: T) -> Vec<T::Item> {
+        let v: Vec<T::Item> = vec_new();
+        for x in it {
+            v.push(x);
+        }
+        v
     }
 
     /* Return the contained value, or `default` when the Option is

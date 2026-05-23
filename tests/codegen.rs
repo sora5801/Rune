@@ -4554,6 +4554,26 @@ fn fn_pointer_through_local() {
 }
 
 #[test]
+fn iter_for_in_v_iter() {
+    // `for x in v.iter() { ... }` — the natural shape. Session
+    // 055 deferred this because the checker's `check_for` was
+    // discarding the struct's type args when looking up the
+    // iterator's item type; session 056 substitutes them.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20); v.push(12);
+            let mut total: i64 = 0;
+            for x in v.iter() {
+                total = total + x;
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
 fn vec_iter_via_next() {
     // `v.iter()` constructs a `std::VecIter<i64>`; calling `.next()`
     // directly walks the underlying Vec one element at a time. The
@@ -4582,6 +4602,110 @@ fn vec_iter_via_next() {
         }
     "#;
     assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn iter_map_alone() {
+    // `Map<I, U> { iter, f: fn(I::Item) -> U }` — the adapter
+    // construction exercises projection resolution in two places:
+    // (1) `f`'s declared field type `fn(I::Item) -> U` substitutes
+    // through `I = VecIter<i64>` so the field accepts a
+    // `fn(i64) -> i64`; (2) `Map::next` returns `Option<U>` which
+    // monomorphizes to `Option<i64>`. The session-056 projection
+    // fixes (checker's impl-T -> struct-T remap + monomorphizer's
+    // two-layer Assoc substitution) are both required.
+    let src = r#"
+        fn double(x: i64) -> i64 { x * 2 }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: double };
+            let mut total: i64 = 0;
+            for x in mapped {
+                total = total + x;
+            }
+            total
+        }
+    "#;
+    // 2 + 4 + 6 = 12
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn iter_filter_alone() {
+    // `Filter<I>` shares the same projection shape (predicate
+    // takes `I::Item`). Confirms the fix scales to bool-returning
+    // predicates.
+    let src = r#"
+        fn is_even(x: i64) -> bool { x - (x / 2) * 2 == 0 }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5); v.push(6);
+            let filtered: std::Filter<std::VecIter<i64>> =
+                std::Filter { iter: v.iter(), pred: is_even };
+            let mut total: i64 = 0;
+            for x in filtered {
+                total = total + x;
+            }
+            total
+        }
+    "#;
+    // 2 + 4 + 6 = 12
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn iter_collect_map_filter_pipeline() {
+    // The headline. Vec -> iter -> Map -> Filter -> collect into
+    // Vec<i64>. Each layer's `next` works because every
+    // projection through every nested `T::Item` resolves cleanly
+    // through the session-056 fixes. `collect`'s return type
+    // `Vec<T::Item>` is itself a generic projection that
+    // monomorphization concretizes.
+    let src = r#"
+        fn double(x: i64) -> i64 { x * 2 }
+        fn gt_three(x: i64) -> bool { if x > 3 { true } else { false } }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: double };
+            let filtered: std::Filter<std::Map<std::VecIter<i64>, i64>> =
+                std::Filter { iter: mapped, pred: gt_three };
+            let result: Vec<i64> = std::collect(filtered);
+            // doubled: [2,4,6]; >3: [4,6]; len + sum = 2 + 10 = 12
+            result.len() + result.get(0) + result.get(1)
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn iter_count_bounded_generic() {
+    // `<T: Iterator>` bounded generic over an adapter. The
+    // monomorphizer specializes `count` for `Map<VecIter<i64>,
+    // i64>`; inside that specialization the for-loop desugar
+    // sees a fully concrete iterator type, projection resolves,
+    // codegen is happy.
+    let src = r#"
+        fn double(x: i64) -> i64 { x * 2 }
+        fn count<T: std::Iterator>(it: T) -> i64 {
+            let mut n: i64 = 0;
+            for _ in it {
+                n = n + 1;
+            }
+            n
+        }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let mapped: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: double };
+            count(mapped)
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
 }
 
 #[test]

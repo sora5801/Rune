@@ -70,6 +70,14 @@ pub struct HirModule {
     /// the monomorphizer can resolve `Ty::Assoc(Struct(s,_), name)`
     /// projections at substitution time.
     pub impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
+    /// Per-struct generic-parameter symbols, in declaration order.
+    /// The monomorphizer reads this to substitute an impl-block's
+    /// own generic params when resolving a projection like
+    /// `VecIter<i64>::Item` — the binding stored under
+    /// `impl_assoc_bindings_ty[(VecIterSym, "Item")]` is the
+    /// impl-block's `Ty::TypeVar(T)`, which becomes `i64` only
+    /// after substituting `T → first struct arg`.
+    pub struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
 }
 
 #[derive(Debug, Clone)]

@@ -1670,3 +1670,49 @@ fn unresolved_path_supertrait_diagnostic_uses_full_path() {
         "unresolved trait `a::Unknown`",
     );
 }
+
+#[test]
+fn map_wrong_fn_signature_rejected() {
+    // `Map<I, U> { iter: I, f: fn(I::Item) -> U }`. After session
+    // 056's projection-through-impl-generic fix, the field type
+    // check substitutes I → VecIter<i64> and resolves
+    // VecIter<i64>::Item → i64, so the declared field type is
+    // `fn(i64) -> U`. A callback whose first arg is `str` should
+    // fail.
+    check_has_error(
+        r#"
+        fn takes_str(s: str) -> i64 { s.len() }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1);
+            let m: std::Map<std::VecIter<i64>, i64> =
+                std::Map { iter: v.iter(), f: takes_str };
+            0
+        }
+        "#,
+        "field `f`",
+    );
+}
+
+#[test]
+fn map_inferred_struct_arg_mismatch_rejected() {
+    // The struct-lit subst inference catches a mismatch where
+    // `Map<I, U>` is constructed with a `pred` field whose
+    // first arg is `bool` but the iter's item type is `i64`.
+    // The two-pass check_struct_lit (session 055) feeds the
+    // inferred subst `I = VecIter<i64>` into the `f` field's
+    // declared `fn(I::Item) -> U` so the mismatch surfaces.
+    check_has_error(
+        r#"
+        fn takes_bool(b: bool) -> bool { b }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1);
+            let m: std::Map<std::VecIter<i64>, bool> =
+                std::Map { iter: v.iter(), f: takes_bool };
+            0
+        }
+        "#,
+        "field",
+    );
+}

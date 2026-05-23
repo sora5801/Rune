@@ -37,6 +37,7 @@ pub fn monomorphize_module(module: &mut HirModule) {
     // parallel runners isolated; each `monomorphize_module` call
     // overwrites the previous contents.
     IMPL_ASSOC_BINDINGS.with(|b| *b.borrow_mut() = module.impl_assoc_bindings_ty.clone());
+    STRUCT_GENERICS.with(|b| *b.borrow_mut() = module.struct_generics.clone());
     let mut state = MonoState::new(module);
     state.run();
     state.finish(module);
@@ -65,6 +66,15 @@ thread_local! {
     /// any subsequent call in the same thread overwrites cleanly.
     static IMPL_ASSOC_BINDINGS: std::cell::RefCell<
         HashMap<(SymbolId, String), Ty>
+    > = std::cell::RefCell::new(HashMap::new());
+    /// Per-struct generic-parameter symbols. Used by `subst_ty`'s
+    /// `Ty::Assoc` arm so a projection like `VecIter<i64>::Item`
+    /// resolves all the way to `i64` rather than stopping at the
+    /// impl-block's `Ty::TypeVar(T_VecIter)`. Same lifecycle as
+    /// `IMPL_ASSOC_BINDINGS` — overwritten at the top of every
+    /// `monomorphize_module` call.
+    static STRUCT_GENERICS: std::cell::RefCell<
+        HashMap<SymbolId, Vec<SymbolId>>
     > = std::cell::RefCell::new(HashMap::new());
 }
 
@@ -149,20 +159,26 @@ impl MonoState {
                 self.concrete.push(f);
             }
         }
-        // Specialize every generic call reachable from the concrete
-        // functions.
-        self.specialize_pending();
-        // Resolve trait/inherent method calls whose receiver type is
-        // now concrete (e.g., `x.fmt()` inside a `<T: Display>` body
-        // that has been specialized for a concrete struct). Builtin
-        // method calls on Vec/str/arrays are left alone for codegen.
-        for f in &mut self.concrete {
-            resolve_method_calls(&mut f.body, &module.impl_methods);
+        // Specialize + resolve-method-calls in alternation until
+        // the cache stops growing. Each specialization may expose a
+        // new MethodCall (in the freshly-substituted body); each
+        // rewrite may expose a new generic Call (because the
+        // rewritten callee is itself generic, e.g. `self.iter.next()`
+        // inside a specialized `Map::next` where `self.iter:
+        // VecIter<i64>`). Two passes covered session 048's chain;
+        // adapter pipelines like `Filter<Map<VecIter<T>, U>>` need
+        // one round per layer, so iterate until stable.
+        loop {
+            let before = self.cache.len();
+            self.specialize_pending();
+            for f in &mut self.concrete {
+                resolve_method_calls(&mut f.body, &module.impl_methods);
+            }
+            self.specialize_pending();
+            if self.cache.len() == before {
+                break;
+            }
         }
-        // A method call just rewritten into a `Call` on a *generic*
-        // method (a generic `impl`) needs another specialization
-        // pass. Idempotent — `cache` skips everything already done.
-        self.specialize_pending();
         // Final module is just the concrete (originals + specializations).
         module.items = self
             .concrete
@@ -438,11 +454,29 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
         // keep `Assoc(new_base, name)` so a later pass can finish it.
         Ty::Assoc(base, name) => {
             let new_base = subst_ty(base, subst);
-            if let Ty::Struct(s, _) = &new_base {
+            // Two-layer substitution: the binding for `(s, name)`
+            // typically references the impl-block's own generic
+            // params (`type Item = T` records `Ty::TypeVar(T)`).
+            // First substitute the impl's params using the call-site
+            // struct args (so `VecIter<i64>::Item` resolves to `i64`),
+            // then substitute the outer monomorphization context (so
+            // `Map<VecIter<i64>, i64>`'s `U` becomes `i64`). Without
+            // the inner pass, `T_VecIter` would survive as a stale
+            // TypeVar.
+            if let Ty::Struct(s, args) = &new_base {
                 let resolved = IMPL_ASSOC_BINDINGS
                     .with(|b| b.borrow().get(&(*s, name.clone())).cloned());
                 if let Some(r) = resolved {
-                    return subst_ty(&r, subst);
+                    let struct_subst: HashMap<SymbolId, Ty> = STRUCT_GENERICS.with(|sg| {
+                        sg.borrow()
+                            .get(s)
+                            .map(|gens| {
+                                gens.iter().copied().zip(args.iter().cloned()).collect()
+                            })
+                            .unwrap_or_default()
+                    });
+                    let after_struct = subst_ty(&r, &struct_subst);
+                    return subst_ty(&after_struct, subst);
                 }
             }
             Ty::Assoc(Box::new(new_base), name.clone())

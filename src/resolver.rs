@@ -426,12 +426,18 @@ impl Resolver {
     fn declare_impl(&mut self, i: &ImplBlock) {
         // The impl's `<T>` must be in scope while resolving the type
         // path — `resolve_path` recurses into generic args, so
-        // `Foo<T>` would otherwise report `T` unresolved. This scope
-        // is transient; `resolve_fn` interns the real per-method
-        // symbols when it walks each method's (merged) generics.
+        // `Foo<T>` would otherwise report `T` unresolved. Use
+        // `decl_to_sym`-keyed interning so every later read of this
+        // impl's `T` agrees on a single `SymbolId`: the second scope
+        // entry below (for assoc-type bindings), `resolve_fn`'s
+        // merged-method-generics walk, and the checker's
+        // pre-resolution of `type Item = T;`. Without this, the
+        // impl's `T` is interned afresh in each scope and the
+        // resulting four-way mismatch (struct-T, impl-T-aux1,
+        // impl-T-aux2, method-T) breaks every substitution.
         self.enter_scope();
         for g in &i.generics {
-            self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            self.intern_generic_param(g);
         }
         self.resolve_path(&i.type_path);
         self.exit_scope();
@@ -504,7 +510,7 @@ impl Resolver {
         if !i.assoc_types.is_empty() {
             self.enter_scope();
             for g in &i.generics {
-                self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+                self.intern_generic_param(g);
             }
             for binding in &i.assoc_types {
                 self.resolve_type(&binding.value);
@@ -627,6 +633,28 @@ impl Resolver {
         self.symbols.push(Symbol { name: name.clone(), span, kind });
         self.scopes.last_mut().unwrap().insert(name, id);
         id
+    }
+
+    /// Intern a generic parameter, reusing a prior sym whose span
+    /// matches. Used by `declare_impl` (twice, once per scope) and
+    /// `resolve_fn` so every reference to an impl's `T` agrees on a
+    /// single `SymbolId`. The first call mints + records in
+    /// `decl_to_sym`; subsequent calls hit the cached sym and only
+    /// re-add it to the current scope. Mirrors `resolve_fn`'s
+    /// existing pattern (session 048).
+    fn intern_generic_param(&mut self, g: &crate::ast::GenericParam) -> SymbolId {
+        if let Some(&existing) = self.decl_to_sym.get(&g.name.span) {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(g.name.name.clone(), existing);
+            existing
+        } else {
+            let id =
+                self.intern(g.name.name.clone(), g.name.span, SymbolKind::TypeParam);
+            self.decl_to_sym.insert(g.name.span, id);
+            id
+        }
     }
 
     fn enter_scope(&mut self) {
