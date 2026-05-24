@@ -106,6 +106,16 @@ rune: linked with clang -> primes.exe
   captures. Bound-arg propagation in the checker pins Map's `U`
   from the closure's return type via the `F: Fn1<I::Item, U>`
   bound (no need to mention U directly in a field).
+  **Iterator default methods** — `.collect()`, `.count()`, `.sum()`,
+  `.min()`, `.max()`, `.filter(p)`, `.map(f)` are declared as
+  default-body methods on the `Iterator` trait, so every implementor
+  inherits them. The pipeline reads as a method chain end-to-end:
+  `v.iter().filter(|x| x > 1).map(|x: i64| x * 10).sum()`. `.min()`
+  and `.max()` return `Option<i64>::Some(best)` over non-empty
+  iterators (i64-only until a `Numeric` trait lands). `.filter` and
+  `.map` take any callable (named fn, non-capturing closure, or
+  capturing closure), pinned through method-level generic params
+  with `Fn1` bounds.
 - **Function-pointer values + closures (capturing)** — named
   `fn` items are first-class values; closure literals `|x| body`
   / `|x, y| body` / `|| body` lower to anonymous fn items

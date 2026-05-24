@@ -2382,7 +2382,15 @@ impl<'r> Checker<'r> {
             }
             BinOp::Eq | BinOp::Ne => Ty::Bool,
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                if !t.is_numeric() && !matches!(t, Ty::Char) {
+                // Session 079: Ty::Assoc / Ty::TypeVar are opaque
+                // at typecheck (a `T::Item` won't resolve until
+                // mono pins the impl's binding); accept them as
+                // ordered-or-fail-later. Same shape `compatible`
+                // already uses for type-equality. If the
+                // monomorphized type isn't ordered, codegen / the
+                // post-spec retype catches it.
+                let opaque = matches!(t, Ty::Assoc(_, _) | Ty::TypeVar(_));
+                if !opaque && !t.is_numeric() && !matches!(t, Ty::Char) {
                     self.error(
                         span,
                         format!(

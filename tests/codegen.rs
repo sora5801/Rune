@@ -424,6 +424,120 @@ fn iterator_count_through_filter_and_map() {
 }
 
 #[test]
+fn iterator_min_default_method() {
+    // Session 079: .min() as a default method on Iterator.
+    // i64-only — returns Option<i64>::Some(smallest) over
+    // non-empty iterators, Option::None on empty.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(40); v.push(10); v.push(30); v.push(20);
+            match v.iter().min() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn iterator_max_default_method() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(40); v.push(10); v.push(30); v.push(20);
+            match v.iter().max() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 40);
+}
+
+#[test]
+fn iterator_min_on_empty_returns_none() {
+    // Empty iterator → Option::None sentinel path is exercised.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            match v.iter().min() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), -1);
+}
+
+#[test]
+fn iterator_min_on_range() {
+    let src = r#"
+        fn main() -> i64 {
+            match (5..9).min() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn iterator_max_on_range() {
+    let src = r#"
+        fn main() -> i64 {
+            match (5..9).max() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    // 5..9 yields 5,6,7,8 — max is 8.
+    assert_eq!(run_main(src), 8);
+}
+
+#[test]
+fn iterator_max_through_filter_and_map_chain() {
+    // .max() composed at the end of a method-chain through
+    // Filter and Map. Three adapter specializations of the
+    // .max default body fire — VecIter, Filter, Map.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            match v.iter()
+                .filter(|x| x > 1)
+                .map(|x: i64| x * 10)
+                .max() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    // filter > 1 = [2,3,4,5]; map *10 = [20,30,40,50]; max = 50.
+    assert_eq!(run_main(src), 50);
+}
+
+#[test]
+fn iterator_min_via_map_adapter() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(3); v.push(1); v.push(2);
+            let m = std::Map { iter: v.iter(), f: |x| x * x };
+            match m.min() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    // 9, 1, 4 → min = 1
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
 fn hashmap_entries_iter_yields_pairs() {
     // Session 075: m.entries() yields (key, value) tuples for
     // every live slot. Mirror of m.keys() (session 068) plus

@@ -72,6 +72,47 @@ pub mod std {
             }
             total
         }
+        /* Session 079: return the smallest element, or `None` if
+           the iterator is empty. v0.x assumes `Self::Item = i64`
+           (same constraint sum has) — the body's comparison uses
+           i64 ordering. Generalizing to any ordered/numeric type
+           needs a real `Ord` / `Numeric` trait bound, deferred. */
+        fn min(self: Self) -> Option<i64> {
+            let mut best: Option<i64> = Option::None;
+            while true {
+                match self.next() {
+                    Option::Some(x) => {
+                        match best {
+                            Option::Some(b) => {
+                                if x < b { best = Option::Some(x); }
+                            }
+                            Option::None => { best = Option::Some(x); }
+                        }
+                    }
+                    Option::None => { break; }
+                }
+            }
+            best
+        }
+        /* Session 079: return the largest element, or `None` if
+           empty. Same i64-only constraint as `min`. */
+        fn max(self: Self) -> Option<i64> {
+            let mut best: Option<i64> = Option::None;
+            while true {
+                match self.next() {
+                    Option::Some(x) => {
+                        match best {
+                            Option::Some(b) => {
+                                if x > b { best = Option::Some(x); }
+                            }
+                            Option::None => { best = Option::Some(x); }
+                        }
+                    }
+                    Option::None => { break; }
+                }
+            }
+            best
+        }
         /* Session 077: `.filter(p)` as a default method.
            Method-level generic `P: Fn1<Self::Item, bool>` lets
            the user pass any closure or fn-pointer with the
