@@ -317,8 +317,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 1. Trait default-method bodies — `.collect()` as a chained method
 2. `?` on Option + multi-impl `Into` disambiguation
 3. HashMap .values() / .entries() iterators (needs tuples)
-4. HashMap insert-overwrite-releases-old-value (close the leak)
-5. Self-hosted bootstrap (long-term)
+4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

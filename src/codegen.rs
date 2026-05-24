@@ -126,7 +126,7 @@ unsafe extern "C" {
     fn rune_struct_dealloc(p: *mut u8, size: i64);
     fn rune_hashmap_new() -> *mut u8;
     fn rune_hashmap_str_new() -> *mut u8;
-    fn rune_hashmap_insert(m: *mut u8, k: i64, v: i64);
+    fn rune_hashmap_insert(m: *mut u8, k: i64, v: i64) -> i64;
     fn rune_hashmap_get(m: *const u8, k: i64) -> i64;
     fn rune_hashmap_contains_key(m: *const u8, k: i64) -> i8;
     fn rune_hashmap_len(m: *const u8) -> i64;
@@ -2628,6 +2628,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     return Ok(None);
                 }
                 let raw = results[0];
+                if m == "insert" {
+                    // Session 070: insert returns the previous
+                    // value (0 if fresh). For ARC V, release that
+                    // +1 — the slot's old owner is gone now. The
+                    // runtime's per-type release helpers all
+                    // null-check, so passing 0 for the fresh case
+                    // is a safe no-op. The user-facing `insert`
+                    // still types as Unit; we just discard the
+                    // raw value after the release call.
+                    if val_arc {
+                        self.emit_arc_call("release", &val_ty, raw)?;
+                    }
+                    return Ok(None);
+                }
                 if m == "get" {
                     if val_arc {
                         // `get` returns a copy of the slot — retain
@@ -3756,6 +3770,11 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64)); // *map
             sig.params.push(AbiParam::new(types::I64)); // key
             sig.params.push(AbiParam::new(types::I64)); // val
+            // Session 070: insert returns the previous slot value
+            // (0 for fresh) so codegen can release the old +1
+            // when V is ARC-managed. Closes the pre-session-064
+            // overwrite leak.
+            sig.returns.push(AbiParam::new(types::I64));
             ("rune_hashmap_insert", sig)
         }
         "hashmap_get" => {

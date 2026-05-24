@@ -241,6 +241,61 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn hashmap_insert_overwrite_releases_old_value() {
+    // Session 070: overwriting an existing key releases the old
+    // value's ARC. Pre-070, the old Vec got dropped on the floor.
+    // The runtime's insert now returns the previous slot value
+    // (0 for fresh) and codegen emits a release call when V is
+    // ARC-managed. We exercise the path by overwriting the same
+    // key many times in a tight loop; if the leak persisted, RSS
+    // would grow unbounded under a tracker. Here we just confirm
+    // the latest value wins and the program exits cleanly.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, Vec<i64>> = hashmap_new();
+            let mut last_sum: i64 = 0;
+            // 200 overwrites of the same key. Each iteration's
+            // Vec gets released by the next iteration's insert
+            // (pre-070 they leaked).
+            for i in 0..200 {
+                let v: Vec<i64> = vec_new();
+                v.push(i);
+                v.push(i * 2);
+                m.insert(1, v);
+            }
+            // After the loop, only the last Vec remains in the
+            // map. Read it back to confirm the slot is intact.
+            let final_vec: Vec<i64> = m.get(1);
+            last_sum = final_vec.get(0) + final_vec.get(1);
+            last_sum + m.len()
+        }
+    "#;
+    // Last iter: i = 199. v = [199, 398]. sum = 597. len = 1.
+    // 597 + 1 = 598.
+    assert_eq!(run_main(src), 598);
+}
+
+#[test]
+fn hashmap_str_insert_overwrite_releases_old_str_value() {
+    // Same shape but with Str values — exercises the str-side of
+    // the per-V release walk. The old str literal has rc=-1 so
+    // its release is a no-op at the helper level, but the
+    // codepath still runs through it.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, str> = hashmap_new();
+            for i in 0..50 {
+                let s: str = "v" + "alue";
+                m.insert(7, s);
+            }
+            m.get(7).len()
+        }
+    "#;
+    // "value".len() = 5
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
 fn hashmap_value_is_vec_releases_at_scope_exit() {
     // Session 067: a HashMap<i64, Vec<i64>> walks its occupied
     // slots on release, freeing the inner Vecs. Pre-067 the

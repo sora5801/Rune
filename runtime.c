@@ -394,7 +394,7 @@ static void rune_hashmap_grow(struct rune_hashmap* m) {
     m->cap = new_cap;
 }
 
-void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
+int64_t rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
     // Grow before insert when occupancy would exceed 75% — also
     // covers the cap=0 initial state. Keep load factor low so
     // probe chains stay short.
@@ -402,6 +402,7 @@ void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
         rune_hashmap_grow(m);
     }
     int64_t i = rune_hashmap_probe_for_insert(m, k);
+    int64_t prev = 0;
     if (m->occupied[i] != 1) {
         // Empty or tombstone — fresh insert. For str keys, the
         // runtime owns the key's +1: retain on store, release on
@@ -417,8 +418,16 @@ void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
         if (m->key_kind == 1) {
             rune_retain_str((struct rune_str*)k);
         }
+    } else {
+        // Overwrite: hand the previous value back to the codegen
+        // caller so it can release the +1 the old slot owned.
+        // Returning 0 for the fresh-slot case is safe — V's
+        // release helpers all null-check, and non-ARC V types
+        // never use this return anyway (codegen discards it).
+        prev = m->vals[i];
     }
     m->vals[i] = v;
+    return prev;
 }
 
 int64_t rune_hashmap_get(const struct rune_hashmap* m, int64_t k) {
