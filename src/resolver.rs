@@ -733,6 +733,11 @@ impl Resolver {
             zero,
             SymbolKind::PolyBuiltinFn("hashmap_new"),
         );
+        self.intern(
+            "hashmap_str_new".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_str_new"),
+        );
         // Low-level inspection builtins used by std::HashMapKeysIter
         // — the user shouldn't call these directly, but they're
         // resolved like any other polybuiltin so std.rn can wire
@@ -764,6 +769,11 @@ impl Resolver {
             "std::hashmap_new".to_string(),
             zero,
             SymbolKind::PolyBuiltinFn("hashmap_new"),
+        );
+        self.intern(
+            "std::hashmap_str_new".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_str_new"),
         );
     }
 

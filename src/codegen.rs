@@ -125,6 +125,7 @@ unsafe extern "C" {
     fn rune_struct_new(size: i64) -> *mut u8;
     fn rune_struct_dealloc(p: *mut u8, size: i64);
     fn rune_hashmap_new() -> *mut u8;
+    fn rune_hashmap_str_new() -> *mut u8;
     fn rune_hashmap_insert(m: *mut u8, k: i64, v: i64);
     fn rune_hashmap_get(m: *const u8, k: i64) -> i64;
     fn rune_hashmap_contains_key(m: *const u8, k: i64) -> i8;
@@ -1048,6 +1049,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_struct_new", rune_struct_new as *const u8);
         builder.symbol("rune_struct_dealloc", rune_struct_dealloc as *const u8);
         builder.symbol("rune_hashmap_new", rune_hashmap_new as *const u8);
+        builder.symbol("rune_hashmap_str_new", rune_hashmap_str_new as *const u8);
         builder.symbol("rune_hashmap_insert", rune_hashmap_insert as *const u8);
         builder.symbol("rune_hashmap_get", rune_hashmap_get as *const u8);
         builder.symbol("rune_hashmap_contains_key", rune_hashmap_contains_key as *const u8);
@@ -3743,6 +3745,11 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_hashmap_new", sig)
+        }
+        "hashmap_str_new" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_str_new", sig)
         }
         "hashmap_insert" => {
             let mut sig = module.make_signature();

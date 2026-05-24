@@ -574,12 +574,18 @@ impl<'r> Checker<'r> {
                         } else {
                             let k = type_args[0].clone();
                             let v = type_args[1].clone();
-                            if !matches!(k, Ty::Int(crate::ty::IntTy::I64) | Ty::Error | Ty::TypeVar(_)) {
+                            if !matches!(
+                                k,
+                                Ty::Int(crate::ty::IntTy::I64)
+                                    | Ty::Str
+                                    | Ty::Error
+                                    | Ty::TypeVar(_)
+                            ) {
                                 self.error(
                                     p.span,
                                     format!(
-                                        "`HashMap<{}, ...>` — only `i64` keys are \
-                                         supported in v0.x",
+                                        "`HashMap<{}, ...>` — only `i64` or `str` \
+                                         keys are supported in v0.x",
                                         k.display()
                                     ),
                                 );
@@ -3430,6 +3436,24 @@ impl<'r> Checker<'r> {
                     Box::new(Ty::Int(crate::ty::IntTy::I64)),
                     Box::new(Ty::TypeVar(v_sym)),
                 )
+            }
+            "hashmap_str_new" => {
+                // Session 069 mirror of hashmap_new for str keys.
+                // The runtime uses key_kind=1 internally; the
+                // Rune-facing distinction is "you wrote
+                // hashmap_str_new() instead of hashmap_new()" and
+                // K=str rather than K=i64.
+                if !arg_tys.is_empty() {
+                    self.error(
+                        span,
+                        format!(
+                            "`hashmap_str_new` expects no arguments, found {}",
+                            arg_tys.len()
+                        ),
+                    );
+                }
+                let v_sym = self.fresh_sym();
+                Ty::HashMap(Box::new(Ty::Str), Box::new(Ty::TypeVar(v_sym)))
             }
             _ => {
                 self.error(span, format!("unknown polymorphic builtin `{}`", name));

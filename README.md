@@ -227,13 +227,15 @@ rune: linked with clang -> primes.exe
     compiler builtin — Rune has no raw-memory primitives.
   - **`HashMap<K, V>`** — a runtime-backed open-addressing hashmap
     (linear probing, 75% load factor, initial cap 8, doubles on
-    grow). `hashmap_new()`, `.insert(k, v)`, `.get(k)`, `.contains_key(k)`,
-    `.len()`, `.remove(k)`, `.keys()`. v0.x restricts K to i64; V is
-    any 8-byte-fitting type. ARC-managed at the descriptor AND
-    per-value level — a `HashMap<i64, Vec<i64>>` walks its occupied
-    slots on release, freeing the inner Vecs. Tombstone-based remove
-    keeps probe chains correct; .keys() yields a HashMapKeysIter
-    that skips empty + tombstoned slots.
+    grow). `hashmap_new()` or `hashmap_str_new()` for i64 / str
+    keys; `.insert(k, v)`, `.get(k)`, `.contains_key(k)`, `.len()`,
+    `.remove(k)`, `.keys()`. V is any 8-byte-fitting type. ARC-
+    managed at the descriptor, per-value (codegen-synth release
+    walk), AND per-key for str-keyed maps (runtime owns the str
+    ARC). Two distinct str descriptors with the same byte content
+    hash to the same slot and compare equal (memcmp). Tombstone-
+    based remove keeps probe chains correct; .keys() yields a
+    HashMapKeysIter that skips empty + tombstoned slots.
   - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
     represent as i64; **payload variants** (`Some(i64)`, `Err(str)`,
     `Pair(i64, i64)`) flip the whole enum to a heap-allocated
@@ -312,10 +314,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. HashMap str-keys
-2. Trait default-method bodies — `.collect()` as a chained method
-3. `?` on Option + multi-impl `Into` disambiguation
-4. HashMap .values() / .entries() iterators (needs tuples)
+1. Trait default-method bodies — `.collect()` as a chained method
+2. `?` on Option + multi-impl `Into` disambiguation
+3. HashMap .values() / .entries() iterators (needs tuples)
+4. HashMap insert-overwrite-releases-old-value (close the leak)
 5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

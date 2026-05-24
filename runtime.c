@@ -233,6 +233,12 @@ struct rune_hashmap {
     int64_t  cap;
     int64_t  rc;
     int64_t  weak_count;
+    // Session 069: 0 = i64 keys (slot stores the i64 directly),
+    // 1 = str keys (slot stores a rune_str* and the runtime
+    // owns a +1 on each key — retain on fresh insert, release
+    // on remove or final descriptor drop). Hash + equality
+    // branch on this field per probe step.
+    int64_t  key_kind;
 };
 
 // Multiplicative mix; same shape Rust uses for its default i64
@@ -248,6 +254,49 @@ static uint64_t rune_hashmap_hash_i64(int64_t k) {
     return x;
 }
 
+// FNV-1a over the byte content of a rune_str. Good distribution for
+// short ASCII strings; collisions for adversarial inputs are
+// possible but the hashmap is in-process (not exposed to network
+// input), so DoS isn't a concern.
+static uint64_t rune_hashmap_hash_str(const struct rune_str* s) {
+    if (s == NULL) return 0;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int64_t i = 0; i < s->len; i++) {
+        h ^= (uint64_t)(uint8_t)s->ptr[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+// Branch on the descriptor's key_kind. Both branches receive the
+// raw int64 key as the codegen passes it — for str keys, that's
+// the rune_str* cast to int64.
+static uint64_t rune_hashmap_hash_key(
+    const struct rune_hashmap* m,
+    int64_t k
+) {
+    if (m->key_kind == 1) {
+        return rune_hashmap_hash_str((const struct rune_str*)k);
+    }
+    return rune_hashmap_hash_i64(k);
+}
+
+// Content equality. For str keys, two slots are equal when their
+// `rune_str_eq` returns nonzero (length matches, memcmp succeeds).
+static int rune_hashmap_keys_equal(
+    const struct rune_hashmap* m,
+    int64_t a,
+    int64_t b
+) {
+    if (m->key_kind == 1) {
+        return rune_str_eq(
+            (const struct rune_str*)a,
+            (const struct rune_str*)b
+        ) ? 1 : 0;
+    }
+    return a == b ? 1 : 0;
+}
+
 struct rune_hashmap* rune_hashmap_new(void) {
     struct rune_hashmap* m =
         (struct rune_hashmap*)malloc(sizeof(struct rune_hashmap));
@@ -258,6 +307,16 @@ struct rune_hashmap* rune_hashmap_new(void) {
     m->cap = 0;
     m->rc = 1;
     m->weak_count = 1;
+    m->key_kind = 0;
+    return m;
+}
+
+// Session 069: str-key variant. Same descriptor shape; just the
+// key_kind tag differs. All other methods (insert/get/contains/
+// remove/release) branch on key_kind internally.
+struct rune_hashmap* rune_hashmap_str_new(void) {
+    struct rune_hashmap* m = rune_hashmap_new();
+    m->key_kind = 1;
     return m;
 }
 
@@ -272,9 +331,9 @@ static int64_t rune_hashmap_probe(
     int64_t k
 ) {
     uint64_t mask = (uint64_t)(m->cap - 1);
-    uint64_t i = rune_hashmap_hash_i64(k) & mask;
+    uint64_t i = rune_hashmap_hash_key(m, k) & mask;
     while (m->occupied[i] != 0) {
-        if (m->occupied[i] == 1 && m->keys[i] == k) {
+        if (m->occupied[i] == 1 && rune_hashmap_keys_equal(m, m->keys[i], k)) {
             return (int64_t)i;
         }
         i = (i + 1) & mask;
@@ -292,10 +351,10 @@ static int64_t rune_hashmap_probe_for_insert(
     int64_t k
 ) {
     uint64_t mask = (uint64_t)(m->cap - 1);
-    uint64_t i = rune_hashmap_hash_i64(k) & mask;
+    uint64_t i = rune_hashmap_hash_key(m, k) & mask;
     int64_t first_tomb = -1;
     while (m->occupied[i] != 0) {
-        if (m->occupied[i] == 1 && m->keys[i] == k) {
+        if (m->occupied[i] == 1 && rune_hashmap_keys_equal(m, m->keys[i], k)) {
             return (int64_t)i;
         }
         if (m->occupied[i] == 2 && first_tomb < 0) {
@@ -320,7 +379,7 @@ static void rune_hashmap_grow(struct rune_hashmap* m) {
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->occupied[i] != 1) continue;
         int64_t k = m->keys[i];
-        uint64_t j = rune_hashmap_hash_i64(k) & mask;
+        uint64_t j = rune_hashmap_hash_key(m, k) & mask;
         while (new_occ[j]) j = (j + 1) & mask;
         new_keys[j] = k;
         new_vals[j] = m->vals[i];
@@ -344,13 +403,20 @@ void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
     }
     int64_t i = rune_hashmap_probe_for_insert(m, k);
     if (m->occupied[i] != 1) {
-        // Empty or tombstone — fresh insert. (Empty contributes to
-        // load-factor; tombstone reuse doesn't, but we still
-        // increment len since the slot transitions to live and the
-        // user's `len` counter goes up.)
+        // Empty or tombstone — fresh insert. For str keys, the
+        // runtime owns the key's +1: retain on store, release on
+        // remove or final descriptor drop. (Caller's `k` may be a
+        // borrowed Local; the runtime side is the source of truth
+        // for what the slot owns. Symmetric with how the slot's
+        // value ARC is handled by codegen rather than the runtime,
+        // but here the runtime has the type info — only str keys
+        // exist for now — so it can act directly.)
         m->occupied[i] = 1;
         m->keys[i] = k;
         m->len += 1;
+        if (m->key_kind == 1) {
+            rune_retain_str((struct rune_str*)k);
+        }
     }
     m->vals[i] = v;
 }
@@ -382,6 +448,12 @@ int64_t rune_hashmap_remove(struct rune_hashmap* m, int64_t k) {
     int64_t i = rune_hashmap_probe(m, k);
     if (m->occupied[i] != 1) return 0;
     int64_t v = m->vals[i];
+    if (m->key_kind == 1) {
+        // The slot owned a +1 on its str key; release it now that
+        // the slot is being tombstoned. The lookup arg `k` is a
+        // separate borrowed pointer the caller still holds.
+        rune_release_str((struct rune_str*)m->keys[i]);
+    }
     m->occupied[i] = 2;
     // Don't clear keys[i] / vals[i] — probe checks occupied first.
     m->len -= 1;
@@ -423,6 +495,19 @@ void rune_release_hashmap(struct rune_hashmap* m) {
     if (m == NULL || m->rc == -1) return;
     m->rc -= 1;
     if (m->rc > 0) return;
+    // Session 069: at the final drop, release each live key for
+    // str-keyed maps. The synthesized per-V release walk (in
+    // codegen) ran first and released vals; now we own the key
+    // ARC, so walk and release. The corresponding codegen walk
+    // for values uses `occupied == 1` to skip tombstones — we
+    // match that here.
+    if (m->key_kind == 1 && m->occupied != NULL) {
+        for (int64_t i = 0; i < m->cap; i++) {
+            if (m->occupied[i] == 1) {
+                rune_release_str((struct rune_str*)m->keys[i]);
+            }
+        }
+    }
     if (m->keys) free(m->keys);
     if (m->vals) free(m->vals);
     if (m->occupied) free(m->occupied);

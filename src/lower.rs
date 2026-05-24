@@ -2076,6 +2076,7 @@ impl<'a> Lowerer<'a> {
             // hashmap_new() takes no args — the dispatch is by name
             // alone (no arg type to discriminate on).
             ("hashmap_new", None) => "hashmap_new",
+            ("hashmap_str_new", None) => "hashmap_str_new",
             // Session 068: low-level hashmap inspectors used by
             // HashMapKeysIter. The first arg is the HashMap; the
             // second (if present) is an i64 index. The runtime

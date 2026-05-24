@@ -418,6 +418,139 @@ fn hashmap_keys_iter_empty_map() {
 }
 
 #[test]
+fn hashmap_str_keys_insert_get() {
+    // Session 069: str-keyed HashMap. Content equality (not
+    // pointer identity) — two distinct str descriptors with the
+    // same bytes hash to the same slot and match.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("one", 1);
+            m.insert("two", 2);
+            m.insert("three", 3);
+            m.get("one") + m.get("two") + m.get("three")
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn hashmap_str_keys_content_equality_not_pointer() {
+    // Two concat'd strings produce distinct rune_str descriptors
+    // but with identical content — they must hash to the same
+    // slot and compare equal. Confirms memcmp-based key equality.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            let a: str = "hel" + "lo";
+            let b: str = "he" + "llo";
+            m.insert(a, 42);
+            // `b` is a distinct heap descriptor but content-equal
+            // to `a`. get(b) must find the slot stored under `a`.
+            m.get(b)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn hashmap_str_keys_missing_returns_zero() {
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("known", 99);
+            let here: i64 = if m.contains_key("known") { 1 } else { 0 };
+            let gone: i64 = if m.contains_key("missing") { 1 } else { 0 };
+            m.get("known") + here + gone + m.get("missing")
+        }
+    "#;
+    // 99 + 1 + 0 + 0 = 100
+    assert_eq!(run_main(src), 100);
+}
+
+#[test]
+fn hashmap_str_keys_remove_then_reinsert() {
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("k", 7);
+            let removed: i64 = m.remove("k");
+            m.insert("k", 9);
+            removed + m.get("k") + m.len()
+        }
+    "#;
+    // 7 + 9 + 1 = 17
+    assert_eq!(run_main(src), 17);
+}
+
+#[test]
+fn hashmap_str_keys_grow_past_initial_cap() {
+    // Force several grow + rehash cycles. The runtime's per-slot
+    // rehash uses the hash-by-key-kind branch so str hashes drive
+    // probe placement, not their (i64-cast) pointer values.
+    let src = r#"
+        fn build_key(i: i64) -> str {
+            // Distinct content per i — concat with a unique tail.
+            let base: str = "key";
+            base + base + "_x"
+        }
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            // Just 12 distinct keys is enough to force at least
+            // one grow from cap=8.
+            m.insert("a", 1);
+            m.insert("b", 2);
+            m.insert("c", 3);
+            m.insert("d", 4);
+            m.insert("e", 5);
+            m.insert("f", 6);
+            m.insert("g", 7);
+            m.insert("h", 8);
+            m.insert("i", 9);
+            m.insert("j", 10);
+            m.insert("k", 11);
+            m.insert("l", 12);
+            let mut sum: i64 = 0;
+            sum = sum + m.get("a") + m.get("f") + m.get("l");
+            sum + m.len()
+        }
+    "#;
+    // (1 + 6 + 12) + 12 = 31
+    assert_eq!(run_main(src), 31);
+}
+
+#[test]
+fn hashmap_str_keys_release_with_vec_values() {
+    // Combine str keys + Vec values. Both sides get ARC-walked
+    // at the map's scope exit: the synth per-V release walks
+    // vals (Vecs), then the C release_hashmap walks live slots
+    // releasing each str key.
+    let src = r#"
+        fn build() -> i64 {
+            let m: std::HashMap<str, Vec<i64>> = hashmap_str_new();
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20);
+            m.insert("a", v);
+            let w: Vec<i64> = vec_new();
+            w.push(100);
+            m.insert("b", w);
+            m.get("a").get(0) + m.get("b").get(0)
+        }
+        fn main() -> i64 {
+            // Repeat to surface any leak or double-free under a
+            // simple sanity check.
+            let mut total: i64 = 0;
+            for _ in 0..50 {
+                total = total + build();
+            }
+            total
+        }
+    "#;
+    // build() = 10 + 100 = 110. 50 * 110 = 5500.
+    assert_eq!(run_main(src), 5500);
+}
+
+#[test]
 fn hashmap_count_distinct_via_insert() {
     // Idiom: count by inserting `1` (or += 1) on each occurrence.
     // Here we just insert once per key and read m.len() to confirm
