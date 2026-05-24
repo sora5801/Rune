@@ -154,6 +154,20 @@ pub struct Resolutions {
     /// Generic-param symbol → trait-bound symbols. `<T: Display>`
     /// records `T_sym → [Display_sym]`.
     pub generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Session 071: `(trait_sym, method_name) → default-fn sym` for
+    /// trait methods that declared a default body. The default fn
+    /// is a synthesized generic function whose `Self` param is
+    /// bounded by the trait — when an impl doesn't override the
+    /// method, method dispatch falls through to this fn. The lowerer
+    /// emits a HirFn per entry; the monomorphizer specializes per
+    /// Self at each call site.
+    pub trait_defaults: HashMap<(SymbolId, String), SymbolId>,
+    /// Session 071: synthesized self-type-param sym for each
+    /// default fn. The default fn's `self: Self` resolves through
+    /// `generic_bounds[this_sym] = [trait_sym]`, so `self.next()`
+    /// inside the default body routes via trait_bound_method_sig
+    /// (session 051's machinery).
+    pub default_self_syms: HashMap<SymbolId, SymbolId>,
     /// Generic-param symbol + trait-bound symbol → spans of the
     /// trait's generic args at the bound site. `<F: Fn1<I::Item,
     /// U>>` records `(F, Fn1) → [span_of_I::Item, span_of_U]`. The
@@ -245,6 +259,8 @@ pub struct Resolver {
     impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
     generic_bound_args: HashMap<(SymbolId, SymbolId), Vec<Span>>,
+    trait_defaults: HashMap<(SymbolId, String), SymbolId>,
+    default_self_syms: HashMap<SymbolId, SymbolId>,
     impl_to_struct_generic: HashMap<SymbolId, SymbolId>,
     /// Names of the modules currently being declared / resolved,
     /// outermost first. Empty means the root module. Item lookups
@@ -311,6 +327,8 @@ impl Resolver {
             impl_assoc_bindings: HashMap::new(),
             generic_bounds: HashMap::new(),
             generic_bound_args: HashMap::new(),
+            trait_defaults: HashMap::new(),
+            default_self_syms: HashMap::new(),
             impl_to_struct_generic: HashMap::new(),
             current_path: Vec::new(),
             item_vis: HashMap::new(),
@@ -360,6 +378,8 @@ impl Resolver {
                 impl_assoc_bindings: self.impl_assoc_bindings,
                 generic_bounds: self.generic_bounds,
                 generic_bound_args: self.generic_bound_args,
+                trait_defaults: self.trait_defaults,
+                default_self_syms: self.default_self_syms,
                 impl_to_struct_generic: self.impl_to_struct_generic,
             },
             self.errors,
@@ -594,6 +614,40 @@ impl Resolver {
                 );
             }
             self.impl_methods.insert(key, id);
+        }
+        // Session 071: for `impl Trait for Struct` blocks, point
+        // any not-overridden trait-default method at the synth
+        // default-fn sym. Method dispatch (resolve_method_calls in
+        // monomorphize) reads impl_methods uniformly — the default
+        // looks like a regular impl method, and the monomorphizer
+        // specializes per Self at the call site. Requires the
+        // trait's defaults to have been registered in pass 1 first
+        // — works because declare_items runs before declare_impls
+        // (traits get their default-fn syms minted before any
+        // impl tries to look them up).
+        if let Some(trait_path) = &i.trait_path {
+            if let Some(&trait_sym) = self.path_to_sym.get(&trait_path.span) {
+                let method_names: Vec<String> = i
+                    .methods
+                    .iter()
+                    .map(|m| m.name.name.clone())
+                    .collect();
+                let defaults: Vec<(String, SymbolId)> = self
+                    .trait_defaults
+                    .iter()
+                    .filter_map(|((ts, mname), &fn_sym)| {
+                        if *ts == trait_sym && !method_names.contains(mname) {
+                            Some((mname.clone(), fn_sym))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (mname, fn_sym) in defaults {
+                    let key = (struct_sym, mname);
+                    self.impl_methods.entry(key).or_insert(fn_sym);
+                }
+            }
         }
         // Record this impl's associated-type bindings. The generic
         // scope is re-entered so a `type Item = T` form resolves.
@@ -1101,6 +1155,48 @@ impl Resolver {
             let assoc: Vec<String> =
                 t.assoc_types.iter().map(|a| a.name.name.clone()).collect();
             self.trait_assoc_types.insert(id, assoc);
+            // Session 071: for each method with a default body,
+            // mint a fresh default-fn sym + a Self-type-param sym
+            // bounded by the trait. The body itself is resolved in
+            // pass 2; here we just allocate the names so other
+            // items in pass 1 / pass 2 can reference them.
+            for m in &t.methods {
+                if m.body.is_some() {
+                    let default_name = format!(
+                        "__default_{}__{}",
+                        t.name.name, m.name.name
+                    );
+                    let default_sym = SymbolId(self.symbols.len() as u32);
+                    // Span = m.name.span so user_method_sig's
+                    // `fn_signatures[symbol(sym).span]` lookup works
+                    // (matches the key the checker uses when stashing
+                    // the default's fn signature).
+                    self.symbols.push(Symbol {
+                        name: default_name.clone(),
+                        span: m.name.span,
+                        kind: SymbolKind::Fn,
+                    });
+                    // Visibility: same as the trait (anyone who
+                    // can see the trait can dispatch to the default).
+                    self.item_vis.insert(
+                        default_sym,
+                        (self.current_path.clone(), t.vis == crate::ast::Visibility::Pub),
+                    );
+                    self.trait_defaults
+                        .insert((id, m.name.name.clone()), default_sym);
+                    // Self-type-param sym for this default. The
+                    // bound is the trait itself, so `self.next()`
+                    // inside the body routes via trait_bound_method_sig.
+                    let self_sym = SymbolId(self.symbols.len() as u32);
+                    self.symbols.push(Symbol {
+                        name: "Self".into(),
+                        span: m.span,
+                        kind: SymbolKind::TypeParam,
+                    });
+                    self.default_self_syms.insert(default_sym, self_sym);
+                    self.generic_bounds.insert(self_sym, vec![id]);
+                }
+            }
         }
     }
 
@@ -1237,11 +1333,55 @@ impl Resolver {
                 }
                 for m in &t.methods {
                     self.enter_scope();
+                    // Session 071: for methods with a default body,
+                    // bring `Self` into scope as a TypeParam (the
+                    // sym was minted in pass 1; bound is the trait).
+                    // `self.next()`-style calls inside the body then
+                    // resolve via trait_bound_method_sig at type-check
+                    // time. Self stays in scope only for this method;
+                    // a sibling method without a default doesn't see
+                    // it.
+                    let trait_sym = self
+                        .decl_to_sym
+                        .get(&t.name.span)
+                        .copied();
+                    let default_self_sym = trait_sym
+                        .and_then(|ts| {
+                            self.trait_defaults
+                                .get(&(ts, m.name.name.clone()))
+                                .copied()
+                        })
+                        .and_then(|fn_sym| {
+                            self.default_self_syms.get(&fn_sym).copied()
+                        });
+                    if let Some(self_sym) = default_self_sym {
+                        self.scopes
+                            .last_mut()
+                            .unwrap()
+                            .insert("Self".into(), self_sym);
+                    }
                     for p in &m.params {
                         self.resolve_type(&p.ty);
                     }
                     if let Some(rt) = &m.return_type {
                         self.resolve_type(rt);
+                    }
+                    // Default body resolution: scope params as locals
+                    // (so the body's `self`, etc. resolve to Param
+                    // syms), then resolve the body's expressions /
+                    // statements. Identical to resolve_fn's body
+                    // pass — just inlined here since we don't have
+                    // a FnDecl to hand off.
+                    if let Some(body) = &m.body {
+                        for p in &m.params {
+                            let pid = self.intern(
+                                p.name.name.clone(),
+                                p.name.span,
+                                SymbolKind::Param,
+                            );
+                            self.decl_to_sym.insert(p.name.span, pid);
+                        }
+                        self.resolve_block(body);
                     }
                     self.exit_scope();
                 }
@@ -1466,7 +1606,17 @@ impl Resolver {
                 // `Self::Item` — leave it for the checker, which
                 // resolves it against the enclosing trait/impl.
                 // Resolving here would report `Self` unresolved.
+                // Single-segment `Self`: session 071 puts a real
+                // sym in scope for default-method bodies, so look
+                // it up here — that lets the checker's resolve_type
+                // see `Ty::TypeVar(self_sym)` for `self: Self`.
+                // Multi-segment `Self::...` still defers.
                 if p.segments.first().map(|s| s.name.as_str()) == Some("Self") {
+                    if p.segments.len() == 1 {
+                        if let Some(sym) = self.lookup("Self") {
+                            self.path_to_sym.insert(p.span, sym);
+                        }
+                    }
                     return;
                 }
                 // `T::Item` where `T` is a type parameter in scope —

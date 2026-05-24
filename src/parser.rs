@@ -519,12 +519,26 @@ impl Parser {
             } else {
                 None
             };
-            let semi = self.expect(&TokenKind::Semi, "`;`")?;
+            // Either `;` (no default) or `{ body }` (default
+            // method body — session 071). Impls that don't provide
+            // this method inherit the default.
+            let (body, end) = if self.check(&TokenKind::LBrace) {
+                let block = self.parse_block()?;
+                let end = block.span.end;
+                (Some(block), end)
+            } else {
+                let semi = self.expect(
+                    &TokenKind::Semi,
+                    "`;` or `{` for default body",
+                )?;
+                (None, semi.span.end)
+            };
             methods.push(TraitMethodSig {
                 name: m_name,
                 params,
                 return_type,
-                span: Span::new(m_start, semi.span.end),
+                body,
+                span: Span::new(m_start, end),
             });
         }
         let rb = self.expect(&TokenKind::RBrace, "`}`")?;

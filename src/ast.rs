@@ -115,12 +115,15 @@ pub struct TraitDecl {
 }
 
 /// A method signature inside a trait declaration. Shares the shape
-/// of `FnDecl` minus the body.
+/// of `FnDecl`; the body is optional — `None` means an impl must
+/// provide the implementation, `Some(block)` is a default body
+/// every impl inherits unless it overrides (session 071).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitMethodSig {
     pub name: Ident,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
+    pub body: Option<Block>,
     pub span: Span,
 }
 

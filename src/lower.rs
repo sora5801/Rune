@@ -221,11 +221,85 @@ impl<'a> Lowerer<'a> {
                         out.push(HirItem::Fn(self.lower_fn(method)));
                     }
                 }
+                ast::Item::Trait(t) => {
+                    // Session 071: emit a HirFn per default-body
+                    // method. The synth fn's `Self` generic param
+                    // (and the trait's own generics) get carried
+                    // over; the body's `self.next()`-style calls
+                    // resolve via the impl_methods lookup at
+                    // monomorphization time once Self is bound.
+                    let Some(&trait_sym) =
+                        self.res.decl_to_sym.get(&t.name.span)
+                    else {
+                        continue;
+                    };
+                    for m in &t.methods {
+                        let Some(body) = &m.body else { continue };
+                        let Some(&fn_sym) = self
+                            .res
+                            .trait_defaults
+                            .get(&(trait_sym, m.name.name.clone()))
+                        else {
+                            continue;
+                        };
+                        out.push(HirItem::Fn(self.lower_trait_default(
+                            fn_sym, trait_sym, m, body,
+                        )));
+                    }
+                }
                 ast::Item::Mod(md) => self.lower_items(&md.items, out),
-                // Const, Struct, Enum, Trait, Use carry no codegen.
+                // Const, Struct, Enum, Use carry no codegen.
                 _ => {}
             }
         }
+    }
+
+    /// Build a HirFn for a trait default body. The synth fn is a
+    /// generic function whose first generic param is `Self`
+    /// (bounded by the surrounding trait); the trait's own generic
+    /// params come after. Body is lowered identically to a regular
+    /// fn body, which is fine because the resolver scoped Self +
+    /// params + locals during pass 2.
+    fn lower_trait_default(
+        &self,
+        fn_sym: SymbolId,
+        trait_sym: SymbolId,
+        m: &ast::TraitMethodSig,
+        body: &ast::Block,
+    ) -> HirFn {
+        let params: Vec<HirParam> = m
+            .params
+            .iter()
+            .map(|p| {
+                let sym = self.res.decl_to_sym[&p.name.span];
+                let ty = self
+                    .check
+                    .local_types
+                    .get(&p.name.span)
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                HirParam { sym, name: p.name.name.clone(), ty }
+            })
+            .collect();
+        let ret_ty = m
+            .return_type
+            .as_ref()
+            .and_then(|t| self.check.type_resolutions.get(&t.span()).cloned())
+            .unwrap_or(Ty::Unit);
+        let body = self.lower_block(body);
+        let name = self.res.symbol(fn_sym).name.clone();
+        // Generic params: Self (the synth self_sym minted in
+        // resolver pass 1) plus the trait's own generics. Order
+        // matters — when a method-call site fills generic args,
+        // Self comes first (the receiver's type).
+        let mut generics: Vec<SymbolId> = Vec::new();
+        if let Some(&self_sym) = self.res.default_self_syms.get(&fn_sym) {
+            generics.push(self_sym);
+        }
+        if let Some(trait_gens) = self.res.trait_generics.get(&trait_sym) {
+            generics.extend(trait_gens.iter().copied());
+        }
+        HirFn { sym: fn_sym, name, generics, params, ret_ty, body }
     }
 
     fn lower_fn(&self, f: &ast::FnDecl) -> HirFn {

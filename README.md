@@ -314,8 +314,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Trait default-method bodies — `.collect()` as a chained method
-2. `?` on Option + multi-impl `Into` disambiguation
+1. `?` on Option + multi-impl `Into` disambiguation
+2. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
 3. HashMap .values() / .entries() iterators (needs tuples)
 4. Self-hosted bootstrap (long-term)
 

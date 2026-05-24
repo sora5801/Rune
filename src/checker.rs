@@ -124,6 +124,14 @@ pub struct Checker<'r> {
     /// `check_item` for traits and impls, used to resolve
     /// `Self::Item` to a concrete type.
     current_self: Option<SelfContext>,
+    /// Session 071: when type-checking a trait default-method body,
+    /// Self refers to a concrete generic param (one minted per
+    /// default by the resolver). Storing its sym here lets
+    /// `resolve_type`'s `Self::Item` arm produce `Ty::Assoc(
+    /// TypeVar(self_sym), "Item")` — substitutable at monomorphize
+    /// time — rather than `Ty::Assoc(SelfType, "Item")` which is
+    /// opaque to subst_ty.
+    current_self_param: Option<SymbolId>,
     /// Session 062: pool of fresh inference TypeVars minted for
     /// unannotated closure params with no contextual hint.
     /// `closure_infer_pool[sym]` is `Some(ty)` once the body's
@@ -157,6 +165,7 @@ impl<'r> Checker<'r> {
             errors: Vec::new(),
             current_return: Ty::Unit,
             current_self: None,
+            current_self_param: None,
         }
     }
 
@@ -363,6 +372,46 @@ impl<'r> Checker<'r> {
                         if let Some(rt) = &m.return_type {
                             self.resolve_type(rt);
                         }
+                        // Session 071: for default-body methods,
+                        // also stash a fn_signature so check_item
+                        // can type-check the body just like a
+                        // regular fn. Param types here have Self
+                        // resolving to the synth Self-TypeParam sym
+                        // (the resolver scoped it); Self::Item
+                        // becomes a substitutable typevar-projection
+                        // via current_self_param.
+                        if m.body.is_some() {
+                            let trait_sym = self.res.decl_to_sym.get(&t.name.span).copied();
+                            let prev_self_param = self.current_self_param;
+                            if let Some(ts) = trait_sym {
+                                if let Some(&fn_sym) = self
+                                    .res
+                                    .trait_defaults
+                                    .get(&(ts, m.name.name.clone()))
+                                {
+                                    if let Some(&self_sym) =
+                                        self.res.default_self_syms.get(&fn_sym)
+                                    {
+                                        self.current_self_param = Some(self_sym);
+                                    }
+                                }
+                            }
+                            let params: Vec<Ty> = m
+                                .params
+                                .iter()
+                                .map(|p| self.resolve_type(&p.ty))
+                                .collect();
+                            let ret = m
+                                .return_type
+                                .as_ref()
+                                .map(|t| self.resolve_type(t))
+                                .unwrap_or(Ty::Unit);
+                            self.fn_signatures.insert(
+                                m.name.span,
+                                Ty::Fn { params, ret: Box::new(ret) },
+                            );
+                            self.current_self_param = prev_self_param;
+                        }
                     }
                     self.current_self = prev;
                 }
@@ -457,6 +506,25 @@ impl<'r> Checker<'r> {
                                 .get(&trait_sym)
                                 .map(|ns| ns.iter().any(|n| n == name))
                                 .unwrap_or(false);
+                            // Session 071: in a default-body context
+                            // the synth Self typevar is already in
+                            // scope; rewriting Self::Item as a
+                            // projection through that typevar makes
+                            // mono's subst_ty resolve it once Self
+                            // gets bound to the impl's struct type.
+                            // Without this we leak Ty::Assoc(SelfType,
+                            // ...) which subst_ty doesn't substitute
+                            // (SelfType isn't keyed by SymbolId).
+                            if known {
+                                if let Some(self_sym) = self.current_self_param {
+                                    let ty = Ty::Assoc(
+                                        Box::new(Ty::TypeVar(self_sym)),
+                                        name.to_string(),
+                                    );
+                                    self.type_resolutions.insert(p.span, ty.clone());
+                                    return ty;
+                                }
+                            }
                             if !known {
                                 self.error(
                                     p.span,
@@ -682,7 +750,74 @@ impl<'r> Checker<'r> {
                     self.check_item(inner);
                 }
             }
-            Item::Struct(_) | Item::Enum(_) | Item::Trait(_) | Item::Use(_) => {
+            Item::Trait(t) => {
+                // Session 071: type-check each default body. Self is
+                // resolved as TypeVar(self_sym) (the resolver scoped
+                // it); the body type-checks the same way a generic
+                // fn does, with `self.method()` calls routing through
+                // trait_bound_method_sig (session 051).
+                let prev = self.current_self.take();
+                if let Some(&trait_sym) =
+                    self.res.decl_to_sym.get(&t.name.span)
+                {
+                    self.current_self = Some(SelfContext::Trait(trait_sym));
+                }
+                for m in &t.methods {
+                    let Some(body) = &m.body else { continue };
+                    // Session 071: enter the default's Self typevar
+                    // scope so Self::Item resolves to a substitutable
+                    // projection through that typevar.
+                    let prev_self_param = self.current_self_param;
+                    let trait_sym = self
+                        .res
+                        .decl_to_sym
+                        .get(&t.name.span)
+                        .copied();
+                    if let Some(ts) = trait_sym {
+                        if let Some(&fn_sym) = self
+                            .res
+                            .trait_defaults
+                            .get(&(ts, m.name.name.clone()))
+                        {
+                            if let Some(&self_sym) =
+                                self.res.default_self_syms.get(&fn_sym)
+                            {
+                                self.current_self_param = Some(self_sym);
+                            }
+                        }
+                    }
+                    let sig = self
+                        .fn_signatures
+                        .get(&m.name.span)
+                        .cloned()
+                        .unwrap_or(Ty::Error);
+                    let (param_tys, ret_ty) = match sig {
+                        Ty::Fn { params, ret } => (params, *ret),
+                        _ => (Vec::new(), Ty::Error),
+                    };
+                    for (param, ty) in m.params.iter().zip(&param_tys) {
+                        self.local_types.insert(param.name.span, ty.clone());
+                    }
+                    let prev_ret =
+                        std::mem::replace(&mut self.current_return, ret_ty.clone());
+                    let body_ty = self.check_block(body);
+                    if !body_ty.compatible(&ret_ty) {
+                        self.error(
+                            body.span,
+                            format!(
+                                "default method `{}` returns `{}` but body has type `{}`",
+                                m.name.name,
+                                ret_ty.display(),
+                                body_ty.display()
+                            ),
+                        );
+                    }
+                    self.current_return = prev_ret;
+                    self.current_self_param = prev_self_param;
+                }
+                self.current_self = prev;
+            }
+            Item::Struct(_) | Item::Enum(_) | Item::Use(_) => {
                 // Field/variant types were resolved by the resolver;
                 // trait method signature types are resolved in pass 1b;
                 // `use` is fully handled by the resolver.
@@ -705,6 +840,11 @@ impl<'r> Checker<'r> {
         for sig in &trait_sigs {
             match i.methods.iter().find(|m| m.name.name == sig.name.name) {
                 None => {
+                    // Session 071: a default body means the impl
+                    // inherits this method — not an error to omit.
+                    if sig.body.is_some() {
+                        continue;
+                    }
                     self.error(
                         i.span,
                         format!(

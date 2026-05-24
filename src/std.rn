@@ -26,6 +26,23 @@ pub mod std {
     pub trait Iterator {
         type Item;
         fn next(self: dyn Iterator) -> Option<Self::Item>;
+        /* Session 071: default-body method. Drains the iterator into
+           a Vec by calling `self.next()` repeatedly until `None`.
+           Every Iterator-implementing type inherits this — no need
+           to override unless you want a custom collect strategy.
+           `Self` inside the body refers to the concrete impl type
+           (VecIter<T>, Map<I, F, U>, etc.); monomorphization
+           specializes per Self at each call site. */
+        fn collect(self: Self) -> Vec<Self::Item> {
+            let v: Vec<Self::Item> = vec_new();
+            while true {
+                match self.next() {
+                    Option::Some(x) => { v.push(x); }
+                    Option::None => { break; }
+                }
+            }
+            v
+        }
     }
 
     /* One-argument callable: a closure literal `|x| body` that

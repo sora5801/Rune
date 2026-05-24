@@ -241,6 +241,45 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn trait_default_method_collect_chained() {
+    // Session 071: the headline — `.collect()` as a default method
+    // on Iterator. The trait declares the default body; impls
+    // (VecIter<T>, Map<I, F, U>, Filter<I, P>) inherit it. The
+    // monomorphizer specializes per Self at each call site so
+    // `self.next()` inside the body dispatches to the impl's
+    // concrete next method.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let result: Vec<i64> = v.iter().collect();
+            result.len() + result.get(0) + result.get(4)
+        }
+    "#;
+    // len=5, first=1, last=5; 5 + 1 + 5 = 11
+    assert_eq!(run_main(src), 11);
+}
+
+#[test]
+fn trait_default_method_collect_through_map() {
+    // Combine default-method dispatch with the closure-bound
+    // iterator-adapter path. Map<I, F, U> inherits .collect()
+    // from Iterator; calling it on a Map of closures works.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mult: i64 = 10;
+            let result: Vec<i64> =
+                std::Map { iter: v.iter(), f: |x| x * mult }.collect();
+            result.len() + result.get(0) + result.get(2)
+        }
+    "#;
+    // 3 + 10 + 30 = 43
+    assert_eq!(run_main(src), 43);
+}
+
+#[test]
 fn hashmap_insert_overwrite_releases_old_value() {
     // Session 070: overwriting an existing key releases the old
     // value's ARC. Pre-070, the old Vec got dropped on the floor.
