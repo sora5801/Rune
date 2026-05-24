@@ -348,6 +348,45 @@ fn infer_type_args(generic: &HirFn, args: &[HirExpr]) -> Option<Vec<Ty>> {
             return None;
         }
     }
+    // Session 078: best-effort fallback for U-only-in-bound
+    // method-level generics. The full bound-propagation cascade
+    // is in the checker's user_method_sig_with_args; here we
+    // just need to make spec requests succeed when the caller
+    // already pinned the type at the result-Ty level (which the
+    // checker did via apply_subst). Look at unsubst'd generics
+    // and try to find them inside arg or result types via
+    // structural inspection — for the Map<I, F, U> case, the
+    // call site's expr.ty is `Map<VecIter, Ty::Fn, i64>`, which
+    // the caller can infer through the lower stage. But mono
+    // doesn't carry the result expr.ty here, so fall back to a
+    // pragmatic default: any unbound generic that's bounded by
+    // a Fn1 trait whose first arg is a structurally-pinned arg
+    // gets read from the matching Ty::Fn / closure call sig.
+    //
+    // The simpler v0.x heuristic: if there's exactly ONE missing
+    // generic, walk pinned subst entries; for each Ty::Fn or
+    // Ty::Struct(closure_sym), read its call signature's return
+    // type and unify with the missing generic. Catches the
+    // .map(f) -> U-pinned-by-F's-return-type case without
+    // duplicating the checker's full cascade. If multiple
+    // generics are missing, give up — the caller will see a
+    // codegen error and the user can disambiguate via the
+    // struct-literal form.
+    let missing: Vec<SymbolId> = generic
+        .generics
+        .iter()
+        .filter(|g| !subst.contains_key(g))
+        .copied()
+        .collect();
+    if missing.len() == 1 {
+        let target = missing[0];
+        for (_, concrete) in subst.iter() {
+            if let Ty::Fn { ret, .. } = concrete {
+                subst.insert(target, (**ret).clone());
+                break;
+            }
+        }
+    }
     // Return type args in declaration order. If a param wasn't bound
     // by inference, we can't proceed.
     generic

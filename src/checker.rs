@@ -251,6 +251,57 @@ impl<'r> Checker<'r> {
                             }
                         }
                     }
+                    // Session 078: also resolve method-level
+                    // generics' bound args. `fn map<F: Fn1<Self::
+                    // Item, U>, U>` needs `Fn1`'s args resolved
+                    // into `type_resolutions` so the bound-
+                    // propagation cascade in user_method_sig_with_
+                    // args can read them. Set current_self_param
+                    // for the method (same way pass-1b does
+                    // session 071) so `Self::Item` becomes
+                    // `Ty::Assoc(TypeVar(self_sym), "Item")` —
+                    // substitutable by mono / apply_subst once
+                    // Self is bound.
+                    let prev_self = self.current_self.take();
+                    let prev_self_param = self.current_self_param;
+                    if let Some(&trait_sym) =
+                        self.res.decl_to_sym.get(&t.name.span)
+                    {
+                        self.current_self = Some(SelfContext::Trait(trait_sym));
+                    }
+                    for m in &t.methods {
+                        // For body-bearing methods, set the
+                        // synth Self typevar so Self::Item in
+                        // the bound is substitutable. Mirrors
+                        // session 071's register_signatures path.
+                        let trait_sym_opt = self
+                            .res
+                            .decl_to_sym
+                            .get(&t.name.span)
+                            .copied();
+                        if let Some(ts) = trait_sym_opt {
+                            if let Some(&fn_sym) = self
+                                .res
+                                .trait_defaults
+                                .get(&(ts, m.name.name.clone()))
+                            {
+                                if let Some(&self_sym) =
+                                    self.res.default_self_syms.get(&fn_sym)
+                                {
+                                    self.current_self_param = Some(self_sym);
+                                }
+                            }
+                        }
+                        for g in &m.generics {
+                            for b in &g.bounds {
+                                for a in &b.generic_args {
+                                    self.resolve_type(a);
+                                }
+                            }
+                        }
+                        self.current_self_param = prev_self_param;
+                    }
+                    self.current_self = prev_self;
                 }
                 Item::Struct(s) => {
                     for g in &s.generics {

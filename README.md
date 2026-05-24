@@ -314,7 +314,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Bound propagation cascade — unblocks `.map(f)` / `.fold` as methods (U-only-in-bound pinning)
+1. `.fold(init, f)` and multi-missing-generic inference
 2. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` beyond i64
 3. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
 4. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`

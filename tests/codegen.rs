@@ -273,15 +273,56 @@ fn iterator_filter_as_method_with_closure() {
     assert_eq!(run_main(src), 3);
 }
 
-// .map() as a method works syntactically but its `U` generic
-// param needs cross-bound inference (`F: Fn1<Self::Item, U>`
-// → pin U from F's signature) before downstream code sees a
-// fully-substituted Map<I, F, U>. Session 077 wires the
-// bound-propagation hook into user_method_sig but the cascade
-// for U-only-in-bound generic params doesn't fire reliably
-// for all cases yet. The std::Map { ... } struct-literal form
-// still works as the user-facing API for v0.x; .map() as a
-// method is deferred to a follow-up session.
+#[test]
+fn iterator_map_as_method_with_named_fn() {
+    // Session 078: bound-propagation cascade pins U via F's
+    // Fn1 bound at the method-call site. .map(sq) infers
+    // F=Ty::Fn(i64, i64) from the arg type; then bound-walking
+    // unifies Fn1<Self::Item, U>'s args with F's (P, R) →
+    // U = i64.
+    let src = r#"
+        fn sq(x: i64) -> i64 { x * x }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4);
+            v.iter().map(sq).sum()
+        }
+    "#;
+    // 1 + 4 + 9 + 16 = 30
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn iterator_chain_filter_map_sum_as_methods() {
+    // Session 078: the full chain works as methods now.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter()
+                .filter(|x| x > 1)
+                .map(|x: i64| x * 10)
+                .sum()
+        }
+    "#;
+    // filter > 1 = [2,3,4,5]; map *10 = [20,30,40,50]; sum = 140.
+    assert_eq!(run_main(src), 140);
+}
+
+#[test]
+fn iterator_map_as_method_with_annotated_closure() {
+    // Closure case: x: i64 annotation pins the closure's
+    // param, and U flows through the bound cascade for the
+    // return.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4);
+            v.iter().map(|x: i64| x * x).sum()
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
 
 #[test]
 fn iterator_count_default_method() {
