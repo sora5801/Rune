@@ -750,6 +750,25 @@ impl<'r> Checker<'r> {
             (Some(d), Some(i)) => {
                 let init_span =
                     l.init.as_ref().map(|e| e.span()).unwrap_or(l.span);
+                // Capturing-closure special case: when the init is
+                // a `Ty::Struct(closure_sym, [])` whose struct has
+                // a `call` method matching the declared `fn(...)`
+                // signature, the annotation served as the
+                // bidirectional-inference hint and the binding's
+                // bound type is the *actual* closure struct (so
+                // the call site dispatches via the struct's call
+                // method rather than as a fn pointer).
+                if let (Ty::Struct(s, _), Ty::Fn { .. }) = (&i, &d) {
+                    if self
+                        .res
+                        .impl_methods
+                        .get(&(*s, "call".to_string()))
+                        .is_some()
+                    {
+                        self.bind_pattern(&l.pat, &i);
+                        return;
+                    }
+                }
                 if !self.check_assignable(init_span, &i, &d) {
                     self.error(
                         l.span,
@@ -1535,9 +1554,79 @@ impl<'r> Checker<'r> {
             None => body_ty,
         };
         self.closure_ret_tys.insert(span, ret_ty.clone());
-        Ty::Fn {
-            params: param_tys,
-            ret: Box::new(ret_ty),
+        // Two shapes, depending on captures:
+        //
+        // - Non-capturing: the closure lowers to an anonymous `fn`
+        //   item (session 057). Type is `Ty::Fn { ... }` so the
+        //   call site uses IndirectCall.
+        //
+        // - Capturing: the closure lowers to a synthesized struct
+        //   with one field per capture + a `call` method. Type is
+        //   `Ty::Struct(closure_struct_sym, [])` so the call site
+        //   uses method dispatch (`impl_methods[(s, "call")]`).
+        //   Also build the synth struct's `StructLayout` from the
+        //   capture sym list + each capture's already-known type.
+        let captures = self
+            .res
+            .closure_captures
+            .get(&span)
+            .cloned()
+            .unwrap_or_default();
+        if captures.is_empty() {
+            Ty::Fn {
+                params: param_tys,
+                ret: Box::new(ret_ty),
+            }
+        } else {
+            let Some(&closure_struct_sym) =
+                self.res.closure_struct_sym.get(&span)
+            else {
+                // Resolver didn't mint a struct sym — fall back to
+                // fn-typed result; lowerer will error.
+                return Ty::Fn {
+                    params: param_tys,
+                    ret: Box::new(ret_ty),
+                };
+            };
+            let mut fields: Vec<StructLayoutField> = Vec::with_capacity(captures.len());
+            for (i, capture_sym) in captures.iter().enumerate() {
+                let sym = self.res.symbol(*capture_sym);
+                let capture_ty = self
+                    .local_types
+                    .get(&sym.span)
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                fields.push(StructLayoutField {
+                    name: sym.name.clone(),
+                    ty: capture_ty,
+                    offset: (i * 8) as u32,
+                });
+            }
+            let size = (captures.len() * 8) as u32;
+            self.struct_layouts.insert(
+                closure_struct_sym,
+                StructLayout { fields, size },
+            );
+            // Register the `call` method's fn signature: takes
+            // self (the closure struct) + the closure's params,
+            // returns the body's type.
+            if let Some(&call_sym) = self.res.closure_call_method_sym.get(&span) {
+                let mut sig_params: Vec<Ty> = Vec::with_capacity(param_tys.len() + 1);
+                sig_params.push(Ty::Struct(closure_struct_sym, Vec::new()));
+                sig_params.extend(param_tys.iter().cloned());
+                let sig = Ty::Fn {
+                    params: sig_params,
+                    ret: Box::new(ret_ty.clone()),
+                };
+                // The resolver minted the call method with the
+                // closure's span; the lowerer reads the signature
+                // back by span via `decl_to_sym` → not applicable
+                // here. Index by call_sym's symbol-span so the
+                // lowerer can find it.
+                let call_method_span = self.res.symbol(call_sym).span;
+                self.fn_signatures.insert(call_method_span, sig);
+            }
+            Ty::Struct(closure_struct_sym, Vec::new())
         }
     }
 
@@ -1968,6 +2057,51 @@ impl<'r> Checker<'r> {
                 self.apply_subst(&ret, &subst, None)
             }
             Ty::Error => Ty::Error,
+            // Calling a closure value: the synth `call` method on
+            // the closure's struct does the dispatch. Look it up
+            // via `impl_methods[(closure_sym, "call")]` and use
+            // its stored signature minus the leading `self` param.
+            Ty::Struct(s, _)
+                if self.res.impl_methods.get(&(s, "call".to_string())).is_some() =>
+            {
+                let call_sym = self.res.impl_methods[&(s, "call".to_string())];
+                let call_span = self.res.symbol(call_sym).span;
+                let sig = self.fn_signatures.get(&call_span).cloned();
+                let Some(Ty::Fn { params: call_params, ret: call_ret }) = sig
+                else {
+                    self.error(span, "internal: closure has no call signature");
+                    return Ty::Error;
+                };
+                // Skip the leading `self` param.
+                let expected_params: Vec<Ty> =
+                    call_params.into_iter().skip(1).collect();
+                if expected_params.len() != arg_tys.len() {
+                    self.error(
+                        span,
+                        format!(
+                            "closure expects {} argument{} but got {}",
+                            expected_params.len(),
+                            if expected_params.len() == 1 { "" } else { "s" },
+                            arg_tys.len()
+                        ),
+                    );
+                    return *call_ret;
+                }
+                for (i, (a, p)) in arg_tys.iter().zip(expected_params.iter()).enumerate() {
+                    if !self.check_assignable(args[i].span(), a, p) {
+                        self.error(
+                            args[i].span(),
+                            format!(
+                                "argument {} has type `{}`, expected `{}`",
+                                i + 1,
+                                a.display(),
+                                p.display()
+                            ),
+                        );
+                    }
+                }
+                *call_ret
+            }
             other => {
                 self.error(span, format!("cannot call value of type `{}`", other.display()));
                 Ty::Error

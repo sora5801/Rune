@@ -4796,6 +4796,58 @@ fn closure_chain_map_filter_collect() {
 }
 
 #[test]
+fn closure_capture_basic() {
+    // Session 060: capturing closures actually work. The lambda
+    // `|x| x * mult` captures `mult: i64` into a synth struct;
+    // the call site `f(7)` dispatches through the struct's
+    // synth `call` method (built into `impl_methods` by the
+    // resolver, registered as the closure's call site by the
+    // lowerer). The whole pipeline is monomorphic — codegen
+    // sees a regular struct + a regular call.
+    let src = r#"
+        fn main() -> i64 {
+            let mult: i64 = 3;
+            let f: fn(i64) -> i64 = |x| x * mult;
+            f(7)
+        }
+    "#;
+    assert_eq!(run_main(src), 21);
+}
+
+#[test]
+fn closure_capture_multiple() {
+    // Capturing two locals. The synth struct gets two fields;
+    // the body reads `self.a` and `self.b` via FieldAccess.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i64 = 5;
+            let b: i64 = 10;
+            let f: fn(i64) -> i64 = |x| x * a + b;
+            f(6)
+        }
+    "#;
+    // 6 * 5 + 10 = 40
+    assert_eq!(run_main(src), 40);
+}
+
+#[test]
+fn closure_capture_call_twice() {
+    // Calling a capturing closure more than once. The struct
+    // value persists across calls; the captures remain accessible.
+    let src = r#"
+        fn main() -> i64 {
+            let base: i64 = 10;
+            let add_base: fn(i64) -> i64 = |x| x + base;
+            let r1: i64 = add_base(1);
+            let r2: i64 = add_base(2);
+            r1 + r2
+        }
+    "#;
+    // (1 + 10) + (2 + 10) = 23
+    assert_eq!(run_main(src), 23);
+}
+
+#[test]
 fn closure_capture_session_059_groundwork() {
     // Session 059 groundwork: the resolver no longer rejects
     // capturing closures (`let f: fn(i64) -> i64 = |x| x * mult;`).

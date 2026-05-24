@@ -100,14 +100,17 @@ rune: linked with clang -> primes.exe
   -> Vec<T::Item>` — the pipeline-style
   `collect(Filter { iter: Map { iter: v.iter(), f: double },
   pred: gt_three })` works end-to-end.
-- **Function-pointer values + non-capturing closures** — named
-  `fn` items are first-class values, and closure literals
-  `|x| body` / `|x, y| body` / `|| body` desugar to anonymous
-  fn items. Callbacks at adapter call sites can be inline lambdas
-  as long as the body doesn't reference any binding from the
-  enclosing scope. Capturing closures (`|x| x * mult`) are
-  rejected with a clear diagnostic — they need env synthesis and
-  a `Fn` trait, deferred to a follow-up session.
+- **Function-pointer values + closures (capturing)** — named
+  `fn` items are first-class values; closure literals `|x| body`
+  / `|x, y| body` / `|| body` lower to anonymous fn items
+  (non-capturing) or to a synthesized struct holding the
+  captured fields plus a `call` method (capturing). The prelude
+  declares `trait Fn1<A, R> { fn call(self: Self, a: A) -> R; }`.
+  Capturing closures need a type-pinning annotation today (`let
+  f: fn(i64) -> i64 = |x| x * mult;`); the iterator-adapter
+  pipeline (`Map { f: |x| ... }`) is deferred — the field type
+  needs a closure-to-fn-pointer coercion that lands in a
+  follow-up.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -291,18 +294,19 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Capturing closures + `Fn1<A, R>` trait — now that generic
-   traits land, the closure-as-struct design from session 057
-   can build on the new `trait Fn1<A, R> { ... }` and unblock
-   the `|x| x * mult` headline
-2. `HashMap<K, V>` — the bigger collections piece
-3. Range as a `RangeIter` struct — unify the for-over-range
+1. Closures in iterator adapters (`Map { f: |x| ... }`) — the
+   closure-to-fn-pointer-field coercion that the Map-pipeline
+   needs
+2. Bottom-up param inference for closures (`let f = |x| x *
+   mult` without the annotation)
+3. `HashMap<K, V>` — the bigger collections piece
+4. Range as a `RangeIter` struct — unify the for-over-range
    codegen with the Iterator protocol
-4. `From`-based error conversion for `?`
-5. `continue` keyword — mirror of `break` over the existing
+5. `From`-based error conversion for `?`
+6. `continue` keyword — mirror of `break` over the existing
    loop-exit-stack pattern
-6. Trait default-method bodies — `.collect()` as a chained method
-7. Self-hosted bootstrap (long-term)
+7. Trait default-method bodies — `.collect()` as a chained method
+8. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

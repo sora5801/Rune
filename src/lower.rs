@@ -448,13 +448,38 @@ impl<'a> Lowerer<'a> {
                     // A Local of `Ty::Fn` type — calling through a
                     // function-pointer-typed binding (e.g. a struct
                     // field accessed via `let f = m.f; f(x)`). Goes
-                    // through IndirectCall.
+                    // through IndirectCall. A Local of
+                    // `Ty::Struct(s, _)` whose struct has a `call`
+                    // method (closure structs synthesized in
+                    // session 060) dispatches as
+                    // `Call(call_method_sym, [callee, ...args])`.
                     SymbolKind::Local { .. } | SymbolKind::Param => {
                         let callee_hir = self.lower_expr(callee);
                         if matches!(callee_hir.ty, Ty::Fn { .. }) {
                             HirExprKind::IndirectCall {
                                 callee: Box::new(callee_hir),
                                 args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                            }
+                        } else if let Ty::Struct(s, _) = &callee_hir.ty {
+                            if let Some(&call_sym) = self
+                                .res
+                                .impl_methods
+                                .get(&(*s, "call".to_string()))
+                            {
+                                let mut call_args =
+                                    Vec::with_capacity(args.len() + 1);
+                                call_args.push(callee_hir);
+                                for a in args {
+                                    call_args.push(self.lower_expr(a));
+                                }
+                                HirExprKind::Call {
+                                    callee: call_sym,
+                                    args: call_args,
+                                }
+                            } else {
+                                HirExprKind::Unsupported(
+                                    "call target other than a named function".into(),
+                                )
                             }
                         } else {
                             HirExprKind::Unsupported(
@@ -623,12 +648,6 @@ impl<'a> Lowerer<'a> {
         body: &ast::Expr,
         span: crate::token::Span,
     ) -> HirExprKind {
-        let Some(&fn_sym) = self.res.closure_fn_sym.get(&span) else {
-            return HirExprKind::Unsupported(
-                "internal: closure expression has no resolver-minted sym"
-                    .into(),
-            );
-        };
         let param_syms = self
             .res
             .closure_params
@@ -647,17 +666,86 @@ impl<'a> Lowerer<'a> {
             .get(&span)
             .cloned()
             .unwrap_or(Ty::Error);
-        let hir_params: Vec<HirParam> = params
-            .iter()
-            .zip(param_syms.iter())
-            .zip(param_tys.iter())
-            .map(|((p, &sym), ty)| HirParam {
-                sym,
-                name: p.name.name.clone(),
-                ty: ty.clone(),
-            })
-            .collect();
+        let captures = self
+            .res
+            .closure_captures
+            .get(&span)
+            .cloned()
+            .unwrap_or_default();
+        // Non-capturing path: session 057's anonymous-fn item.
+        if captures.is_empty() {
+            let Some(&fn_sym) = self.res.closure_fn_sym.get(&span) else {
+                return HirExprKind::Unsupported(
+                    "internal: closure expression has no resolver-minted sym".into(),
+                );
+            };
+            let hir_params: Vec<HirParam> = params
+                .iter()
+                .zip(param_syms.iter())
+                .zip(param_tys.iter())
+                .map(|((p, &sym), ty)| HirParam {
+                    sym,
+                    name: p.name.name.clone(),
+                    ty: ty.clone(),
+                })
+                .collect();
+            let body_hir = self.lower_expr(body);
+            let body_block = match body_hir.kind {
+                HirExprKind::Block(b) => b,
+                _ => HirBlock {
+                    stmts: vec![HirStmt::Expr(body_hir, false)],
+                    ty: ret_ty.clone(),
+                },
+            };
+            let synthesized = HirFn {
+                sym: fn_sym,
+                name: format!("__lambda_{}", fn_sym.0),
+                generics: Vec::new(),
+                params: hir_params,
+                ret_ty: ret_ty.clone(),
+                body: body_block,
+            };
+            self.synthesized_fns.borrow_mut().push(synthesized);
+            return HirExprKind::Fn(fn_sym);
+        }
+        // Capturing path: synthesize a struct + a `call` impl
+        // method. The lambda expression becomes a struct literal
+        // of the captures; the call method's body is the lambda
+        // body with each captured Local read rewritten as a
+        // FieldAccess on `self`.
+        let Some(&closure_struct_sym) = self.res.closure_struct_sym.get(&span)
+        else {
+            return HirExprKind::Unsupported(
+                "internal: capturing closure has no synth struct sym".into(),
+            );
+        };
+        let Some(&call_method_sym) = self.res.closure_call_method_sym.get(&span)
+        else {
+            return HirExprKind::Unsupported(
+                "internal: capturing closure has no synth call method sym".into(),
+            );
+        };
+        // Capture sym → (offset, ty) lookup table for the rewrite.
+        let layout = self.check.struct_layouts.get(&closure_struct_sym);
+        let mut capture_info: std::collections::HashMap<SymbolId, (u32, Ty)> =
+            std::collections::HashMap::new();
+        for (i, cap_sym) in captures.iter().enumerate() {
+            let ty = layout
+                .and_then(|l| l.fields.get(i))
+                .map(|f| f.ty.clone())
+                .unwrap_or(Ty::Error);
+            capture_info.insert(*cap_sym, ((i * 8) as u32, ty));
+        }
+        // Synth the call method's `self` sym fresh — it isn't in
+        // the resolver's symbol table (no source span), so codegen
+        // creates a Variable for it via the normal `param.sym`
+        // path during compile_fn.
+        let self_sym = self.fresh_sym();
+        // Lower the body, then rewrite captured Local reads.
+        let self_ty = Ty::Struct(closure_struct_sym, Vec::new());
         let body_hir = self.lower_expr(body);
+        let mut body_hir = body_hir;
+        Self::rewrite_captures(&mut body_hir, self_sym, &self_ty, &capture_info);
         let body_block = match body_hir.kind {
             HirExprKind::Block(b) => b,
             _ => HirBlock {
@@ -665,16 +753,262 @@ impl<'a> Lowerer<'a> {
                 ty: ret_ty.clone(),
             },
         };
+        // Build the call method's HirFn: first param is `self`
+        // (the closure struct), followed by the closure's params.
+        let mut hir_params: Vec<HirParam> = Vec::with_capacity(param_syms.len() + 1);
+        hir_params.push(HirParam {
+            sym: self_sym,
+            name: "self".into(),
+            ty: Ty::Struct(closure_struct_sym, Vec::new()),
+        });
+        for ((p, &sym), ty) in params
+            .iter()
+            .zip(param_syms.iter())
+            .zip(param_tys.iter())
+        {
+            hir_params.push(HirParam {
+                sym,
+                name: p.name.name.clone(),
+                ty: ty.clone(),
+            });
+        }
         let synthesized = HirFn {
-            sym: fn_sym,
-            name: format!("__lambda_{}", fn_sym.0),
+            sym: call_method_sym,
+            name: format!("__Closure_{}__call", closure_struct_sym.0),
             generics: Vec::new(),
             params: hir_params,
             ret_ty: ret_ty.clone(),
             body: body_block,
         };
         self.synthesized_fns.borrow_mut().push(synthesized);
-        HirExprKind::Fn(fn_sym)
+        // The lambda expression becomes a struct literal of the
+        // captured locals.
+        let size = (captures.len() * 8) as u32;
+        let mut fields: Vec<(u32, HirExpr)> = Vec::with_capacity(captures.len());
+        for (i, cap_sym) in captures.iter().enumerate() {
+            let ty = layout
+                .and_then(|l| l.fields.get(i))
+                .map(|f| f.ty.clone())
+                .unwrap_or(Ty::Error);
+            fields.push((
+                (i * 8) as u32,
+                HirExpr {
+                    kind: HirExprKind::Local(*cap_sym),
+                    ty,
+                },
+            ));
+        }
+        HirExprKind::StructLit {
+            sym: closure_struct_sym,
+            fields,
+            size,
+        }
+    }
+
+    /// Walk a closure body's HIR and rewrite each `Local(capture_sym)`
+    /// read into a `FieldAccess` on the synth `self` parameter. The
+    /// `capture_info` map carries each capture's field offset and
+    /// type. Doesn't touch `Local` reads of non-captured syms (the
+    /// closure's own params, locals declared inside the body).
+    fn rewrite_captures(
+        e: &mut HirExpr,
+        self_sym: SymbolId,
+        self_ty: &Ty,
+        capture_info: &std::collections::HashMap<SymbolId, (u32, Ty)>,
+    ) {
+        Self::rewrite_captures_in_kind(&mut e.kind, self_sym, self_ty, capture_info);
+        // If the kind got rewritten to a FieldAccess (capture
+        // resolved), the expression's overall type changes to the
+        // field's type. The rewrite below already updated `kind`;
+        // update `e.ty` to match.
+        if let HirExprKind::FieldAccess { field_ty, .. } = &e.kind {
+            e.ty = field_ty.clone();
+        }
+    }
+
+    fn rewrite_captures_in_kind(
+        k: &mut HirExprKind,
+        self_sym: SymbolId,
+        self_ty: &Ty,
+        capture_info: &std::collections::HashMap<SymbolId, (u32, Ty)>,
+    ) {
+        use HirExprKind::*;
+        match k {
+            Local(sym) => {
+                if let Some((offset, field_ty)) = capture_info.get(sym) {
+                    *k = FieldAccess {
+                        receiver: Box::new(HirExpr {
+                            kind: Local(self_sym),
+                            ty: self_ty.clone(),
+                        }),
+                        offset: *offset,
+                        field_ty: field_ty.clone(),
+                    };
+                }
+            }
+            Unary { expr, .. } | Cast { expr } => {
+                Self::rewrite_captures(expr, self_sym, self_ty, capture_info)
+            }
+            Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
+                Self::rewrite_captures(lhs, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(rhs, self_sym, self_ty, capture_info);
+            }
+            Assign { rhs, .. } | AssignOp { rhs, .. } => {
+                Self::rewrite_captures(rhs, self_sym, self_ty, capture_info)
+            }
+            Call { args, .. } | BuiltinCall { args, .. } => {
+                for a in args {
+                    Self::rewrite_captures(a, self_sym, self_ty, capture_info);
+                }
+            }
+            IndirectCall { callee, args } => {
+                Self::rewrite_captures(callee, self_sym, self_ty, capture_info);
+                for a in args {
+                    Self::rewrite_captures(a, self_sym, self_ty, capture_info);
+                }
+            }
+            MethodCall { receiver, args, .. } => {
+                Self::rewrite_captures(receiver, self_sym, self_ty, capture_info);
+                for a in args {
+                    Self::rewrite_captures(a, self_sym, self_ty, capture_info);
+                }
+            }
+            DynBox { value, .. } => Self::rewrite_captures(value, self_sym, self_ty, capture_info),
+            DynCall { receiver, args, .. } => {
+                Self::rewrite_captures(receiver, self_sym, self_ty, capture_info);
+                for a in args {
+                    Self::rewrite_captures(a, self_sym, self_ty, capture_info);
+                }
+            }
+            EnumPayloadCtor { payloads, .. } => {
+                for p in payloads {
+                    Self::rewrite_captures(p, self_sym, self_ty, capture_info);
+                }
+            }
+            StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    Self::rewrite_captures(v, self_sym, self_ty, capture_info);
+                }
+            }
+            FieldAccess { receiver, .. } => {
+                Self::rewrite_captures(receiver, self_sym, self_ty, capture_info)
+            }
+            FieldAssign { receiver, rhs, .. } => {
+                Self::rewrite_captures(receiver, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(rhs, self_sym, self_ty, capture_info);
+            }
+            Array { elems, .. } => {
+                for el in elems {
+                    Self::rewrite_captures(el, self_sym, self_ty, capture_info);
+                }
+            }
+            Index { array, index, .. } => {
+                Self::rewrite_captures(array, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(index, self_sym, self_ty, capture_info);
+            }
+            StrByteIndex { str_val, index } => {
+                Self::rewrite_captures(str_val, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(index, self_sym, self_ty, capture_info);
+            }
+            StrSlice { str_val, start, end, .. } => {
+                Self::rewrite_captures(str_val, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(start, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(end, self_sym, self_ty, capture_info);
+            }
+            Block(b) => {
+                for s in &mut b.stmts {
+                    match s {
+                        HirStmt::Let(l) => {
+                            if let Some(init) = &mut l.init {
+                                Self::rewrite_captures(init, self_sym, self_ty, capture_info);
+                            }
+                        }
+                        HirStmt::Expr(e, _) => {
+                            Self::rewrite_captures(e, self_sym, self_ty, capture_info)
+                        }
+                    }
+                }
+            }
+            If { cond, then_b, else_b } => {
+                Self::rewrite_captures(cond, self_sym, self_ty, capture_info);
+                for s in &mut then_b.stmts {
+                    match s {
+                        HirStmt::Let(l) => {
+                            if let Some(init) = &mut l.init {
+                                Self::rewrite_captures(init, self_sym, self_ty, capture_info);
+                            }
+                        }
+                        HirStmt::Expr(e, _) => {
+                            Self::rewrite_captures(e, self_sym, self_ty, capture_info)
+                        }
+                    }
+                }
+                if let Some(e) = else_b {
+                    Self::rewrite_captures(e, self_sym, self_ty, capture_info);
+                }
+            }
+            While { cond, body } => {
+                Self::rewrite_captures(cond, self_sym, self_ty, capture_info);
+                for s in &mut body.stmts {
+                    match s {
+                        HirStmt::Let(l) => {
+                            if let Some(init) = &mut l.init {
+                                Self::rewrite_captures(init, self_sym, self_ty, capture_info);
+                            }
+                        }
+                        HirStmt::Expr(e, _) => {
+                            Self::rewrite_captures(e, self_sym, self_ty, capture_info)
+                        }
+                    }
+                }
+            }
+            For { iter, body, .. } => {
+                Self::rewrite_captures(iter, self_sym, self_ty, capture_info);
+                for s in &mut body.stmts {
+                    match s {
+                        HirStmt::Let(l) => {
+                            if let Some(init) = &mut l.init {
+                                Self::rewrite_captures(init, self_sym, self_ty, capture_info);
+                            }
+                        }
+                        HirStmt::Expr(e, _) => {
+                            Self::rewrite_captures(e, self_sym, self_ty, capture_info)
+                        }
+                    }
+                }
+            }
+            ForRange { start, end, body, .. } => {
+                Self::rewrite_captures(start, self_sym, self_ty, capture_info);
+                Self::rewrite_captures(end, self_sym, self_ty, capture_info);
+                for s in &mut body.stmts {
+                    match s {
+                        HirStmt::Let(l) => {
+                            if let Some(init) = &mut l.init {
+                                Self::rewrite_captures(init, self_sym, self_ty, capture_info);
+                            }
+                        }
+                        HirStmt::Expr(e, _) => {
+                            Self::rewrite_captures(e, self_sym, self_ty, capture_info)
+                        }
+                    }
+                }
+            }
+            Match { scrutinee, arms } => {
+                Self::rewrite_captures(scrutinee, self_sym, self_ty, capture_info);
+                for arm in arms {
+                    if let Some(g) = &mut arm.guard {
+                        Self::rewrite_captures(g, self_sym, self_ty, capture_info);
+                    }
+                    Self::rewrite_captures(&mut arm.body, self_sym, self_ty, capture_info);
+                }
+            }
+            Return(v) => {
+                if let Some(e) = v {
+                    Self::rewrite_captures(e, self_sym, self_ty, capture_info);
+                }
+            }
+            Lit(_) | Fn(_) | EnumVariant { .. } | Break | Unsupported(_) => {}
+        }
     }
 
     fn lower_lit(&self, lit: &ast::Lit, e: &ast::Expr) -> HirLit {
