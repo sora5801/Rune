@@ -68,6 +68,7 @@ pub struct Codegen<M: Module> {
     /// each ARC-managed `Vec<T>` element type. Keyed by the element
     /// `Ty`; the function walks a Vec's live elements releasing each.
     vec_release_funcs: HashMap<Ty, FuncId>,
+    hashmap_release_funcs: HashMap<Ty, FuncId>,
     /// Per-trait ordered method names — the trait-object method-table
     /// layout. `(type_sym, method) → impl fn sym` for building tables.
     trait_methods: HashMap<SymbolId, Vec<String>>,
@@ -182,6 +183,21 @@ impl<M: Module> Codegen<M> {
                 .map_err(|e| CodegenError(e.to_string()))?;
             self.vec_release_funcs.insert(elem.clone(), id);
         }
+        // Pass 0 (cont.): declare a per-V release function for each
+        // ARC-managed HashMap value type. Walks the occupied slots
+        // releasing each value, then hands off to the runtime's
+        // release_hashmap (which frees the descriptor + arrays).
+        // Closes the V-leak from session 064.
+        for v_ty in &hir.hashmap_arc_val_tys {
+            let name = format!("__rune_release_hashmap${}", mangle_ty_name(v_ty));
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.hashmap_release_funcs.insert(v_ty.clone(), id);
+        }
         // Pass 0 (cont.): declare a per-trait `dyn` release function.
         // A trait object is a heap box `[fnptr_0..fnptr_{N-1}, data,
         // drop, rc]`; its release decrements rc and, at zero, calls
@@ -234,6 +250,9 @@ impl<M: Module> Codegen<M> {
         }
         for (elem, &func_id) in &self.vec_release_funcs.clone() {
             self.define_vec_release(elem, func_id)?;
+        }
+        for (v_ty, &func_id) in &self.hashmap_release_funcs.clone() {
+            self.define_hashmap_release(v_ty, func_id)?;
         }
         for (&sym, &func_id) in &self.dyn_release_funcs.clone() {
             self.define_dyn_release(sym, func_id)?;
@@ -571,6 +590,15 @@ impl<M: Module> Codegen<M> {
                 return Ok(());
             }
         }
+        // HashMap<K, V> with an ARC value type: synthesized per-V
+        // release walks the occupied slots before the runtime drop.
+        if let Ty::HashMap(_, v_ty) = ty {
+            if let Some(&func_id) = self.hashmap_release_funcs.get(&**v_ty) {
+                let local = self.module.declare_func_in_func(func_id, builder.func);
+                builder.ins().call(local, &[value]);
+                return Ok(());
+            }
+        }
         // Vec / Str: runtime helper.
         let helper = arc_helper_name("release", ty)?;
         let func_id = self.ensure_runtime_func(helper)?;
@@ -662,6 +690,118 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(done);
         builder.ins().return_(&[]);
         builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
+    /// Per-V release function for an ARC-managed `HashMap<i64, V>`.
+    /// When the strong count is about to hit zero, walks every
+    /// occupied slot (i in 0..cap; occupied[i] != 0) releasing
+    /// that slot's V, then hands off to the runtime's
+    /// `release_hashmap` for the descriptor + arrays. Closes the
+    /// V-leak from session 064. Layout from `struct rune_hashmap`
+    /// in runtime.c: keys@0, vals@8, occupied@16, len@24, cap@32,
+    /// rc@40, weak_count@48 — all i64 except `occupied` which
+    /// points at a parallel `int8_t[cap]` array.
+    fn define_hashmap_release(
+        &mut self,
+        v_ty: &Ty,
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+
+        let entry = builder.create_block();
+        let walk = builder.create_block();
+        let header = builder.create_block();
+        let body = builder.create_block();
+        let slot_release = builder.create_block();
+        let after_slot = builder.create_block();
+        let finish = builder.create_block();
+        let done = builder.create_block();
+
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let p = builder.block_params(entry)[0];
+        // Null guard.
+        let zero = builder.ins().iconst(types::I64, 0);
+        let is_null = builder.ins().icmp(IntCC::Equal, p, zero);
+        builder.ins().brif(is_null, done, &[], walk, &[]);
+
+        // walk: only release slots when this call zeroes the rc.
+        // Init `i` to 0 here so both incoming edges to `header`
+        // (from walk and from after_slot) agree on a definition.
+        builder.switch_to_block(walk);
+        builder.seal_block(walk);
+        let i = Variable::new(0);
+        builder.declare_var(i, types::I64);
+        let zero_i = builder.ins().iconst(types::I64, 0);
+        builder.def_var(i, zero_i);
+        let rc = builder.ins().load(types::I64, MemFlags::new(), p, 40);
+        let one_rc = builder.ins().iconst(types::I64, 1);
+        let will_zero = builder.ins().icmp(IntCC::Equal, rc, one_rc);
+        builder.ins().brif(will_zero, header, &[], finish, &[]);
+
+        builder.switch_to_block(header);
+        let iv = builder.use_var(Variable::new(0));
+        let cap = builder.ins().load(types::I64, MemFlags::new(), p, 32);
+        let more = builder.ins().icmp(IntCC::SignedLessThan, iv, cap);
+        builder.ins().brif(more, body, &[], finish, &[]);
+
+        // body: read occupied[i] (i8); if non-zero, release vals[i].
+        builder.switch_to_block(body);
+        builder.seal_block(body);
+        let occ_ptr = builder.ins().load(types::I64, MemFlags::new(), p, 16);
+        let iv2 = builder.use_var(Variable::new(0));
+        let occ_addr = builder.ins().iadd(occ_ptr, iv2);
+        let occ = builder.ins().load(types::I8, MemFlags::new(), occ_addr, 0);
+        let zero_i8 = builder.ins().iconst(types::I8, 0);
+        let is_occupied = builder.ins().icmp(IntCC::NotEqual, occ, zero_i8);
+        builder.ins().brif(is_occupied, slot_release, &[], after_slot, &[]);
+
+        // slot_release: load vals[i] (i64), release the V value.
+        builder.switch_to_block(slot_release);
+        builder.seal_block(slot_release);
+        let vals_ptr = builder.ins().load(types::I64, MemFlags::new(), p, 8);
+        let iv3 = builder.use_var(Variable::new(0));
+        let eight = builder.ins().iconst(types::I64, 8);
+        let off = builder.ins().imul(iv3, eight);
+        let slot_addr = builder.ins().iadd(vals_ptr, off);
+        let v_val = builder.ins().load(types::I64, MemFlags::new(), slot_addr, 0);
+        self.emit_release_field(&mut builder, v_ty, v_val)?;
+        builder.ins().jump(after_slot, &[]);
+
+        // after_slot: i++, jump back to header.
+        builder.switch_to_block(after_slot);
+        builder.seal_block(after_slot);
+        let iv4 = builder.use_var(Variable::new(0));
+        let one = builder.ins().iconst(types::I64, 1);
+        let next = builder.ins().iadd(iv4, one);
+        builder.def_var(Variable::new(0), next);
+        builder.ins().jump(header, &[]);
+        builder.seal_block(header);
+
+        // finish: runtime drop (rc--, free arrays, weak release).
+        builder.switch_to_block(finish);
+        builder.seal_block(finish);
+        let rel = self.ensure_runtime_func("release_hashmap")?;
+        let rel_local = self.module.declare_func_in_func(rel, builder.func);
+        builder.ins().call(rel_local, &[p]);
+        builder.ins().jump(done, &[]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+
         self.module
             .define_function(func_id, &mut ctx)
             .map_err(|e| CodegenError(e.to_string()))?;
@@ -800,6 +940,7 @@ impl<M: Module> Codegen<M> {
             enum_release_funcs: &self.enum_release_funcs,
             enum_payload_tys: &self.enum_payload_tys,
             vec_release_funcs: &self.vec_release_funcs,
+            hashmap_release_funcs: &self.hashmap_release_funcs,
             trait_methods_flat: &self.trait_methods_flat,
             impl_methods: &self.impl_methods,
             dyn_release_funcs: &self.dyn_release_funcs,
@@ -920,6 +1061,7 @@ impl Codegen<JITModule> {
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
+            hashmap_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
@@ -980,6 +1122,7 @@ impl Codegen<ObjectModule> {
             enum_payload_tys: HashMap::new(),
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
+            hashmap_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
@@ -1061,6 +1204,7 @@ struct FnCodegen<'a, M: Module> {
     enum_release_funcs: &'a HashMap<SymbolId, FuncId>,
     enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
     vec_release_funcs: &'a HashMap<Ty, FuncId>,
+    hashmap_release_funcs: &'a HashMap<Ty, FuncId>,
     trait_methods_flat: &'a HashMap<SymbolId, Vec<(SymbolId, String)>>,
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
@@ -1342,6 +1486,21 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         if let Ty::Vec(elem) = ty {
             if action == "release" {
                 if let Some(&func_id) = self.vec_release_funcs.get(&**elem) {
+                    let local_func = self
+                        .module
+                        .declare_func_in_func(func_id, self.builder.func);
+                    self.builder.ins().call(local_func, &[value]);
+                    return Ok(());
+                }
+            }
+        }
+        // HashMap<K, V>: retain via the runtime helper; release
+        // dispatches to the synthesized per-V release when V is
+        // ARC-managed so the map walks its occupied slots before
+        // freeing the descriptor.
+        if let Ty::HashMap(_, v_ty) = ty {
+            if action == "release" {
+                if let Some(&func_id) = self.hashmap_release_funcs.get(&**v_ty) {
                     let local_func = self
                         .module
                         .declare_func_in_func(func_id, self.builder.func);

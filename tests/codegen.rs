@@ -241,6 +241,68 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn hashmap_value_is_vec_releases_at_scope_exit() {
+    // Session 067: a HashMap<i64, Vec<i64>> walks its occupied
+    // slots on release, freeing the inner Vecs. Pre-067 the
+    // inner Vecs leaked. This test runs the construction inside
+    // a tight loop — if the inner Vecs weren't reclaimed, the
+    // process would balloon. We can't observe heap directly from
+    // Rune, but we can pin "the map exists, holds a Vec value,
+    // releases without crashing" — a regression check that the
+    // synthesized release fn doesn't trash memory.
+    let src = r#"
+        fn build() -> i64 {
+            let m: std::HashMap<i64, Vec<i64>> = hashmap_new();
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20); v.push(30);
+            m.insert(1, v);
+            let w: Vec<i64> = vec_new();
+            w.push(100); w.push(200);
+            m.insert(2, w);
+            m.get(1).get(0) + m.get(2).get(1)
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            // Build the map 100 times; if the release fn leaked
+            // the inner Vecs we'd see RSS grow unbounded under a
+            // tracker — here we just confirm each iteration's
+            // value is right and the program exits cleanly.
+            for _ in 0..100 {
+                total = total + build();
+            }
+            total
+        }
+    "#;
+    // build() returns 10 + 200 = 210. 100 * 210 = 21000.
+    assert_eq!(run_main(src), 21000);
+}
+
+#[test]
+fn hashmap_value_is_str_releases_via_walk() {
+    // Str values exercise the same path. String literals carry
+    // rc=-1 so their release is a no-op at the helper level, but
+    // the release-walk codepath still runs through them and the
+    // descriptor still frees correctly.
+    let src = r#"
+        fn build() -> i64 {
+            let m: std::HashMap<i64, str> = hashmap_new();
+            m.insert(1, "ten");
+            m.insert(2, "twenty");
+            m.get(2).len()
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            for _ in 0..50 {
+                total = total + build();
+            }
+            total
+        }
+    "#;
+    // "twenty".len() == 6, 50 * 6 = 300.
+    assert_eq!(run_main(src), 300);
+}
+
+#[test]
 fn hashmap_count_distinct_via_insert() {
     // Idiom: count by inserting `1` (or += 1) on each occurrence.
     // Here we just insert once per key and read m.len() to confirm

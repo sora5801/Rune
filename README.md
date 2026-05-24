@@ -229,10 +229,10 @@ rune: linked with clang -> primes.exe
     (linear probing, 75% load factor, initial cap 8, doubles on
     grow). `hashmap_new()`, `.insert(k, v)`, `.get(k)`, `.contains_key(k)`,
     `.len()`. v0.x restricts K to i64; V is any 8-byte-fitting type.
-    ARC-managed at the descriptor level; the per-value walk on
-    release is deferred (so a HashMap holding `Vec<i64>` values
-    leaks the inner Vecs at scope exit — use Vec-of-pairs or
-    accept the leak).
+    ARC-managed at the descriptor AND per-value level — a `HashMap<i64,
+    Vec<i64>>` walks its occupied slots on release, freeing the inner
+    Vecs (session 067). Per-V release functions are synthesized at
+    codegen, parallel to `Vec<T>`'s per-element release.
   - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
     represent as i64; **payload variants** (`Some(i64)`, `Err(str)`,
     `Pair(i64, i64)`) flip the whole enum to a heap-allocated
@@ -311,11 +311,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. HashMap value-release walk (close the V-leak)
-2. HashMap str-keys + remove + iteration
-3. Trait default-method bodies — `.collect()` as a chained method
-4. `?` on Option + multi-impl `Into` disambiguation
-5. Self-hosted bootstrap (long-term)
+1. HashMap str-keys + remove + iteration
+2. Trait default-method bodies — `.collect()` as a chained method
+3. `?` on Option + multi-impl `Into` disambiguation
+4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -200,6 +200,7 @@ impl<'a> Lowerer<'a> {
             impl_methods: self.res.impl_methods.clone(),
             // Filled by the monomorphizer once every type is concrete.
             vec_arc_elem_tys: Vec::new(),
+            hashmap_arc_val_tys: Vec::new(),
             array_tys: Vec::new(),
             trait_methods,
             trait_methods_flat,

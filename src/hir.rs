@@ -44,6 +44,13 @@ pub struct HirModule {
     /// `Vec` whose elements are themselves ARC-managed reclaims them
     /// when its strong count hits zero.
     pub vec_arc_elem_tys: Vec<Ty>,
+    /// Distinct ARC-managed `HashMap` value types used anywhere in
+    /// the program. Codegen synthesizes one per-V release function
+    /// (`__rune_release_hashmap$<v>`) for each, so a `HashMap`
+    /// whose values are ARC-managed (Vec, Str, structs, dyn, etc.)
+    /// walks its occupied slots and releases each value before
+    /// freeing the descriptor — closes the leak from session 064.
+    pub hashmap_arc_val_tys: Vec<Ty>,
     /// Distinct fixed-size array types (`[T; N]`) used anywhere in
     /// the program. A heap array is a refcounted block, so codegen
     /// synthesizes one release function (`__rune_release_array$<ty>`)

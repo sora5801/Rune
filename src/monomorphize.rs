@@ -188,6 +188,7 @@ impl MonoState {
         // Every type is concrete now — gather the ARC-managed `Vec<T>`
         // element types so codegen can synthesize per-element release.
         module.vec_arc_elem_tys = collect_vec_arc_elems(module);
+        module.hashmap_arc_val_tys = collect_hashmap_arc_vals(module);
         module.array_tys = collect_array_tys(module);
     }
 
@@ -1091,6 +1092,7 @@ fn mangle_ty(t: &Ty) -> String {
 fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -> bool {
     match t {
         Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_, _) => true,
+        Ty::HashMap(_, _) => true,
         Ty::Array(_, _) => true,
         Ty::Enum(s, _) => enum_has_payload.contains(s),
         _ => false,
@@ -1111,6 +1113,9 @@ fn scan_ty_for_vec_elems(
             }
             scan_ty_for_vec_elems(elem, enum_has_payload, out);
         }
+        Ty::HashMap(_, v) => {
+            scan_ty_for_vec_elems(v, enum_has_payload, out);
+        }
         Ty::Array(e, _) | Ty::Weak(e) => {
             scan_ty_for_vec_elems(e, enum_has_payload, out)
         }
@@ -1121,6 +1126,63 @@ fn scan_ty_for_vec_elems(
         }
         _ => {}
     }
+}
+
+fn scan_ty_for_hashmap_vals(
+    ty: &Ty,
+    enum_has_payload: &std::collections::HashSet<SymbolId>,
+    out: &mut Vec<Ty>,
+) {
+    match ty {
+        Ty::HashMap(_, v) => {
+            if is_arc_mono(v, enum_has_payload) && !out.contains(&**v) {
+                out.push((**v).clone());
+            }
+            scan_ty_for_hashmap_vals(v, enum_has_payload, out);
+        }
+        Ty::Vec(elem) | Ty::Array(elem, _) | Ty::Weak(elem) => {
+            scan_ty_for_hashmap_vals(elem, enum_has_payload, out);
+        }
+        Ty::Struct(_, args) | Ty::Enum(_, args) => {
+            for a in args {
+                scan_ty_for_hashmap_vals(a, enum_has_payload, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Distinct ARC-managed `HashMap` value types used anywhere in
+/// the (fully monomorphized) module — same shape as
+/// `collect_vec_arc_elems`. A separate per-V release function
+/// gets synthesized for each so a `HashMap<i64, Vec<T>>` walks
+/// its occupied slots and releases the inner Vecs at scope exit.
+fn collect_hashmap_arc_vals(module: &HirModule) -> Vec<Ty> {
+    let ehp = &module.enum_has_payload;
+    let mut out: Vec<Ty> = Vec::new();
+    for item in &module.items {
+        let HirItem::Fn(f) = item;
+        for p in &f.params {
+            scan_ty_for_hashmap_vals(&p.ty, ehp, &mut out);
+        }
+        scan_ty_for_hashmap_vals(&f.ret_ty, ehp, &mut out);
+        walk_tys_block(&f.body, &mut |t| {
+            scan_ty_for_hashmap_vals(t, ehp, &mut out)
+        });
+    }
+    for fields in module.struct_arc_fields.values() {
+        for (_, t) in fields {
+            scan_ty_for_hashmap_vals(t, ehp, &mut out);
+        }
+    }
+    for variants in module.enum_payload_tys.values() {
+        for v in variants {
+            for t in v {
+                scan_ty_for_hashmap_vals(t, ehp, &mut out);
+            }
+        }
+    }
+    out
 }
 
 /// Distinct ARC-managed `Vec` element types used anywhere in the
@@ -1163,6 +1225,7 @@ fn scan_ty_for_arrays(ty: &Ty, out: &mut Vec<Ty>) {
             scan_ty_for_arrays(elem, out);
         }
         Ty::Vec(e) | Ty::Weak(e) => scan_ty_for_arrays(e, out),
+        Ty::HashMap(_, v) => scan_ty_for_arrays(v, out),
         Ty::Struct(_, args) | Ty::Enum(_, args) => {
             for a in args {
                 scan_ty_for_arrays(a, out);
