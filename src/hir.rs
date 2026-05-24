@@ -273,6 +273,12 @@ pub enum HirExprKind {
     /// short-circuit `Return` uses, so a `break` inside a match arm is a
     /// valid never-typed body.
     Break,
+    /// `continue` — skip the rest of the current iteration and start the
+    /// next one (jumping to the loop's continue/increment block).
+    /// Codegen releases ARC locals declared since the loop entry just
+    /// like Break, then jumps to the loop's *continue* block (rather
+    /// than the exit block). Types as `Ty::Never`.
+    Continue,
     /// Call through a function-pointer value (`(map.f)(x)`, or a local
     /// of `Ty::Fn` type). `callee` evaluates to a function-pointer
     /// value; codegen builds the signature from the callee's `Ty::Fn`

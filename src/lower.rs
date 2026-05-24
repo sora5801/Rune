@@ -522,7 +522,7 @@ impl<'a> Lowerer<'a> {
                 HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v))))
             }
             ast::Expr::Break(_) => HirExprKind::Break,
-            ast::Expr::Continue(_) => HirExprKind::Unsupported("continue".into()),
+            ast::Expr::Continue(_) => HirExprKind::Continue,
             ast::Expr::MethodCall { receiver, method, args, .. } => {
                 let receiver_hir = self.lower_expr(receiver);
                 // A method call on a `dyn Trait` receiver dispatches
@@ -627,10 +627,9 @@ impl<'a> Lowerer<'a> {
             }
             ast::Expr::For { pat, iter, body, .. } => self.lower_for(pat, iter, body),
             ast::Expr::Match { scrutinee, arms, .. } => self.lower_match(scrutinee, arms),
-            ast::Expr::Range { .. } => HirExprKind::Unsupported(
-                "range expressions are only supported inside string slicing (e.g. `s[a..b]`)"
-                    .into(),
-            ),
+            ast::Expr::Range { start, end, inclusive, .. } => {
+                self.lower_range_as_iter(start.as_deref(), end.as_deref(), *inclusive)
+            }
             ast::Expr::Closure { params, body, span } => self.lower_closure(params, body, *span),
         }
     }
@@ -1007,7 +1006,7 @@ impl<'a> Lowerer<'a> {
                     Self::rewrite_captures(e, self_sym, self_ty, capture_info);
                 }
             }
-            Lit(_) | Fn(_) | EnumVariant { .. } | Break | Unsupported(_) => {}
+            Lit(_) | Fn(_) | EnumVariant { .. } | Break | Continue | Unsupported(_) => {}
         }
     }
 
@@ -1794,6 +1793,81 @@ impl<'a> Lowerer<'a> {
             }
         }
         None
+    }
+
+    /// Build `std::RangeIter { cur: start, end: end }` from a
+    /// `start..end` expression that's NOT the iter of a for-loop.
+    /// The for-over-range fast path keeps the counted-loop codegen
+    /// (no struct allocation, no method calls); this path makes
+    /// `let r = 0..10; for i in r` go through the Iterator protocol
+    /// uniformly. Inclusive ranges (`a..=b`) shift `end` by 1 so the
+    /// `cur < end` exit condition handles both forms identically.
+    fn lower_range_as_iter(
+        &self,
+        start: Option<&ast::Expr>,
+        end: Option<&ast::Expr>,
+        inclusive: bool,
+    ) -> HirExprKind {
+        let Some(range_sym) = self.find_struct_sym("RangeIter") else {
+            return HirExprKind::Unsupported(
+                "range expressions require the std::RangeIter prelude struct".into(),
+            );
+        };
+        let Some(layout) = self.check.struct_layouts.get(&range_sym) else {
+            return HirExprKind::Unsupported(
+                "RangeIter struct has no layout".into(),
+            );
+        };
+        let cur_offset = layout
+            .fields
+            .iter()
+            .find(|f| f.name == "cur")
+            .map(|f| f.offset);
+        let end_offset = layout
+            .fields
+            .iter()
+            .find(|f| f.name == "end")
+            .map(|f| f.offset);
+        let (Some(cur_offset), Some(end_offset)) = (cur_offset, end_offset) else {
+            return HirExprKind::Unsupported(
+                "RangeIter layout missing `cur` or `end`".into(),
+            );
+        };
+        let start_h = start
+            .map(|e| self.lower_expr(e))
+            .unwrap_or_else(|| HirExpr {
+                kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                ty: Ty::Int(IntTy::I64),
+            });
+        let raw_end = end
+            .map(|e| self.lower_expr(e))
+            .unwrap_or_else(|| HirExpr {
+                kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                ty: Ty::Int(IntTy::I64),
+            });
+        // For inclusive ranges, bump `end` by 1 so the runtime exit
+        // condition (`cur < end`) yields the right number of items.
+        let end_h = if inclusive {
+            let one = HirExpr {
+                kind: HirExprKind::Lit(HirLit::Int(1, IntTy::I64)),
+                ty: Ty::Int(IntTy::I64),
+            };
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: crate::hir::HirBinOp::Add,
+                    lhs: Box::new(raw_end),
+                    rhs: Box::new(one),
+                },
+                ty: Ty::Int(IntTy::I64),
+            }
+        } else {
+            raw_end
+        };
+        HirExprKind::StructLit {
+            sym: range_sym,
+            fields: vec![(cur_offset, start_h), (end_offset, end_h)],
+            size: layout.size,
+        }
     }
 
     /// Build `std::VecIter<elem> { vec: <receiver>, idx: 0 }` from a

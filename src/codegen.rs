@@ -802,6 +802,7 @@ impl<M: Module> Codegen<M> {
             var_counter: 0,
             arc_locals: Vec::new(),
             loop_exit_stack: Vec::new(),
+            loop_continue_stack: Vec::new(),
         };
 
         for (i, p) in f.params.iter().enumerate() {
@@ -1063,6 +1064,17 @@ struct FnCodegen<'a, M: Module> {
     /// `compile_while` / `compile_for` / `compile_for_range` at loop
     /// entry; popped in the same place after the loop body.
     loop_exit_stack: Vec<(Block, usize)>,
+    /// Parallel stack for `continue`. Each loop pushes a "continue
+    /// block" alongside its exit block — `continue` releases ARC
+    /// locals declared since the loop entry then jumps there. For
+    /// `while`, the continue block IS the header (re-check the
+    /// condition). For `for-range` and `for-array`, the continue
+    /// block bumps the counter and jumps to the header. For an
+    /// iterator-style `for x in it`, the desugar wraps the body in
+    /// a match inside `while true { ... }`, so continue inside the
+    /// user body jumps to the outer while's header — exactly the
+    /// shape we want (re-call `it.next()`).
+    loop_continue_stack: Vec<(Block, usize)>,
 }
 
 impl<'a, M: Module> FnCodegen<'a, M> {
@@ -1708,6 +1720,26 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // Continue compiling into an unreachable trailer block,
                 // matching `Return`'s pattern at line 1633. Anything in
                 // the source position after `break` is dead code.
+                let after = self.builder.create_block();
+                self.builder.switch_to_block(after);
+                self.builder.seal_block(after);
+                Ok(None)
+            }
+            HirExprKind::Continue => {
+                // Mirror of Break: release ARC locals declared since
+                // the loop entry, then jump to the loop's continue
+                // block (header for while, increment-block for the
+                // counter-driven for-loops). The continue-block is
+                // pushed by each compile_loop helper alongside the
+                // exit-block.
+                let &(cont, snapshot) =
+                    self.loop_continue_stack.last().ok_or_else(|| {
+                        CodegenError(
+                            "internal: `continue` outside a loop reached codegen".into(),
+                        )
+                    })?;
+                self.release_arc_locals_to(snapshot)?;
+                self.builder.ins().jump(cont, &[]);
                 let after = self.builder.create_block();
                 self.builder.switch_to_block(after);
                 self.builder.seal_block(after);
@@ -2765,6 +2797,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         let header = self.builder.create_block();
         let body_blk = self.builder.create_block();
+        let cont_blk = self.builder.create_block();
         let exit = self.builder.create_block();
 
         self.builder.ins().jump(header, &[]);
@@ -2794,16 +2827,22 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         }
 
         self.loop_exit_stack.push((exit, self.arc_locals.len()));
+        self.loop_continue_stack.push((cont_blk, self.arc_locals.len()));
         self.compile_block(body)?;
         self.loop_exit_stack.pop();
+        self.loop_continue_stack.pop();
 
         if !self.is_filled() {
-            let counter = self.builder.use_var(counter_var);
-            let one = self.builder.ins().iconst(types::I64, 1);
-            let next = self.builder.ins().iadd(counter, one);
-            self.builder.def_var(counter_var, next);
-            self.builder.ins().jump(header, &[]);
+            self.builder.ins().jump(cont_blk, &[]);
         }
+
+        self.builder.switch_to_block(cont_blk);
+        self.builder.seal_block(cont_blk);
+        let counter = self.builder.use_var(counter_var);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let next = self.builder.ins().iadd(counter, one);
+        self.builder.def_var(counter_var, next);
+        self.builder.ins().jump(header, &[]);
 
         self.builder.seal_block(header);
         self.builder.switch_to_block(exit);
@@ -3141,6 +3180,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         let header = self.builder.create_block();
         let body_blk = self.builder.create_block();
+        let cont_blk = self.builder.create_block();
         let exit = self.builder.create_block();
 
         self.builder.ins().jump(header, &[]);
@@ -3155,16 +3195,26 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         self.builder.switch_to_block(body_blk);
         self.builder.seal_block(body_blk);
+        // Separate continue block carries the counter increment so
+        // `continue` jumps there (skips the rest of the body but
+        // still advances the index). The body's natural fallthrough
+        // ALSO goes to the continue block.
         self.loop_exit_stack.push((exit, self.arc_locals.len()));
+        self.loop_continue_stack.push((cont_blk, self.arc_locals.len()));
         self.compile_block(body)?;
         self.loop_exit_stack.pop();
+        self.loop_continue_stack.pop();
         if !self.is_filled() {
-            let counter = self.builder.use_var(counter_var);
-            let one = self.builder.ins().iconst(types::I64, 1);
-            let next = self.builder.ins().iadd(counter, one);
-            self.builder.def_var(counter_var, next);
-            self.builder.ins().jump(header, &[]);
+            self.builder.ins().jump(cont_blk, &[]);
         }
+
+        self.builder.switch_to_block(cont_blk);
+        self.builder.seal_block(cont_blk);
+        let counter = self.builder.use_var(counter_var);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let next = self.builder.ins().iadd(counter, one);
+        self.builder.def_var(counter_var, next);
+        self.builder.ins().jump(header, &[]);
 
         self.builder.seal_block(header);
         self.builder.switch_to_block(exit);
@@ -3191,12 +3241,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
 
         self.builder.switch_to_block(body_blk);
         self.builder.seal_block(body_blk);
-        // Record the loop's exit block + ARC snapshot so a `break`
-        // inside the body releases any ARC locals declared since the
-        // loop entry, then jumps to `exit`.
+        // Record the loop's exit + continue blocks + ARC snapshot.
+        // For while, the continue target IS the header — re-check
+        // the condition. Break / Continue inside the body release
+        // ARC locals declared since the loop entry, then jump.
         self.loop_exit_stack.push((exit, self.arc_locals.len()));
+        self.loop_continue_stack.push((header, self.arc_locals.len()));
         self.compile_block(body)?;
         self.loop_exit_stack.pop();
+        self.loop_continue_stack.pop();
         if !self.is_filled() {
             self.builder.ins().jump(header, &[]);
         }

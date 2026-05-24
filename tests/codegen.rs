@@ -169,6 +169,180 @@ fn while_loop_accumulator() {
     assert_eq!(run_main(src), 55); // 1+2+...+10
 }
 
+#[test]
+fn continue_in_while_skips_iteration() {
+    // Session 063: `continue` jumps to the loop's continue
+    // block. For while, that's the header — re-check the
+    // condition. Test sums only odd numbers via continue-on-
+    // even.
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum = 0;
+            let mut i = 0;
+            while i < 10 {
+                i = i + 1;
+                if i - (i / 2) * 2 == 0 { continue; }
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    // 1+3+5+7+9 = 25
+    assert_eq!(run_main(src), 25);
+}
+
+#[test]
+fn continue_in_for_range() {
+    // `continue` inside `for i in 0..n` jumps to the loop's
+    // increment block, advancing the counter and re-checking.
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum = 0;
+            for i in 0..10 {
+                if i - (i / 2) * 2 == 0 { continue; }
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    // 1+3+5+7+9 = 25
+    assert_eq!(run_main(src), 25);
+}
+
+#[test]
+fn continue_in_for_array() {
+    let src = r#"
+        fn main() -> i64 {
+            let xs: [i64; 5] = [10, 20, 30, 40, 50];
+            let mut sum = 0;
+            for x in xs {
+                if x == 30 { continue; }
+                sum = sum + x;
+            }
+            sum
+        }
+    "#;
+    // 10 + 20 + 40 + 50 = 120
+    assert_eq!(run_main(src), 120);
+}
+
+#[test]
+fn continue_in_for_vec_iter() {
+    // The iterator-protocol path: `for x in v.iter() { ... }`
+    // is desugared by the lowerer into a `while true { match
+    // it.next() { Some(x) => ..., None => break } }`. The
+    // outer while's continue-block IS its header, so a user
+    // `continue` re-enters the match → next iteration.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let mut sum = 0;
+            for x in v.iter() {
+                if x == 3 { continue; }
+                sum = sum + x;
+            }
+            sum
+        }
+    "#;
+    // 1+2+4+5 = 12
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn range_iter_as_value() {
+    // Session 063: `0..10` is now an expression that yields a
+    // `std::RangeIter` value. Iterate it via `.next()` directly.
+    let src = r#"
+        fn main() -> i64 {
+            let r: std::RangeIter = 0..5;
+            let mut count: i64 = 0;
+            while true {
+                match r.next() {
+                    std::Option::Some(_) => { count = count + 1; }
+                    std::Option::None => { break; }
+                }
+            }
+            count
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn range_iter_via_for_loop() {
+    // The for-over-range fast path still works (HirExprKind::ForRange
+    // bypasses the struct allocation), but a bound range value
+    // works through the Iterator protocol:
+    let src = r#"
+        fn main() -> i64 {
+            let r: std::RangeIter = 1..5;
+            let mut sum: i64 = 0;
+            for x in r {
+                sum = sum + x;
+            }
+            sum
+        }
+    "#;
+    // 1+2+3+4 = 10
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn range_iter_through_map_pipeline() {
+    // Headline: a range value flows into Map's iter field, the
+    // Map's f transforms each i64. Confirms RangeIter satisfies
+    // the Iterator bound on Map<I: Iterator, F, U>.
+    let src = r#"
+        fn main() -> i64 {
+            let r: std::RangeIter = 1..4;
+            let mapped = std::Map { iter: r, f: |x: i64| x * 10 };
+            let mut sum: i64 = 0;
+            for y in mapped { sum = sum + y; }
+            sum
+        }
+    "#;
+    // (1*10)+(2*10)+(3*10) = 60
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn range_iter_inclusive_form() {
+    // The `..=` inclusive form bumps the upper bound by 1 at lower
+    // time so the runtime exit `cur < end` yields end items.
+    let src = r#"
+        fn main() -> i64 {
+            let r: std::RangeIter = 1..=4;
+            let mut sum: i64 = 0;
+            for x in r { sum = sum + x; }
+            sum
+        }
+    "#;
+    // 1+2+3+4 = 10
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn continue_releases_arc_locals() {
+    // ARC-managed locals declared after the loop entry must
+    // get released on continue. A Vec allocated inside the
+    // loop iteration is freed before re-entering.
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum = 0;
+            for i in 0..5 {
+                let v: Vec<i64> = vec_new();
+                v.push(i);
+                if i == 2 { continue; }
+                sum = sum + v.get(0);
+            }
+            sum
+        }
+    "#;
+    // 0+1+3+4 = 8 (i=2 skipped)
+    assert_eq!(run_main(src), 8);
+}
+
 // ---- short-circuit ----
 
 #[test]

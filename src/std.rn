@@ -41,6 +41,30 @@ pub mod std {
         fn call(self: Self, a: A) -> R;
     }
 
+    /* Iterator over an integer range — holds the next value to
+       yield and the (exclusive) upper bound. A `start..end`
+       expression outside a for-loop lowers to a `RangeIter`
+       struct literal; the for-over-range fast path still
+       emits the counted-loop codegen directly (no struct
+       allocation, no method dispatch) for `for i in start..end`. */
+    pub struct RangeIter {
+        cur: i64,
+        end: i64,
+    }
+
+    pub impl Iterator for RangeIter {
+        type Item = i64;
+        fn next(self: RangeIter) -> Option<i64> {
+            if self.cur < self.end {
+                let v: i64 = self.cur;
+                self.cur = self.cur + 1;
+                Option::Some(v)
+            } else {
+                Option::None
+            }
+        }
+    }
+
     /* Iterator over the elements of a `Vec<T>`. Holds the source
        vec and the current index; constructed by the builtin
        `vec.iter()` method. */

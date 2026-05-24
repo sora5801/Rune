@@ -1516,17 +1516,56 @@ impl<'r> Checker<'r> {
                 self.check_struct_lit(path, fields, *span)
             }
             Expr::Range { start, end, span, .. } => {
-                // Range expressions are currently only legal inside a slice
-                // index (`s[a..b]`). Outside that context, we still want to
-                // surface a useful error rather than a stray "unsupported".
-                if let Some(s) = start.as_deref() { self.check_expr(s); }
-                if let Some(e) = end.as_deref() { self.check_expr(e); }
-                self.error(
-                    *span,
-                    "range expressions are only allowed as a slice index (e.g. `s[a..b]`) — \
-                     `for i in 0..n` and bare ranges aren't supported yet",
-                );
-                Ty::Error
+                // Range expressions evaluate to a `std::RangeIter`
+                // struct value: a session-063 unification that lets
+                // `let r = 0..10` work and lets ranges flow into
+                // iterator-adapter pipelines (`Map { iter: 0..n, ...
+                // }`). The for-over-range fast path (HirExprKind::ForRange)
+                // still bypasses the struct allocation for the common
+                // case. Slice-index range positions still get this
+                // type and are read for their start/end as i64
+                // exprs (the StrSlice / StrByteIndex builders pick
+                // up the raw start/end values directly off the
+                // ast::Expr::Range node, not the checker's type).
+                if let Some(s) = start.as_deref() {
+                    let ty = self.check_expr(s);
+                    if !ty.is_error() && !matches!(ty, Ty::Int(_)) {
+                        self.error(
+                            s.span(),
+                            format!(
+                                "range bound must be an integer, found `{}`",
+                                ty.display()
+                            ),
+                        );
+                    }
+                }
+                if let Some(e) = end.as_deref() {
+                    let ty = self.check_expr(e);
+                    if !ty.is_error() && !matches!(ty, Ty::Int(_)) {
+                        self.error(
+                            e.span(),
+                            format!(
+                                "range bound must be an integer, found `{}`",
+                                ty.display()
+                            ),
+                        );
+                    }
+                }
+                let _ = span;
+                let range_sym = self
+                    .res
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| {
+                        s.name == "RangeIter"
+                            && matches!(s.kind, SymbolKind::Struct)
+                    })
+                    .map(|(i, _)| SymbolId(i as u32));
+                match range_sym {
+                    Some(s) => Ty::Struct(s, Vec::new()),
+                    None => Ty::Error,
+                }
             }
             Expr::Return { value, span } => self.check_return(value.as_deref(), *span),
             Expr::Break(_) | Expr::Continue(_) => Ty::Never,

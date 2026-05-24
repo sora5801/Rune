@@ -91,10 +91,12 @@ rune: linked with clang -> primes.exe
   `for x in iter { ... }`; the lowerer desugars to a
   `while true { match iter.next() { Some(x) => ..., None => break } }`
   loop. Composes with bounded generics — `fn count<T: Iterator>(it: T)`
-  works for any concrete implementor. `break` is a real control-flow
-  construct, threaded through codegen's per-loop exit-block stack
-  with ARC-local cleanup at the snapshot. `Vec<T>` joins the protocol
-  through `v.iter() -> std::VecIter<T>`, plus prelude adapters
+  works for any concrete implementor. `break` and `continue` are
+  real control-flow constructs, threaded through codegen's per-loop
+  exit/continue stacks with ARC-local cleanup at the snapshot.
+  `Vec<T>` joins the protocol through `v.iter() -> std::VecIter<T>`,
+  integer ranges (`a..b`, `a..=b`) join via `std::RangeIter` (so
+  they flow into `Map { iter: 0..10, ... }`), plus prelude adapters
   `std::Map<I, F, U>` and `std::Filter<I, P>` (with `F: Fn1<I::Item,
   U>` / `P: Fn1<I::Item, bool>` — any callable: named fns,
   non-capturing closures, OR capturing closures), and
@@ -300,13 +302,11 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 ## Roadmap
 
 1. `HashMap<K, V>` — the bigger collections piece
-2. Range as a `RangeIter` struct — unify the for-over-range
-   codegen with the Iterator protocol
-3. `From`-based error conversion for `?`
-4. `continue` keyword — mirror of `break` over the existing
-   loop-exit-stack pattern
-5. Trait default-method bodies — `.collect()` as a chained method
-6. Self-hosted bootstrap (long-term)
+2. `From`-based error conversion for `?`
+3. Open-ended ranges (`..n`, `n..`) — currently parser
+   accepts, lowering still defaults to 0
+4. Trait default-method bodies — `.collect()` as a chained method
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

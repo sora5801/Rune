@@ -338,11 +338,12 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
-fn standalone_range_is_error() {
-    check_has_error(
-        "fn main() -> i64 { let r = 0..10; 0 }",
-        "range expressions",
-    );
+fn standalone_range_is_a_range_iter() {
+    // Session 063: `0..10` is now a valid expression — it lowers to
+    // a `std::RangeIter { cur: 0, end: 10 }` struct value that
+    // implements Iterator. The standalone-error diagnostic this
+    // test originally pinned is gone.
+    check_ok("fn main() -> i64 { let r: std::RangeIter = 0..10; 0 }");
 }
 
 #[test]
