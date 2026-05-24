@@ -56,6 +56,13 @@ pub enum Ty {
     /// release. `vec_new()` produces a placeholder `Vec<i64>` that an
     /// annotated binding refines to the real element type.
     Vec(Box<Ty>),
+    /// `HashMap<K, V>` — open-addressing linear-probed table. The
+    /// runtime descriptor (`{ keys, vals, occupied, len, cap, rc,
+    /// weak_count }`) is key-type-agnostic at runtime (i64 buckets
+    /// either way), but the checker keeps K, V around for per-call
+    /// argument typing. v0.x restricts K to i64; both arms enforced
+    /// by the resolver / checker.
+    HashMap(Box<Ty>, Box<Ty>),
     Fn { params: Vec<Ty>, ret: Box<Ty> },
     /// A struct type, with its type arguments at this use site.
     /// Empty `Vec` for non-generic structs; for generic structs the
@@ -161,6 +168,7 @@ impl Ty {
             (Ty::Struct(s1, _), Ty::Struct(s2, _)) => s1 == s2,
             (Ty::Enum(s1, _), Ty::Enum(s2, _)) => s1 == s2,
             (Ty::Vec(_), Ty::Vec(_)) => true,
+            (Ty::HashMap(_, _), Ty::HashMap(_, _)) => true,
             (
                 Ty::Fn { params: p1, ret: r1 },
                 Ty::Fn { params: p2, ret: r2 },
@@ -200,6 +208,11 @@ impl Ty {
                 let inner = e1.unify(e2)?;
                 Some(Ty::Vec(Box::new(inner)))
             }
+            (Ty::HashMap(k1, v1), Ty::HashMap(k2, v2)) => {
+                let k = k1.unify(k2)?;
+                let v = v1.unify(v2)?;
+                Some(Ty::HashMap(Box::new(k), Box::new(v)))
+            }
             _ => if self == other { Some(self.clone()) } else { None },
         }
     }
@@ -214,6 +227,7 @@ impl Ty {
             Ty::Unit => "()".into(),
             Ty::Array(elem, n) => format!("[{}; {}]", elem.display(), n),
             Ty::Vec(elem) => format!("Vec<{}>", elem.display()),
+            Ty::HashMap(k, v) => format!("HashMap<{}, {}>", k.display(), v.display()),
             Ty::Fn { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|t| t.display()).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display())

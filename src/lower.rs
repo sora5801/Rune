@@ -1966,6 +1966,9 @@ impl<'a> Lowerer<'a> {
             ("upgrade_or", Some(Ty::Weak(inner))) if matches!(**inner, Ty::Vec(_)) => {
                 "weak_upgrade_or_vec"
             }
+            // hashmap_new() takes no args — the dispatch is by name
+            // alone (no arg type to discriminate on).
+            ("hashmap_new", None) => "hashmap_new",
             _ => {
                 return HirExprKind::Unsupported(format!(
                     "no dispatch for polymorphic builtin `{}` with that argument type",

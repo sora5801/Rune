@@ -123,6 +123,13 @@ unsafe extern "C" {
     fn rune_weak_upgrade_or_vec(w: *mut u8, def: *mut u8) -> *mut u8;
     fn rune_struct_new(size: i64) -> *mut u8;
     fn rune_struct_dealloc(p: *mut u8, size: i64);
+    fn rune_hashmap_new() -> *mut u8;
+    fn rune_hashmap_insert(m: *mut u8, k: i64, v: i64);
+    fn rune_hashmap_get(m: *const u8, k: i64) -> i64;
+    fn rune_hashmap_contains_key(m: *const u8, k: i64) -> i8;
+    fn rune_hashmap_len(m: *const u8) -> i64;
+    fn rune_retain_hashmap(m: *mut u8);
+    fn rune_release_hashmap(m: *mut u8);
 }
 
 // ---- generic methods: compile any module backend ----
@@ -892,6 +899,13 @@ impl Codegen<JITModule> {
         builder.symbol("rune_weak_upgrade_or_vec", rune_weak_upgrade_or_vec as *const u8);
         builder.symbol("rune_struct_new", rune_struct_new as *const u8);
         builder.symbol("rune_struct_dealloc", rune_struct_dealloc as *const u8);
+        builder.symbol("rune_hashmap_new", rune_hashmap_new as *const u8);
+        builder.symbol("rune_hashmap_insert", rune_hashmap_insert as *const u8);
+        builder.symbol("rune_hashmap_get", rune_hashmap_get as *const u8);
+        builder.symbol("rune_hashmap_contains_key", rune_hashmap_contains_key as *const u8);
+        builder.symbol("rune_hashmap_len", rune_hashmap_len as *const u8);
+        builder.symbol("rune_retain_hashmap", rune_retain_hashmap as *const u8);
+        builder.symbol("rune_release_hashmap", rune_release_hashmap as *const u8);
         let module = JITModule::new(builder);
         Ok(Self {
             module,
@@ -2392,6 +2406,70 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
+            (Ty::HashMap(_, v_ty), m)
+                if matches!(m, "insert" | "get" | "contains_key" | "len") =>
+            {
+                let val_ty = (**v_ty).clone();
+                let val_cty = cranelift_type(&val_ty)?;
+                let val_arc = is_arc_type(
+                    &val_ty,
+                    self.struct_arc_fields,
+                    self.enum_has_payload,
+                );
+                let runtime_key = match m {
+                    "insert" => "hashmap_insert",
+                    "get" => "hashmap_get",
+                    "contains_key" => "hashmap_contains_key",
+                    "len" => "hashmap_len",
+                    _ => unreachable!(),
+                };
+                let func_id = self.ensure_runtime_func(runtime_key)?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let mut call_args = vec![recv_val];
+                if m == "insert" {
+                    // Borrowed ARC value flowing into the map slot
+                    // becomes a second owner — retain so the map
+                    // holds its own +1. Fresh +1 producers transfer
+                    // their count straight in (same pattern as
+                    // vec.push).
+                    call_args.push(arg_vals[0]); // key
+                    if val_arc {
+                        if let HirExprKind::Local(_) = &args[1].kind {
+                            self.emit_arc_call("retain", &val_ty, arg_vals[1])?;
+                        }
+                    }
+                    let stored = if val_cty == types::I64 {
+                        arg_vals[1]
+                    } else {
+                        self.builder.ins().uextend(types::I64, arg_vals[1])
+                    };
+                    call_args.push(stored);
+                } else {
+                    call_args.extend(&arg_vals);
+                }
+                let inst = self.builder.ins().call(local_func, &call_args);
+                let results = self.builder.inst_results(inst);
+                if results.is_empty() {
+                    return Ok(None);
+                }
+                let raw = results[0];
+                if m == "get" {
+                    if val_arc {
+                        // `get` returns a copy of the slot — retain
+                        // so the caller owns a +1.
+                        self.emit_arc_call("retain", &val_ty, raw)?;
+                        Ok(Some(raw))
+                    } else if val_cty != types::I64 {
+                        Ok(Some(self.builder.ins().ireduce(val_cty, raw)))
+                    } else {
+                        Ok(Some(raw))
+                    }
+                } else {
+                    Ok(Some(raw))
+                }
+            }
             (Ty::Vec(elem), m) if matches!(m, "push" | "get" | "len") => {
                 let elem_ty = (**elem).clone();
                 let elem_cty = cranelift_type(&elem_ty)?;
@@ -3295,6 +3373,7 @@ fn mangle_ty_name(ty: &Ty) -> String {
         Ty::Str => "str".into(),
         Ty::Unit => "unit".into(),
         Ty::Vec(e) => format!("Vec_{}", mangle_ty_name(e)),
+        Ty::HashMap(k, v) => format!("HM_{}_{}", mangle_ty_name(k), mangle_ty_name(v)),
         Ty::Weak(e) => format!("Weak_{}", mangle_ty_name(e)),
         Ty::Array(e, n) => format!("Arr{}_{}", n, mangle_ty_name(e)),
         Ty::Struct(s, args) | Ty::Enum(s, args) => {
@@ -3332,6 +3411,7 @@ fn is_arc_type(
 ) -> bool {
     match ty {
         Ty::Vec(_) | Ty::Str => true,
+        Ty::HashMap(_, _) => true,
         Ty::Struct(_, _) => true,
         Ty::Enum(sym, _) => enum_has_payload.contains(sym),
         Ty::Weak(_) => true,
@@ -3348,6 +3428,8 @@ fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> 
     Ok(match (action, ty) {
         ("retain", Ty::Vec(_)) => "retain_vec",
         ("release", Ty::Vec(_)) => "release_vec",
+        ("retain", Ty::HashMap(_, _)) => "retain_hashmap",
+        ("release", Ty::HashMap(_, _)) => "release_hashmap",
         ("retain", Ty::Str) => "retain_str",
         ("release", Ty::Str) => "release_str",
         // Weak<T> uses the weak-counted helpers per inner type.
@@ -3379,6 +3461,8 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Struct(_, _) => types::I64,
         // Vec is a pointer to a heap-allocated descriptor.
         Ty::Vec(_) => types::I64,
+        // HashMap is a pointer to a heap-allocated descriptor too.
+        Ty::HashMap(_, _) => types::I64,
         // Unit-variant enums are stored as their i64 discriminant.
         Ty::Enum(_, _) => types::I64,
         // Weak<T> is also a pointer to the same control block as
@@ -3474,6 +3558,48 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_vec_len", sig)
+        }
+        "hashmap_new" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_new", sig)
+        }
+        "hashmap_insert" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *map
+            sig.params.push(AbiParam::new(types::I64)); // key
+            sig.params.push(AbiParam::new(types::I64)); // val
+            ("rune_hashmap_insert", sig)
+        }
+        "hashmap_get" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_get", sig)
+        }
+        "hashmap_contains_key" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_hashmap_contains_key", sig)
+        }
+        "hashmap_len" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_len", sig)
+        }
+        "retain_hashmap" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_retain_hashmap", sig)
+        }
+        "release_hashmap" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_release_hashmap", sig)
         }
         "print_str" => {
             let mut sig = module.make_signature();

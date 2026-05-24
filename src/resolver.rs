@@ -712,6 +712,40 @@ impl Resolver {
                 ret: Ty::Vec(Box::new(Ty::Int(IntTy::I64))),
             }),
         );
+        // HashMap parallel to Vec — a builtin parametric type and a
+        // poly builtin constructor. Both bare names (`HashMap` /
+        // `hashmap_new`) and `std::`-prefixed forms work. The
+        // checker resolves `HashMap<K, V>` paths into
+        // `Ty::HashMap(K, V)`; `hashmap_new()` is a polymorphic
+        // builtin call whose return type is inferred from the
+        // surrounding annotation (`let m: HashMap<i64, str> =
+        // hashmap_new();`).
+        self.intern(
+            "HashMap".to_string(),
+            zero,
+            SymbolKind::BuiltinType(Ty::HashMap(
+                Box::new(Ty::Error),
+                Box::new(Ty::Error),
+            )),
+        );
+        self.intern(
+            "hashmap_new".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_new"),
+        );
+        self.intern(
+            "std::HashMap".to_string(),
+            zero,
+            SymbolKind::BuiltinType(Ty::HashMap(
+                Box::new(Ty::Error),
+                Box::new(Ty::Error),
+            )),
+        );
+        self.intern(
+            "std::hashmap_new".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_new"),
+        );
     }
 
     /// Insert a symbol into the current scope. Shadowing is allowed —

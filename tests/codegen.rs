@@ -154,6 +154,112 @@ fn else_if_chain() {
 }
 
 #[test]
+fn hashmap_basic_insert_get() {
+    // Session 064: HashMap<i64, i64> — insert + get round trip.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 10);
+            m.insert(2, 20);
+            m.insert(3, 30);
+            m.get(1) + m.get(2) + m.get(3)
+        }
+    "#;
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn hashmap_overwrite_returns_latest() {
+    // insert on an existing key replaces the value, keeps len unchanged.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(7, 100);
+            m.insert(7, 200);
+            m.insert(7, 300);
+            m.get(7) + m.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 301);
+}
+
+#[test]
+fn hashmap_contains_and_missing_returns_zero() {
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(42, 99);
+            // contains_key returns bool; sum a present and a missing
+            // key's "default" (0) plus the contains_key result.
+            let here: i64 = if m.contains_key(42) { 1 } else { 0 };
+            let gone: i64 = if m.contains_key(7) { 1 } else { 0 };
+            m.get(42) + here + gone + m.get(7)
+        }
+    "#;
+    // 99 (get 42) + 1 (contains 42) + 0 (contains 7) + 0 (missing) = 100
+    assert_eq!(run_main(src), 100);
+}
+
+#[test]
+fn hashmap_grows_past_initial_cap() {
+    // Initial cap is 8; insert 30 distinct keys to force multiple
+    // grow + rehash cycles. All reads should still find their values.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            for i in 0..30 {
+                m.insert(i, i * 10);
+            }
+            let mut sum: i64 = 0;
+            for i in 0..30 {
+                sum = sum + m.get(i);
+            }
+            sum
+        }
+    "#;
+    // sum_{i=0..30} i*10 = 10 * 29*30/2 = 4350
+    assert_eq!(run_main(src), 4350);
+}
+
+#[test]
+fn hashmap_value_is_str() {
+    // String values exercise the ARC-on-insert path. Each `s` value
+    // gets retained as it lands in a slot. Map's release at scope
+    // exit doesn't release values (v0.x simplification), so the
+    // string literals' rc=-1 sentinel keeps them safe.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, str> = hashmap_new();
+            m.insert(1, "one");
+            m.insert(2, "two");
+            let s: str = m.get(2);
+            s.len()
+        }
+    "#;
+    // "two".len() == 3
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn hashmap_count_distinct_via_insert() {
+    // Idiom: count by inserting `1` (or += 1) on each occurrence.
+    // Here we just insert once per key and read m.len() to confirm
+    // the distinct count.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            let xs: [i64; 8] = [1, 2, 3, 2, 1, 4, 3, 5];
+            for x in xs {
+                m.insert(x, 1);
+            }
+            m.len()
+        }
+    "#;
+    // distinct: {1,2,3,4,5} → 5
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
 fn while_loop_accumulator() {
     let src = r#"
         fn main() -> i64 {

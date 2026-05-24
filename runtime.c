@@ -210,3 +210,155 @@ void rune_struct_dealloc(void* p, int64_t size) {
     (void)size;
     if (p) free(p);
 }
+
+// ---- HashMap ----
+//
+// Open-addressing linear-probed table with i64 keys + 8-byte values
+// (any Rune type that fits a slot — primitives, struct/vec/str
+// pointers, fn-pointers, dyn boxes). Initial cap 8, doubles when
+// occupancy exceeds 75%. No deletion in v0.x (no tombstones).
+// Layout: `occupied` byte (0 = empty, 1 = live), parallel `keys`
+// and `vals` arrays, plus the standard rc + weak_count for ARC.
+//
+// Value-side ARC is the user's responsibility — the runtime stores
+// raw 8-byte slots and doesn't retain/release the values it holds.
+// A future session can add a "drop helper fn pointer" field per
+// hashmap instance, but v0.x keeps the type i64-only for both
+// position aware analysis (`is_arc_type(Ty::HashMap(_,_))` returns
+// true for the *container itself*; the user explicitly retains any
+// reference-counted V before insert if they want correctness).
+struct rune_hashmap {
+    int64_t* keys;
+    int64_t* vals;
+    int8_t*  occupied;
+    int64_t  len;
+    int64_t  cap;
+    int64_t  rc;
+    int64_t  weak_count;
+};
+
+// Multiplicative mix; same shape Rust uses for its default i64
+// hasher's finalizer. Distributes adjacent keys (the most common
+// real-world pattern) reasonably across the bucket table.
+static uint64_t rune_hashmap_hash_i64(int64_t k) {
+    uint64_t x = (uint64_t)k;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+struct rune_hashmap* rune_hashmap_new(void) {
+    struct rune_hashmap* m =
+        (struct rune_hashmap*)malloc(sizeof(struct rune_hashmap));
+    m->keys = (int64_t*)0;
+    m->vals = (int64_t*)0;
+    m->occupied = (int8_t*)0;
+    m->len = 0;
+    m->cap = 0;
+    m->rc = 1;
+    m->weak_count = 1;
+    return m;
+}
+
+// Find the bucket index for `k`: either the slot already holding
+// `k` (occupied=1, key matches), or the first empty slot reached
+// during linear probing. Caller checks `occupied[i]` to know which.
+static int64_t rune_hashmap_probe(
+    const struct rune_hashmap* m,
+    int64_t k
+) {
+    uint64_t mask = (uint64_t)(m->cap - 1);
+    uint64_t i = rune_hashmap_hash_i64(k) & mask;
+    while (m->occupied[i] && m->keys[i] != k) {
+        i = (i + 1) & mask;
+    }
+    return (int64_t)i;
+}
+
+static void rune_hashmap_grow(struct rune_hashmap* m) {
+    int64_t new_cap = m->cap == 0 ? 8 : m->cap * 2;
+    int64_t* new_keys = (int64_t*)malloc((size_t)new_cap * sizeof(int64_t));
+    int64_t* new_vals = (int64_t*)malloc((size_t)new_cap * sizeof(int64_t));
+    int8_t*  new_occ  = (int8_t*) calloc((size_t)new_cap, sizeof(int8_t));
+    // Rehash live entries into the new table by probing from the
+    // hash. The relative order changes but the contents don't.
+    uint64_t mask = (uint64_t)(new_cap - 1);
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (!m->occupied[i]) continue;
+        int64_t k = m->keys[i];
+        uint64_t j = rune_hashmap_hash_i64(k) & mask;
+        while (new_occ[j]) j = (j + 1) & mask;
+        new_keys[j] = k;
+        new_vals[j] = m->vals[i];
+        new_occ[j] = 1;
+    }
+    if (m->keys) free(m->keys);
+    if (m->vals) free(m->vals);
+    if (m->occupied) free(m->occupied);
+    m->keys = new_keys;
+    m->vals = new_vals;
+    m->occupied = new_occ;
+    m->cap = new_cap;
+}
+
+void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
+    // Grow before insert when occupancy would exceed 75% — also
+    // covers the cap=0 initial state. Keep load factor low so
+    // probe chains stay short.
+    if (m->cap == 0 || (m->len + 1) * 4 > m->cap * 3) {
+        rune_hashmap_grow(m);
+    }
+    int64_t i = rune_hashmap_probe(m, k);
+    if (!m->occupied[i]) {
+        m->occupied[i] = 1;
+        m->keys[i] = k;
+        m->len += 1;
+    }
+    m->vals[i] = v;
+}
+
+int64_t rune_hashmap_get(const struct rune_hashmap* m, int64_t k) {
+    if (m->cap == 0) return 0;
+    int64_t i = rune_hashmap_probe(m, k);
+    return m->occupied[i] ? m->vals[i] : 0;
+}
+
+int8_t rune_hashmap_contains_key(const struct rune_hashmap* m, int64_t k) {
+    if (m->cap == 0) return 0;
+    int64_t i = rune_hashmap_probe(m, k);
+    return m->occupied[i] ? 1 : 0;
+}
+
+int64_t rune_hashmap_len(const struct rune_hashmap* m) {
+    return m->len;
+}
+
+void rune_retain_hashmap(struct rune_hashmap* m) {
+    if (m == NULL || m->rc == -1) return;
+    m->rc += 1;
+}
+
+void rune_weak_release_hashmap(struct rune_hashmap* m) {
+    if (m == NULL || m->weak_count == -1) return;
+    m->weak_count -= 1;
+    if (m->weak_count > 0) return;
+    free(m);
+}
+
+void rune_release_hashmap(struct rune_hashmap* m) {
+    if (m == NULL || m->rc == -1) return;
+    m->rc -= 1;
+    if (m->rc > 0) return;
+    if (m->keys) free(m->keys);
+    if (m->vals) free(m->vals);
+    if (m->occupied) free(m->occupied);
+    m->keys = (int64_t*)0;
+    m->vals = (int64_t*)0;
+    m->occupied = (int8_t*)0;
+    m->cap = 0;
+    m->len = 0;
+    rune_weak_release_hashmap(m);
+}

@@ -225,6 +225,14 @@ rune: linked with clang -> primes.exe
     elements (structs, payload enums, nested `Vec`) reclaims them
     through a codegen-synthesized per-element-type release. Still a
     compiler builtin — Rune has no raw-memory primitives.
+  - **`HashMap<K, V>`** — a runtime-backed open-addressing hashmap
+    (linear probing, 75% load factor, initial cap 8, doubles on
+    grow). `hashmap_new()`, `.insert(k, v)`, `.get(k)`, `.contains_key(k)`,
+    `.len()`. v0.x restricts K to i64; V is any 8-byte-fitting type.
+    ARC-managed at the descriptor level; the per-value walk on
+    release is deferred (so a HashMap holding `Vec<i64>` values
+    leaks the inner Vecs at scope exit — use Vec-of-pairs or
+    accept the leak).
   - **Enums** with `EnumName::Variant` path syntax. Tag-only variants
     represent as i64; **payload variants** (`Some(i64)`, `Err(str)`,
     `Pair(i64, i64)`) flip the whole enum to a heap-allocated
@@ -301,12 +309,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `HashMap<K, V>` — the bigger collections piece
-2. `From`-based error conversion for `?`
-3. Open-ended ranges (`..n`, `n..`) — currently parser
-   accepts, lowering still defaults to 0
-4. Trait default-method bodies — `.collect()` as a chained method
-5. Self-hosted bootstrap (long-term)
+1. `From`-based error conversion for `?`
+2. HashMap value-release walk (close the V-leak)
+3. HashMap str-keys + remove + iteration
+4. Open-ended ranges (`..n`, `n..`)
+5. Trait default-method bodies — `.collect()` as a chained method
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

@@ -541,6 +541,49 @@ impl<'r> Checker<'r> {
                             }
                         }
                     }
+                    // `HashMap<K, V>` is a builtin parametric type.
+                    // v0.x restricts the key type to i64; the
+                    // checker enforces that here so a mistaken
+                    // `HashMap<str, ...>` surfaces a clear error
+                    // instead of producing a Ty that the runtime
+                    // can't actually back.
+                    SymbolKind::BuiltinType(Ty::HashMap(_, _)) => {
+                        if type_args.len() != 2 {
+                            self.error(
+                                p.span,
+                                "`HashMap` requires exactly two type arguments \
+                                 (`HashMap<K, V>`)"
+                                    .to_string(),
+                            );
+                            Ty::Error
+                        } else {
+                            let k = type_args[0].clone();
+                            let v = type_args[1].clone();
+                            if !matches!(k, Ty::Int(crate::ty::IntTy::I64) | Ty::Error | Ty::TypeVar(_)) {
+                                self.error(
+                                    p.span,
+                                    format!(
+                                        "`HashMap<{}, ...>` — only `i64` keys are \
+                                         supported in v0.x",
+                                        k.display()
+                                    ),
+                                );
+                                Ty::Error
+                            } else if !hashmap_value_supported(&v) {
+                                self.error(
+                                    p.span,
+                                    format!(
+                                        "`HashMap<i64, {}>` is not supported in v0.x — \
+                                         the value type must fit an 8-byte slot",
+                                        v.display()
+                                    ),
+                                );
+                                Ty::Error
+                            } else {
+                                Ty::HashMap(Box::new(k), Box::new(v))
+                            }
+                        }
+                    }
                     SymbolKind::BuiltinType(t) => t,
                     SymbolKind::Struct => Ty::Struct(sym_id, type_args.clone()),
                     SymbolKind::Enum => Ty::Enum(sym_id, type_args.clone()),
@@ -3314,6 +3357,30 @@ impl<'r> Checker<'r> {
                 }
                 inner
             }
+            "hashmap_new" => {
+                // hashmap_new() -> HashMap<i64, V>. The V is left as
+                // a fresh inference TypeVar so the surrounding let's
+                // annotation or first .insert(k, v) call pins it.
+                if !arg_tys.is_empty() {
+                    self.error(
+                        span,
+                        format!(
+                            "`hashmap_new` expects no arguments, found {}",
+                            arg_tys.len()
+                        ),
+                    );
+                }
+                // The fresh sym mirrors session 062's inference
+                // TypeVars (decrement from u32::MAX) so it never
+                // collides with the resolver's symbol table. The
+                // outer let's annotation flows through `unify` to
+                // pin this.
+                let v_sym = self.fresh_sym();
+                Ty::HashMap(
+                    Box::new(Ty::Int(crate::ty::IntTy::I64)),
+                    Box::new(Ty::TypeVar(v_sym)),
+                )
+            }
             _ => {
                 self.error(span, format!("unknown polymorphic builtin `{}`", name));
                 Ty::Error
@@ -4022,6 +4089,26 @@ fn is_printable(t: &Ty) -> bool {
 /// descriptor (can't fit, and storing its pointer would dangle);
 /// floats and arrays are deferred. `TypeVar` is allowed — a generic
 /// `Vec<T>` is validated once monomorphization makes `T` concrete.
+/// Wider than `vec_element_supported`: hashmap values are stored
+/// as raw i64 slots, so any pointer-shaped type works (including
+/// str, which Vec excludes for backward-compatibility reasons).
+fn hashmap_value_supported(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Int(_)
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Str
+            | Ty::Struct(_, _)
+            | Ty::Enum(_, _)
+            | Ty::Vec(_)
+            | Ty::HashMap(_, _)
+            | Ty::Dyn(_, _)
+            | Ty::TypeVar(_)
+            | Ty::Error
+    )
+}
+
 fn vec_element_supported(ty: &Ty) -> bool {
     matches!(
         ty,
@@ -4082,6 +4169,24 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
             ret: (**elem).clone(),
         }),
         (Ty::Vec(_), "len") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        // HashMap<K, V> methods. v0.x: keys are i64; values are
+        // the generic V slot.
+        (Ty::HashMap(k, v), "insert") => Some(MethodSig {
+            params: vec![(**k).clone(), (**v).clone()],
+            ret: Ty::Unit,
+        }),
+        (Ty::HashMap(k, v), "get") => Some(MethodSig {
+            params: vec![(**k).clone()],
+            ret: (**v).clone(),
+        }),
+        (Ty::HashMap(k, _), "contains_key") => Some(MethodSig {
+            params: vec![(**k).clone()],
+            ret: Ty::Bool,
+        }),
+        (Ty::HashMap(_, _), "len") => Some(MethodSig {
             params: vec![],
             ret: Ty::Int(IntTy::I64),
         }),
