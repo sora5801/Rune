@@ -241,6 +241,49 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn iterator_filter_as_method_with_named_fn() {
+    // Probe: named fn as predicate (no closure inference).
+    let src = r#"
+        fn gt2(x: i64) -> bool { x > 2 }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter().filter(gt2).count()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn iterator_filter_as_method_with_closure() {
+    // Session 077: `.filter(p)` as a default method on Iterator
+    // — uses a method-level generic `P: Fn1<Self::Item, bool>`.
+    // The body constructs `Filter { iter: self, pred: p }`; the
+    // monomorphizer specializes per (Self, P).
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter()
+                .filter(|x| x > 2)
+                .count()
+        }
+    "#;
+    // 3, 4, 5 → 3 elements
+    assert_eq!(run_main(src), 3);
+}
+
+// .map() as a method works syntactically but its `U` generic
+// param needs cross-bound inference (`F: Fn1<Self::Item, U>`
+// → pin U from F's signature) before downstream code sees a
+// fully-substituted Map<I, F, U>. Session 077 wires the
+// bound-propagation hook into user_method_sig but the cascade
+// for U-only-in-bound generic params doesn't fire reliably
+// for all cases yet. The std::Map { ... } struct-literal form
+// still works as the user-facing API for v0.x; .map() as a
+// method is deferred to a follow-up session.
+
+#[test]
 fn iterator_count_default_method() {
     // Session 076: .count() is a default method on Iterator —
     // every impl (VecIter, RangeIter, Map, Filter,

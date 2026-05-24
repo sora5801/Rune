@@ -3094,22 +3094,128 @@ impl<'r> Checker<'r> {
     /// Look up a method declared in an `impl` block on a struct type.
     /// Returns the method's externally-visible signature (without the
     /// `self` parameter).
-    fn user_method_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
+    /// Session 077: like the older single-arg version (now
+    /// inlined), but also unifies the
+    /// method's parameter types against the call-site argument
+    /// types, so method-level generic params (like `P` in
+    /// `fn filter<P: Fn1<Self::Item, bool>>(...)`) get pinned in
+    /// the substitution and propagate into the return type. The
+    /// no-arg variant exists for callers that don't know the args
+    /// yet — they'll fall back to `apply_subst` leaving any
+    /// method-level TypeVar in place, which is fine for trait-
+    /// bound method dispatch (the value-site infers later).
+    fn user_method_sig_with_args(
+        &self,
+        recv: &Ty,
+        name: &str,
+        arg_tys: &[Ty],
+    ) -> Option<MethodSig> {
         let Ty::Struct(sym_id, _) = recv else { return None };
         let &method_sym = self.res.impl_methods.get(&(*sym_id, name.to_string()))?;
         let method_span = self.res.symbol(method_sym).span;
         let fn_ty = self.fn_signatures.get(&method_span)?;
         let Ty::Fn { params, ret } = fn_ty else { return None };
-        // Drop the `self` parameter from the externally-visible sig.
         let (self_ty, rest) = params.split_first()?;
-        // For a generic-impl method (`impl<T> Box<T>`), bind the
-        // impl's type params from the concrete receiver: unify the
-        // declared `self` type (`Box<T>`) against the actual receiver
-        // (`Box<i64>`), then substitute through the rest of the sig.
-        // For a non-generic method this leaves the signature as-is.
         let mut subst: std::collections::HashMap<SymbolId, Ty> =
             std::collections::HashMap::new();
         unify_typevars(self_ty, recv, &mut subst);
+        // Session 077: also unify each remaining param with the
+        // corresponding call-site arg to pin method-level generics.
+        for (param, arg) in rest.iter().zip(arg_tys.iter()) {
+            unify_typevars(param, arg, &mut subst);
+        }
+        // Session 077: propagate from bounds. When a method-level
+        // TypeVar (like `F` in `fn map<F: Fn1<Self::Item, U>, U>`)
+        // gets pinned to a concrete Ty::Fn or Ty::Struct(closure),
+        // walk the bound to pin further unconstrained vars (U).
+        // Mirrors session 061's struct-lit pass-1 propagation but
+        // for method-level generics. Multiple passes in case
+        // pinning one var unlocks another via cascading bounds.
+        for _ in 0..3 {
+            let entries: Vec<(SymbolId, Ty)> = subst
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            let mut changed = false;
+            for (param_sym, concrete) in entries {
+                let Some(bound_syms) = self.res.generic_bounds.get(&param_sym) else {
+                    continue;
+                };
+                for &trait_sym in bound_syms {
+                    let Some(arg_spans) = self
+                        .res
+                        .generic_bound_args
+                        .get(&(param_sym, trait_sym))
+                    else {
+                        continue;
+                    };
+                    // Resolve the bound's arg types (e.g. `[I::Item,
+                    // U]` from `Fn1<I::Item, U>`) via type_resolutions
+                    // populated at resolver time.
+                    let bound_arg_tys: Vec<Ty> = arg_spans
+                        .iter()
+                        .map(|sp| {
+                            self.type_resolutions
+                                .get(sp)
+                                .cloned()
+                                .unwrap_or(Ty::Error)
+                        })
+                        .collect();
+                    // Apply the current subst so any already-pinned
+                    // generic vars in the bound's args resolve to
+                    // their concrete types — only U-like leftovers
+                    // remain as TypeVars to be filled.
+                    let bound_arg_tys: Vec<Ty> = bound_arg_tys
+                        .iter()
+                        .map(|t| self.apply_subst(t, &subst, None))
+                        .collect();
+                    // Concrete is either Ty::Fn(P, R) or
+                    // Ty::Struct(closure_sym). Unify positionally.
+                    match &concrete {
+                        Ty::Fn { params: p, ret: r } => {
+                            // For Fn1<A, R>: arg 0 = A, arg 1 = R.
+                            if bound_arg_tys.len() == 2 && p.len() == 1 {
+                                let before_len = subst.len();
+                                unify_typevars(&bound_arg_tys[0], &p[0], &mut subst);
+                                unify_typevars(&bound_arg_tys[1], r, &mut subst);
+                                if subst.len() != before_len {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        Ty::Struct(struct_sym, _) => {
+                            // Closure-struct case: look up the call
+                            // method's signature to read its (P, R).
+                            if let Some(&call_sym) = self
+                                .res
+                                .impl_methods
+                                .get(&(*struct_sym, "call".to_string()))
+                            {
+                                let call_span = self.res.symbol(call_sym).span;
+                                if let Some(Ty::Fn { params: cp, ret: cr }) =
+                                    self.fn_signatures.get(&call_span)
+                                {
+                                    // call sig is [Self, A] → R, so
+                                    // skip the leading Self param.
+                                    if cp.len() == 2 && bound_arg_tys.len() == 2 {
+                                        let before_len = subst.len();
+                                        unify_typevars(&bound_arg_tys[0], &cp[1], &mut subst);
+                                        unify_typevars(&bound_arg_tys[1], cr, &mut subst);
+                                        if subst.len() != before_len {
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         Some(MethodSig {
             params: rest.iter().map(|p| self.apply_subst(p, &subst, None)).collect(),
             ret: self.apply_subst(ret, &subst, None),
@@ -3489,7 +3595,7 @@ impl<'r> Checker<'r> {
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
         let sig = resolve_method(&recv_ty, &method.name)
             .or_else(|| self.builtin_vec_iter_sig(&recv_ty, &method.name))
-            .or_else(|| self.user_method_sig(&recv_ty, &method.name))
+            .or_else(|| self.user_method_sig_with_args(&recv_ty, &method.name, &arg_tys))
             .or_else(|| self.trait_bound_method_sig(&recv_ty, &method.name))
             .or_else(|| self.dyn_method_sig(&recv_ty, &method.name).map(|(s, _)| s));
         let Some(sig) = sig else {

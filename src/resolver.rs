@@ -1433,6 +1433,47 @@ impl Resolver {
                             .unwrap()
                             .insert("Self".into(), self_sym);
                     }
+                    // Session 077: scope method-level generic
+                    // params (and their bounds) before resolving
+                    // the method's param/return types so a method
+                    // like `fn map<F: Fn1<Self::Item, U>, U>(...)`
+                    // resolves F and U correctly. Mirrors the
+                    // resolve_fn pattern from impl methods.
+                    let mut method_gen_syms: Vec<SymbolId> =
+                        Vec::with_capacity(m.generics.len());
+                    for g in &m.generics {
+                        let id = self.intern_generic_param(g);
+                        method_gen_syms.push(id);
+                    }
+                    for (g, id) in m.generics.iter().zip(method_gen_syms.iter().copied()) {
+                        let mut bound_syms: Vec<SymbolId> = Vec::new();
+                        for b in &g.bounds {
+                            let display = path_display(b);
+                            if let Some((bsym, _)) = self.lookup_path(&b.segments) {
+                                if matches!(self.symbols[bsym.0 as usize].kind, SymbolKind::Trait) {
+                                    bound_syms.push(bsym);
+                                    if !b.generic_args.is_empty() {
+                                        let mut arg_spans = Vec::with_capacity(b.generic_args.len());
+                                        for a in &b.generic_args {
+                                            self.resolve_type(a);
+                                            arg_spans.push(a.span());
+                                        }
+                                        self.generic_bound_args.insert((id, bsym), arg_spans);
+                                    }
+                                } else {
+                                    self.error(
+                                        format!("`{}` is not a trait", display),
+                                        b.span,
+                                    );
+                                }
+                            } else {
+                                self.error(format!("unresolved trait `{}`", display), b.span);
+                            }
+                        }
+                        if !bound_syms.is_empty() {
+                            self.generic_bounds.insert(id, bound_syms);
+                        }
+                    }
                     for p in &m.params {
                         self.resolve_type(&p.ty);
                     }

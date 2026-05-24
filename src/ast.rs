@@ -121,6 +121,11 @@ pub struct TraitDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitMethodSig {
     pub name: Ident,
+    /// Session 077: method-level generic parameters
+    /// (`fn map<F: Fn1<Self::Item, U>, U>(...)`). Empty for
+    /// methods without their own generics. The trait's own
+    /// generics are still in scope alongside these.
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: Option<Block>,

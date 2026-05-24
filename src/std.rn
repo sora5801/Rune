@@ -72,6 +72,22 @@ pub mod std {
             }
             total
         }
+        /* Session 077: `.filter(p)` as a default method.
+           Method-level generic `P: Fn1<Self::Item, bool>` lets
+           the user pass any closure or fn-pointer with the
+           right signature. Constructs a `Filter<Self, P>` —
+           the rest of the pipeline (Iterator impl, monomorphize,
+           codegen) was already in place. `.map(f)` would be the
+           sibling shape but its `U` generic (the closure's
+           return type) is bound-only — pinning U from F's
+           signature needs more bound-propagation than v0.x
+           currently does at method-call sites. Users still
+           construct `std::Map { iter: ..., f: ... }` directly. */
+        fn filter<P: Fn1<Self::Item, bool>>(self: Self, p: P)
+            -> Filter<Self, P>
+        {
+            Filter { iter: self, pred: p }
+        }
     }
 
     /* One-argument callable: a closure literal `|x| body` that

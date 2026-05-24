@@ -268,6 +268,12 @@ impl<'a> Lowerer<'a> {
         m: &ast::TraitMethodSig,
         body: &ast::Block,
     ) -> HirFn {
+        // Session 077: method-level generic params (resolver
+        // pre-interned them via intern_generic_param) get
+        // collected into the synth fn's generics list AFTER
+        // Self + trait generics so call-site type inference
+        // can pin them per-call (e.g. `.map(closure)` infers F).
+        let _ = m;
         let params: Vec<HirParam> = m
             .params
             .iter()
@@ -299,6 +305,11 @@ impl<'a> Lowerer<'a> {
         }
         if let Some(trait_gens) = self.res.trait_generics.get(&trait_sym) {
             generics.extend(trait_gens.iter().copied());
+        }
+        for g in &m.generics {
+            if let Some(&id) = self.res.decl_to_sym.get(&g.name.span) {
+                generics.push(id);
+            }
         }
         HirFn { sym: fn_sym, name, generics, params, ret_ty, body }
     }

@@ -503,8 +503,12 @@ impl Parser {
                 continue;
             }
             // A trait method is a signature: `fn name(params) -> ret;`
+            // Session 077: optional `<F, U: Bound, ...>` between
+            // name and the param list — method-level generics
+            // distinct from the trait's own generics.
             self.expect(&TokenKind::Fn, "`fn`")?;
             let m_name = self.expect_ident()?;
+            let m_generics = self.parse_optional_generic_params()?;
             self.expect(&TokenKind::LParen, "`(`")?;
             let mut params = Vec::new();
             while !self.check(&TokenKind::RParen) && !self.is_eof() {
@@ -535,6 +539,7 @@ impl Parser {
             };
             methods.push(TraitMethodSig {
                 name: m_name,
+                generics: m_generics,
                 params,
                 return_type,
                 body,
