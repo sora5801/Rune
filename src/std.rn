@@ -41,6 +41,20 @@ pub mod std {
         fn call(self: Self, a: A) -> R;
     }
 
+    /* Conversion from `Self` to `T`. The `?` operator calls
+       `err.into()` when the inner result's error type doesn't
+       match the surrounding function's error type. The user
+       implements `Into<TargetErr>` on each source error type
+       (`impl Into<AppErr> for IoErr { fn into(self: IoErr) ->
+       AppErr { AppErr::Io(self) } }`) and the conversion lands
+       automatically at `?` sites. v0.x: single-impl assumption
+       per source type (multi-impl `Into<A> for X` AND `Into<B>
+       for X` would be ambiguous since the impl_methods table
+       keys methods by name alone). */
+    pub trait Into<T> {
+        fn into(self: Self) -> T;
+    }
+
     /* Iterator over an integer range — holds the next value to
        yield and the (exclusive) upper bound. A `start..end`
        expression outside a for-loop lowers to a `RangeIter`

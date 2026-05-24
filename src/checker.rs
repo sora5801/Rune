@@ -60,6 +60,13 @@ pub struct CheckResults {
     /// Per-closure inferred return type. From the body's tail (or
     /// the contextual expected `Ty::Fn`'s ret).
     pub closure_ret_tys: HashMap<Span, Ty>,
+    /// `?` sites that need an Into-based error conversion. Keyed by
+    /// the `?` expression's span; value is the source err's
+    /// struct/enum sym so the lowerer can look up its
+    /// `impl_methods[(sym, "into")]` entry. Absent → the inner
+    /// result's err type already matches the enclosing function's,
+    /// no conversion needed.
+    pub try_conversions: HashMap<Span, SymbolId>,
     pub errors: Vec<TypeError>,
 }
 
@@ -104,6 +111,12 @@ pub struct Checker<'r> {
     impl_assoc_bindings_ty: HashMap<(SymbolId, String), Ty>,
     closure_param_tys: HashMap<Span, Vec<Ty>>,
     closure_ret_tys: HashMap<Span, Ty>,
+    /// `?` sites where the inner result's error type doesn't
+    /// match the enclosing function's. Value is the source err's
+    /// struct/enum sym so the lowerer can look up
+    /// `impl_methods[(sym, "into")]` and emit a call wrapping
+    /// the err binding before the `Err` reconstruction.
+    try_conversions: HashMap<Span, SymbolId>,
     errors: Vec<TypeError>,
     current_return: Ty,
     /// The trait or impl whose signatures / bodies are currently
@@ -138,6 +151,7 @@ impl<'r> Checker<'r> {
             impl_assoc_bindings_ty: HashMap::new(),
             closure_param_tys: HashMap::new(),
             closure_ret_tys: HashMap::new(),
+            try_conversions: HashMap::new(),
             closure_infer_pool: std::cell::RefCell::new(HashMap::new()),
             next_fresh_sym: std::cell::Cell::new(u32::MAX),
             errors: Vec::new(),
@@ -174,6 +188,7 @@ impl<'r> Checker<'r> {
             impl_assoc_bindings_ty: self.impl_assoc_bindings_ty,
             closure_param_tys: self.closure_param_tys,
             closure_ret_tys: self.closure_ret_tys,
+            try_conversions: self.try_conversions,
             errors: self.errors,
         }
     }
@@ -3769,15 +3784,39 @@ impl<'r> Checker<'r> {
         match &self.current_return {
             Ty::Enum(s2, ret_args) if *s2 == rsym && ret_args.len() == 2 => {
                 if !ret_args[1].compatible(&err_ty) {
-                    self.error(
-                        span,
-                        format!(
-                            "`?` propagates an error of type `{}`, but the \
-                             enclosing function's `Result` error type is `{}`",
-                            err_ty.display(),
-                            ret_args[1].display()
-                        ),
-                    );
+                    // Session 065: try an Into-based conversion
+                    // before erroring. If the source err type has
+                    // an `into` impl method, the lowerer will call
+                    // it to bridge the gap. Record the source sym
+                    // so the lowerer can find the method.
+                    let source_sym = match &err_ty {
+                        Ty::Struct(s, _) | Ty::Enum(s, _) => Some(*s),
+                        _ => None,
+                    };
+                    let has_into = source_sym
+                        .map(|s| {
+                            self.res
+                                .impl_methods
+                                .contains_key(&(s, "into".to_string()))
+                        })
+                        .unwrap_or(false);
+                    if let (true, Some(s)) = (has_into, source_sym) {
+                        self.try_conversions.insert(span, s);
+                    } else {
+                        self.error(
+                            span,
+                            format!(
+                                "`?` propagates an error of type `{}`, but the \
+                                 enclosing function's `Result` error type is `{}` \
+                                 — implement `Into<{}>` for `{}` to convert at the \
+                                 `?` site",
+                                err_ty.display(),
+                                ret_args[1].display(),
+                                ret_args[1].display(),
+                                err_ty.display()
+                            ),
+                        );
+                    }
                 }
             }
             other => {

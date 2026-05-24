@@ -338,6 +338,28 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
+fn try_without_into_impl_rejected() {
+    // Session 065: `?` with mismatched err types and NO Into impl
+    // is still an error. The error message names the missing impl
+    // so the user knows what to write.
+    check_has_error(
+        r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        fn inner() -> std::Result<i64, IoErr> {
+            std::Result::Err(IoErr { code: 7 })
+        }
+        fn outer() -> std::Result<i64, AppErr> {
+            let v: i64 = inner()?;
+            std::Result::Ok(v)
+        }
+        fn main() -> i64 { 0 }
+        "#,
+        "Into",
+    );
+}
+
+#[test]
 fn standalone_range_is_a_range_iter() {
     // Session 063: `0..10` is now a valid expression — it lowers to
     // a `std::RangeIter { cur: 0, end: 10 }` struct value that

@@ -613,7 +613,7 @@ impl<'a> Lowerer<'a> {
                     elem_ty,
                 }
             }
-            ast::Expr::Try { expr, .. } => self.lower_try(expr),
+            ast::Expr::Try { expr, span } => self.lower_try(expr, *span),
             ast::Expr::Cast { expr, .. } => HirExprKind::Cast {
                 expr: Box::new(self.lower_expr(expr)),
             },
@@ -1143,7 +1143,7 @@ impl<'a> Lowerer<'a> {
     ///   `             Result::Err(e) => return Result::Err(e) }`
     /// The checker has already verified `expr` is a `Result` and the
     /// enclosing function returns a `Result` with a matching error.
-    fn lower_try(&self, inner: &ast::Expr) -> HirExprKind {
+    fn lower_try(&self, inner: &ast::Expr, span: crate::token::Span) -> HirExprKind {
         let scrutinee = self.lower_expr(inner);
         let (rsym, ok_ty, err_ty) = match &scrutinee.ty {
             Ty::Enum(s, args) if args.len() == 2 => {
@@ -1183,15 +1183,63 @@ impl<'a> Lowerer<'a> {
                 ty: ok_ty.clone(),
             },
         };
-        // `Err(e) => return Err(e)`
+        // Session 065: if the checker recorded a try_conversion at
+        // this span, the err type doesn't match the enclosing fn's
+        // — wrap the err binding in `.into()` before reconstructing
+        // Err. The conversion's target type is what the enclosing
+        // fn returns; we don't need it explicitly because the
+        // user's `impl Into<TargetErr> for SourceErr` pins the
+        // method's return type, and Err is reconstructed with the
+        // outer fn's enum sym (passed in via current_fn_ret in a
+        // future refinement; here we keep using `rsym` since the
+        // enum sym IS the same — both sides are Result, only the
+        // E type arg differs).
+        let conversion = self.check.try_conversions.get(&span).copied();
+        let err_payload_expr = if let Some(source_sym) = conversion {
+            // Look up the into method on the source err type.
+            if let Some(&into_sym) = self
+                .res
+                .impl_methods
+                .get(&(source_sym, "into".to_string()))
+            {
+                // Pull the target err type off the into method's
+                // signature so the converted payload has its real
+                // type (codegen needs the concrete Ty to lay out
+                // the Err variant's payload slot).
+                let into_method_span = self.res.symbol(into_sym).span;
+                let target_ty = match self.check.fn_signatures.get(&into_method_span) {
+                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    _ => Ty::Error,
+                };
+                HirExpr {
+                    kind: HirExprKind::Call {
+                        callee: into_sym,
+                        args: vec![HirExpr {
+                            kind: HirExprKind::Local(err_bind),
+                            ty: err_ty.clone(),
+                        }],
+                    },
+                    ty: target_ty,
+                }
+            } else {
+                HirExpr {
+                    kind: HirExprKind::Local(err_bind),
+                    ty: err_ty.clone(),
+                }
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::Local(err_bind),
+                ty: err_ty.clone(),
+            }
+        };
+        // `Err(e) => return Err(e)` — with `e` substituted by the
+        // converted payload when a try_conversion is recorded.
         let err_value = HirExpr {
             kind: HirExprKind::EnumPayloadCtor {
                 enum_sym: rsym,
                 discriminant: err_disc,
-                payloads: vec![HirExpr {
-                    kind: HirExprKind::Local(err_bind),
-                    ty: err_ty.clone(),
-                }],
+                payloads: vec![err_payload_expr],
             },
             ty: scrutinee.ty.clone(),
         };

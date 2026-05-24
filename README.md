@@ -253,7 +253,9 @@ rune: linked with clang -> primes.exe
   - **`?` operator** — `expr?` propagates errors: the lowerer
     desugars it to `match expr { Ok(v) => v, Err(e) => return Err(e) }`.
     The checker requires a `Result`-shaped operand and an enclosing
-    function returning a matching `Result`.
+    function returning a `Result`. When the err types differ, the
+    `?` looks for an `impl std::Into<TargetErr> for SourceErr` and
+    auto-converts via `err.into()` before the return.
   - **ARC reclamation (step 2 of the reclamation ladder).** Vec and
     concat/sliced str descriptors carry a refcount; codegen tracks
     "owned ARC locals" per scope and emits release calls at scope
@@ -309,11 +311,11 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `From`-based error conversion for `?`
-2. HashMap value-release walk (close the V-leak)
-3. HashMap str-keys + remove + iteration
-4. Open-ended ranges (`..n`, `n..`)
-5. Trait default-method bodies — `.collect()` as a chained method
+1. HashMap value-release walk (close the V-leak)
+2. HashMap str-keys + remove + iteration
+3. Open-ended ranges (`..n`, `n..`)
+4. Trait default-method bodies — `.collect()` as a chained method
+5. `?` on Option + multi-impl `Into` disambiguation
 6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

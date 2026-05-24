@@ -3380,6 +3380,68 @@ fn try_chains_multiple() {
     assert_eq!(run_main(src), 42);
 }
 
+#[test]
+fn try_from_based_conversion_ok() {
+    // Session 065: the `?` operator now calls `.into()` to convert
+    // an inner result's error type to the surrounding function's
+    // error type when they differ. Here `inner_ok` returns
+    // `Result<i64, IoErr>` but `outer` returns `Result<i64, AppErr>`.
+    // The `impl Into<AppErr> for IoErr` bridges the gap at the `?`
+    // site. Ok branch — no conversion runs, but the typecheck
+    // still has to accept the mismatched types.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr {
+                AppErr { code: self.code + 1000 }
+            }
+        }
+        fn inner_ok() -> std::Result<i64, IoErr> {
+            std::Result::Ok(42)
+        }
+        fn outer() -> std::Result<i64, AppErr> {
+            let v: i64 = inner_ok()?;
+            std::Result::Ok(v + 1)
+        }
+        fn main() -> i64 {
+            std::ok_or(outer(), -1)
+        }
+    "#;
+    assert_eq!(run_main(src), 43);
+}
+
+#[test]
+fn try_from_based_conversion_err() {
+    // Same setup, but `inner_err` returns Err. The `?` calls
+    // `IoErr.into()` to produce an `AppErr`, returns
+    // `Result::Err(AppErr { code: 1007 })`. main reads the
+    // converted code via a match on the result.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr {
+                AppErr { code: self.code + 1000 }
+            }
+        }
+        fn inner_err() -> std::Result<i64, IoErr> {
+            std::Result::Err(IoErr { code: 7 })
+        }
+        fn outer() -> std::Result<i64, AppErr> {
+            let v: i64 = inner_err()?;
+            std::Result::Ok(v + 1)
+        }
+        fn main() -> i64 {
+            match outer() {
+                std::Result::Ok(_) => 0,
+                std::Result::Err(e) => e.code,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 1007);
+}
+
 // ---- dyn Trait (dynamic dispatch) ----
 
 #[test]
