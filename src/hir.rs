@@ -228,6 +228,15 @@ pub enum HirExprKind {
     /// Stack-allocated array literal. Value type is a pointer to the
     /// first element; element type and length are tracked statically.
     Array { elems: Vec<HirExpr>, elem_ty: Ty },
+    /// Session 073: tuple literal. Codegen heap-allocates an
+    /// N*8-byte block via rune_struct_new and stores each element
+    /// at offset i*8; the result value is the block's pointer.
+    /// Same layout as a positional struct.
+    Tuple { elems: Vec<HirExpr> },
+    /// Session 073: tuple field access (`t.0`, `t.1`, ...).
+    /// Lowers as a load at offset `index*8` from the receiver
+    /// pointer.
+    TupleIndex { receiver: Box<HirExpr>, index: u32, elem_ty: Ty },
     /// `array[index]`. Loads the element at the computed offset.
     Index { array: Box<HirExpr>, index: Box<HirExpr>, elem_ty: Ty },
     /// `str[i]` — reads a single byte from the string and zero-extends to i64.

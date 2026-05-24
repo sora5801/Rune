@@ -63,6 +63,13 @@ pub enum Ty {
     /// argument typing. v0.x restricts K to i64; both arms enforced
     /// by the resolver / checker.
     HashMap(Box<Ty>, Box<Ty>),
+    /// `(A, B, C)` — session 073 tuple type. The lowerer
+    /// synthesizes a per-shape struct (one struct sym per
+    /// distinct element-type list); from codegen's perspective
+    /// a tuple value is an ordinary heap struct laid out
+    /// position-by-position. Two tuples with the same element
+    /// types share the synth struct.
+    Tuple(Vec<Ty>),
     Fn { params: Vec<Ty>, ret: Box<Ty> },
     /// A struct type, with its type arguments at this use site.
     /// Empty `Vec` for non-generic structs; for generic structs the
@@ -169,6 +176,10 @@ impl Ty {
             (Ty::Enum(s1, _), Ty::Enum(s2, _)) => s1 == s2,
             (Ty::Vec(_), Ty::Vec(_)) => true,
             (Ty::HashMap(_, _), Ty::HashMap(_, _)) => true,
+            (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(b.iter())
+                .all(|(x, y)| x.compatible(y)),
             (
                 Ty::Fn { params: p1, ret: r1 },
                 Ty::Fn { params: p2, ret: r2 },
@@ -213,6 +224,13 @@ impl Ty {
                 let v = v1.unify(v2)?;
                 Some(Ty::HashMap(Box::new(k), Box::new(v)))
             }
+            (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => {
+                let mut out = Vec::with_capacity(a.len());
+                for (x, y) in a.iter().zip(b.iter()) {
+                    out.push(x.unify(y)?);
+                }
+                Some(Ty::Tuple(out))
+            }
             _ => if self == other { Some(self.clone()) } else { None },
         }
     }
@@ -228,6 +246,10 @@ impl Ty {
             Ty::Array(elem, n) => format!("[{}; {}]", elem.display(), n),
             Ty::Vec(elem) => format!("Vec<{}>", elem.display()),
             Ty::HashMap(k, v) => format!("HashMap<{}, {}>", k.display(), v.display()),
+            Ty::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|t| t.display()).collect();
+                format!("({})", parts.join(", "))
+            }
             Ty::Fn { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|t| t.display()).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display())

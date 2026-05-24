@@ -709,6 +709,25 @@ impl<'a> Lowerer<'a> {
                     .unwrap_or(Ty::Error);
                 HirExprKind::Array { elems: lowered, elem_ty }
             }
+            ast::Expr::Tuple { elems, .. } => {
+                let lowered: Vec<HirExpr> =
+                    elems.iter().map(|e| self.lower_expr(e)).collect();
+                HirExprKind::Tuple { elems: lowered }
+            }
+            ast::Expr::TupleIndex { receiver, index, .. } => {
+                let recv_hir = self.lower_expr(receiver);
+                let elem_ty = match &recv_hir.ty {
+                    Ty::Tuple(elems) if (*index as usize) < elems.len() => {
+                        elems[*index as usize].clone()
+                    }
+                    _ => Ty::Error,
+                };
+                HirExprKind::TupleIndex {
+                    receiver: Box::new(recv_hir),
+                    index: *index,
+                    elem_ty,
+                }
+            }
             ast::Expr::For { pat, iter, body, .. } => self.lower_for(pat, iter, body),
             ast::Expr::Match { scrutinee, arms, .. } => self.lower_match(scrutinee, arms),
             ast::Expr::Range { start, end, inclusive, .. } => {
@@ -984,6 +1003,14 @@ impl<'a> Lowerer<'a> {
                 for el in elems {
                     Self::rewrite_captures(el, self_sym, self_ty, capture_info);
                 }
+            }
+            Tuple { elems } => {
+                for el in elems {
+                    Self::rewrite_captures(el, self_sym, self_ty, capture_info);
+                }
+            }
+            TupleIndex { receiver, .. } => {
+                Self::rewrite_captures(receiver, self_sym, self_ty, capture_info);
             }
             Index { array, index, .. } => {
                 Self::rewrite_captures(array, self_sym, self_ty, capture_info);

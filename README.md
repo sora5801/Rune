@@ -314,10 +314,11 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
-2. Tuple types — unblocks HashMap `.values()` / `.entries()`
-3. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
-4. Self-hosted bootstrap (long-term)
+1. Tuple destructuring patterns + per-shape ARC release
+2. HashMap `.entries()` — yields `(K, V)` tuples
+3. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
+4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

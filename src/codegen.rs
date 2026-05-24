@@ -1844,6 +1844,10 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 self.compile_field_assign(receiver, *offset, field_ty, rhs)
             }
             HirExprKind::Array { elems, elem_ty } => self.compile_array(elems, elem_ty),
+            HirExprKind::Tuple { elems } => self.compile_tuple(elems),
+            HirExprKind::TupleIndex { receiver, index, elem_ty } => {
+                self.compile_tuple_index(receiver, *index, elem_ty)
+            }
             HirExprKind::Index { array, index, elem_ty } => {
                 self.compile_index(array, index, elem_ty)
             }
@@ -2926,6 +2930,84 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         Ok(id)
     }
 
+    /// Session 073: compile a tuple literal. Heap-allocates an
+    /// N*8 byte block via rune_struct_new (which appends an rc=1
+    /// slot, same shape as structs), stores each element at
+    /// offset i*8, returns the pointer. The runtime's struct
+    /// dealloc handles cleanup for non-ARC element tuples; ARC
+    /// release per shape is deferred (see "Apparent bugs" in the
+    /// session doc).
+    fn compile_tuple(
+        &mut self,
+        elems: &[HirExpr],
+    ) -> Result<Option<Value>, CodegenError> {
+        let field_size = (elems.len() as u32) * 8;
+        let new_id = self.ensure_runtime_func("struct_new")?;
+        let new_local = self.module.declare_func_in_func(new_id, self.builder.func);
+        let size_v = self.builder.ins().iconst(types::I64, field_size as i64);
+        let inst = self.builder.ins().call(new_local, &[size_v]);
+        let base = self.builder.inst_results(inst)[0];
+        for (i, elem) in elems.iter().enumerate() {
+            let v = self
+                .compile_expr(elem)?
+                .ok_or_else(|| CodegenError("tuple element produced no value".into()))?;
+            let elem_cty = cranelift_type(&elem.ty)?;
+            let stored = if elem_cty == types::I64 {
+                v
+            } else {
+                self.builder.ins().uextend(types::I64, v)
+            };
+            // Same retain-on-borrowed-Local pattern as Vec push /
+            // Array elem: if the element is ARC-managed and came
+            // from a Local, the tuple's slot becomes a second
+            // owner and needs a +1. Fresh producers transfer
+            // their +1 directly.
+            if is_arc_type(&elem.ty, self.struct_arc_fields, self.enum_has_payload) {
+                if let HirExprKind::Local(_) = &elem.kind {
+                    self.emit_arc_call("retain", &elem.ty, stored)?;
+                }
+            }
+            self.builder.ins().store(
+                MemFlags::new(),
+                stored,
+                base,
+                (i as i32) * 8,
+            );
+        }
+        Ok(Some(base))
+    }
+
+    /// Session 073: compile a tuple field access `t.N`. Loads at
+    /// offset N*8 from the receiver pointer; for ARC element types
+    /// the value is retained (matches Vec.get / FieldAccess
+    /// patterns — the caller becomes a new owner of a +1).
+    fn compile_tuple_index(
+        &mut self,
+        receiver: &HirExpr,
+        index: u32,
+        elem_ty: &Ty,
+    ) -> Result<Option<Value>, CodegenError> {
+        let base = self
+            .compile_expr(receiver)?
+            .ok_or_else(|| CodegenError("tuple receiver produced no value".into()))?;
+        let elem_cty = cranelift_type(elem_ty)?;
+        let raw = self.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            base,
+            (index as i32) * 8,
+        );
+        if is_arc_type(elem_ty, self.struct_arc_fields, self.enum_has_payload) {
+            self.emit_arc_call("retain", elem_ty, raw)?;
+        }
+        let result = if elem_cty == types::I64 {
+            raw
+        } else {
+            self.builder.ins().ireduce(elem_cty, raw)
+        };
+        Ok(Some(result))
+    }
+
     fn compile_array(
         &mut self,
         elems: &[HirExpr],
@@ -3572,6 +3654,10 @@ fn mangle_ty_name(ty: &Ty) -> String {
         Ty::HashMap(k, v) => format!("HM_{}_{}", mangle_ty_name(k), mangle_ty_name(v)),
         Ty::Weak(e) => format!("Weak_{}", mangle_ty_name(e)),
         Ty::Array(e, n) => format!("Arr{}_{}", n, mangle_ty_name(e)),
+        Ty::Tuple(elems) => {
+            let inner: Vec<String> = elems.iter().map(mangle_ty_name).collect();
+            format!("T{}_{}", elems.len(), inner.join("_"))
+        }
         Ty::Struct(s, args) | Ty::Enum(s, args) => {
             let tag = if matches!(ty, Ty::Struct(_, _)) { "S" } else { "E" };
             if args.is_empty() {
@@ -3616,6 +3702,14 @@ fn is_arc_type(
         Ty::Dyn(_, _) => true,
         // A heap array is a refcounted block in its own right.
         Ty::Array(_, _) => true,
+        // Session 073: tuples ARE heap blocks but ARC release per
+        // shape (walking ARC elements before dealloc) isn't wired
+        // yet. For v0.x, treat tuples as non-ARC so the codegen
+        // skips retain/release on them — the heap block leaks at
+        // scope exit, but the program runs correctly. Adding the
+        // synth release walk per shape is the natural next step;
+        // mirrors session 067's HashMap pattern.
+        Ty::Tuple(_) => false,
         _ => false,
     }
 }
@@ -3669,6 +3763,9 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Dyn(_, _) => types::I64,
         // A function pointer — same shape as any other pointer.
         Ty::Fn { .. } => types::I64,
+        // Session 073: a tuple is a pointer to a heap-allocated
+        // N*8-byte block + trailing rc (same shape as a struct).
+        Ty::Tuple(_) => types::I64,
         // A projection or Self that survived to codegen means the
         // checker or monomorphizer failed to resolve it. Diagnose
         // clearly rather than masking the bug as "unsupported type".

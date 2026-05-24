@@ -1717,6 +1717,11 @@ impl Resolver {
                     self.resolve_type(r);
                 }
             }
+            Type::Tuple { elems, .. } => {
+                for e in elems {
+                    self.resolve_type(e);
+                }
+            }
         }
     }
 
@@ -1815,6 +1820,14 @@ impl Resolver {
                 for e in elems {
                     self.resolve_expr(e);
                 }
+            }
+            Expr::Tuple { elems, .. } => {
+                for e in elems {
+                    self.resolve_expr(e);
+                }
+            }
+            Expr::TupleIndex { receiver, .. } => {
+                self.resolve_expr(receiver);
             }
             Expr::Block(b) => self.resolve_block(b),
             Expr::If { cond, then_branch, else_branch, .. } => {

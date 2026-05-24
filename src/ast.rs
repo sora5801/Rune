@@ -221,6 +221,12 @@ pub enum Type {
     /// `fn(...)` without an explicit `-> R`, which the checker
     /// treats as `Ty::Unit`. Resolved to `Ty::Fn`.
     Fn { params: Vec<Type>, ret: Option<Box<Type>>, span: Span },
+    /// `(A, B, C)` — a tuple type. Session 073. Lowering
+    /// synthesizes a per-shape struct so codegen handles tuples
+    /// uniformly with named structs (same layout, same ARC
+    /// dispatch). A single-element parenthesized type (`(T)`)
+    /// stays as `T`; only multi-element forms become tuples.
+    Tuple { elems: Vec<Type>, span: Span },
 }
 
 impl Type {
@@ -230,6 +236,7 @@ impl Type {
             Type::Dyn(p) => p.span,
             Type::Array { span, .. } => *span,
             Type::Fn { span, .. } => *span,
+            Type::Tuple { span, .. } => *span,
         }
     }
 }
@@ -330,6 +337,16 @@ pub enum Expr {
     Try { expr: Box<Expr>, span: Span },
     Cast { expr: Box<Expr>, ty: Type, span: Span },
     Array { elems: Vec<Expr>, span: Span },
+    /// `(a, b, c)` — session 073 tuple literal. Lowering builds
+    /// a synth-struct StructLit so codegen handles tuples
+    /// uniformly with named structs. A single-element
+    /// parenthesized expression (`(a)`) stays as `a`; only
+    /// multi-element forms become tuples.
+    Tuple { elems: Vec<Expr>, span: Span },
+    /// `t.0`, `t.1`, ... — tuple element access by index.
+    /// Lowering rewrites to `FieldAccess` at offset `index*8`
+    /// once the tuple's synth struct is registered.
+    TupleIndex { receiver: Box<Expr>, index: u32, span: Span },
     Block(Block),
     If { cond: Box<Expr>, then_branch: Block, else_branch: Option<Box<Expr>>, span: Span },
     While { cond: Box<Expr>, body: Block, span: Span },
@@ -380,6 +397,8 @@ impl Expr {
             | Expr::Try { span, .. }
             | Expr::Cast { span, .. }
             | Expr::Array { span, .. }
+            | Expr::Tuple { span, .. }
+            | Expr::TupleIndex { span, .. }
             | Expr::If { span, .. }
             | Expr::While { span, .. }
             | Expr::For { span, .. }

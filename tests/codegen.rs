@@ -241,6 +241,49 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn tuple_literal_and_index() {
+    // Session 073: (a, b) tuple literal + t.0 / t.1 indexing.
+    // The tuple is heap-allocated as N*8 bytes + trailing rc;
+    // each index loads at i*8 from the pointer.
+    let src = r#"
+        fn main() -> i64 {
+            let t: (i64, i64) = (10, 20);
+            t.0 + t.1
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn tuple_three_elements_mixed_types() {
+    let src = r#"
+        fn main() -> i64 {
+            let t: (i64, bool, i64) = (5, true, 100);
+            let mid: i64 = if t.1 { 1 } else { 0 };
+            t.0 + mid + t.2
+        }
+    "#;
+    assert_eq!(run_main(src), 106);
+}
+
+#[test]
+fn tuple_as_fn_return_and_param() {
+    let src = r#"
+        fn split(x: i64) -> (i64, i64) {
+            (x / 10, x % 10)
+        }
+        fn sum_pair(p: (i64, i64)) -> i64 {
+            p.0 + p.1
+        }
+        fn main() -> i64 {
+            sum_pair(split(347))
+        }
+    "#;
+    // split(347) = (34, 7). sum_pair = 41.
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
 fn try_op_with_multi_into_picks_right_target() {
     // Session 072: a single source error struct impls Into for
     // TWO different target error structs. Each `?` site picks

@@ -730,6 +730,13 @@ impl<'r> Checker<'r> {
                 self.type_resolutions.insert(*span, ty.clone());
                 ty
             }
+            Type::Tuple { elems, span } => {
+                let tys: Vec<Ty> =
+                    elems.iter().map(|t| self.resolve_type(t)).collect();
+                let ty = Ty::Tuple(tys);
+                self.type_resolutions.insert(*span, ty.clone());
+                ty
+            }
         }
     }
 
@@ -1704,6 +1711,48 @@ impl<'r> Checker<'r> {
             Expr::Try { expr, span } => self.check_try(expr, *span),
             Expr::Cast { expr, ty, span } => self.check_cast(expr, ty, *span),
             Expr::Array { elems, span } => self.check_array(elems, *span),
+            Expr::Tuple { elems, span } => {
+                let tys: Vec<Ty> =
+                    elems.iter().map(|e| self.check_expr(e)).collect();
+                let ty = Ty::Tuple(tys);
+                self.expr_types.insert(*span, ty.clone());
+                ty
+            }
+            Expr::TupleIndex { receiver, index, span } => {
+                let recv_ty = self.check_expr(receiver);
+                let elem_ty = match &recv_ty {
+                    Ty::Tuple(elems) => {
+                        if (*index as usize) < elems.len() {
+                            elems[*index as usize].clone()
+                        } else {
+                            self.error(
+                                *span,
+                                format!(
+                                    "tuple index {} out of range — type `{}` has {} \
+                                     element(s)",
+                                    index,
+                                    recv_ty.display(),
+                                    elems.len()
+                                ),
+                            );
+                            Ty::Error
+                        }
+                    }
+                    Ty::Error => Ty::Error,
+                    _ => {
+                        self.error(
+                            *span,
+                            format!(
+                                "cannot index into non-tuple type `{}`",
+                                recv_ty.display()
+                            ),
+                        );
+                        Ty::Error
+                    }
+                };
+                self.expr_types.insert(*span, elem_ty.clone());
+                elem_ty
+            }
             Expr::Block(b) => self.check_block(b),
             Expr::If { cond, then_branch, else_branch, span } => {
                 self.check_if(cond, then_branch, else_branch.as_deref(), *span)

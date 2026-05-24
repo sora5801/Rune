@@ -645,6 +645,35 @@ impl Parser {
                 span: Span::new(start, close.span.end),
             });
         }
+        // `(A, B, C)` — tuple type (session 073). `(T)` is just
+        // a parenthesized type, not a 1-tuple. Empty parens
+        // `()` is a 0-tuple — same shape as `()` for unit;
+        // for now we error since the rest of the language uses
+        // Ty::Unit explicitly via fn return omission.
+        if self.check(&TokenKind::LParen) {
+            let start = self.peek_span().start;
+            self.bump();
+            let mut elems: Vec<Type> = Vec::new();
+            if !self.check(&TokenKind::RParen) {
+                elems.push(self.parse_type()?);
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RParen) {
+                        // Trailing comma — fine.
+                        break;
+                    }
+                    elems.push(self.parse_type()?);
+                }
+            }
+            let close = self.expect(&TokenKind::RParen, "`)`")?;
+            if elems.len() == 1 {
+                // Parenthesized type — unwrap.
+                return Ok(elems.into_iter().next().unwrap());
+            }
+            return Ok(Type::Tuple {
+                elems,
+                span: Span::new(start, close.span.end),
+            });
+        }
         // `fn(T1, T2, ..) -> R` — a function-pointer type. Used in
         // type annotations like `let f: fn(i64) -> i64 = double;`
         // or in a struct field that holds a callback. `-> R` is
@@ -1143,6 +1172,27 @@ impl Parser {
             }
             TokenKind::Dot => {
                 self.bump();
+                // Session 073: `.N` tuple-index access where N is
+                // a non-negative integer literal. Resolves to
+                // TupleIndex; the lowerer rewrites to FieldAccess
+                // at offset N*8 on the tuple's synth struct.
+                if let TokenKind::Int(n) = self.peek() {
+                    let n_val = *n;
+                    let n_span = self.peek_span();
+                    self.bump();
+                    if n_val < 0 {
+                        self.errors.push(ParseError {
+                            message: "tuple index must be non-negative".into(),
+                            span: n_span,
+                        });
+                    }
+                    let span = Span::new(lhs.span().start, n_span.end);
+                    return Ok(Expr::TupleIndex {
+                        receiver: Box::new(lhs),
+                        index: n_val.max(0) as u32,
+                        span,
+                    });
+                }
                 let name = self.expect_ident()?;
                 if self.eat(&TokenKind::LParen) {
                     let saved = self.no_block_expr;
@@ -1210,13 +1260,42 @@ impl Parser {
                 Ok(Expr::Path(path))
             }
             TokenKind::LParen => {
+                let start = span.start;
                 self.bump();
                 let saved = self.no_block_expr;
                 self.no_block_expr = false;
-                let e = self.parse_expr()?;
-                self.no_block_expr = saved;
-                self.expect(&TokenKind::RParen, "`)`")?;
-                Ok(e)
+                // `()` — empty tuple. v0.x doesn't have unit-shaped
+                // literals; error for clarity.
+                if self.check(&TokenKind::RParen) {
+                    self.no_block_expr = saved;
+                    let close = self.expect(&TokenKind::RParen, "`)`")?;
+                    return Ok(Expr::Tuple {
+                        elems: Vec::new(),
+                        span: Span::new(start, close.span.end),
+                    });
+                }
+                let first = self.parse_expr()?;
+                if self.eat(&TokenKind::Comma) {
+                    // Tuple literal: `(a, b, ...)`. Trailing comma
+                    // allowed; a bare `(a,)` is a 1-tuple.
+                    let mut elems = vec![first];
+                    while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                        elems.push(self.parse_expr()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.no_block_expr = saved;
+                    let close = self.expect(&TokenKind::RParen, "`)`")?;
+                    Ok(Expr::Tuple {
+                        elems,
+                        span: Span::new(start, close.span.end),
+                    })
+                } else {
+                    self.no_block_expr = saved;
+                    self.expect(&TokenKind::RParen, "`)`")?;
+                    Ok(first)
+                }
             }
             TokenKind::LBracket => {
                 self.bump();

@@ -448,6 +448,9 @@ fn subst_ty(ty: &Ty, subst: &HashMap<SymbolId, Ty>) -> Ty {
         ),
         Ty::Weak(inner) => Ty::Weak(Box::new(subst_ty(inner, subst))),
         Ty::Vec(elem) => Ty::Vec(Box::new(subst_ty(elem, subst))),
+        Ty::Tuple(elems) => Ty::Tuple(
+            elems.iter().map(|t| subst_ty(t, subst)).collect(),
+        ),
         Ty::Dyn(s, args) => Ty::Dyn(
             *s,
             args.iter().map(|t| subst_ty(t, subst)).collect(),
@@ -624,6 +627,14 @@ fn subst_expr_kind(k: &HirExprKind, subst: &HashMap<SymbolId, Ty>) -> HirExprKin
         },
         Array { elems, elem_ty } => Array {
             elems: elems.iter().map(|e| subst_expr(e, subst)).collect(),
+            elem_ty: subst_ty(elem_ty, subst),
+        },
+        Tuple { elems } => Tuple {
+            elems: elems.iter().map(|e| subst_expr(e, subst)).collect(),
+        },
+        TupleIndex { receiver, index, elem_ty } => TupleIndex {
+            receiver: Box::new(subst_expr(receiver, subst)),
+            index: *index,
             elem_ty: subst_ty(elem_ty, subst),
         },
         Index { array, index, elem_ty } => Index {
@@ -1339,6 +1350,15 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
                 walk_tys_expr(el, f);
             }
         }
+        Tuple { elems } => {
+            for el in elems {
+                walk_tys_expr(el, f);
+            }
+        }
+        TupleIndex { receiver, elem_ty, .. } => {
+            f(elem_ty);
+            walk_tys_expr(receiver, f);
+        }
         Index { array, index, elem_ty } => {
             f(elem_ty);
             walk_tys_expr(array, f);
@@ -1486,6 +1506,14 @@ fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
             for el in elems {
                 walk_expr_collect_syms(el, max);
             }
+        }
+        Tuple { elems } => {
+            for el in elems {
+                walk_expr_collect_syms(el, max);
+            }
+        }
+        TupleIndex { receiver, .. } => {
+            walk_expr_collect_syms(receiver, max);
         }
         Index { array, index, .. } => {
             walk_expr_collect_syms(array, max);
