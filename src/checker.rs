@@ -3230,13 +3230,23 @@ impl<'r> Checker<'r> {
                         .collect();
                     // Concrete is either Ty::Fn(P, R) or
                     // Ty::Struct(closure_sym). Unify positionally.
+                    // Session 080: generalized for any arity. Fn1 has
+                    // 2 bound args (A, R); Fn2 has 3 (A, B, R); FnN
+                    // has N+1. The closure-struct's call signature
+                    // includes a leading Self, so its length is N+1
+                    // matching the bound's arity.
                     match &concrete {
                         Ty::Fn { params: p, ret: r } => {
-                            // For Fn1<A, R>: arg 0 = A, arg 1 = R.
-                            if bound_arg_tys.len() == 2 && p.len() == 1 {
+                            if bound_arg_tys.len() == p.len() + 1 {
                                 let before_len = subst.len();
-                                unify_typevars(&bound_arg_tys[0], &p[0], &mut subst);
-                                unify_typevars(&bound_arg_tys[1], r, &mut subst);
+                                for (i, p_ty) in p.iter().enumerate() {
+                                    unify_typevars(&bound_arg_tys[i], p_ty, &mut subst);
+                                }
+                                unify_typevars(
+                                    &bound_arg_tys[p.len()],
+                                    r,
+                                    &mut subst,
+                                );
                                 if subst.len() != before_len {
                                     changed = true;
                                 }
@@ -3244,7 +3254,7 @@ impl<'r> Checker<'r> {
                         }
                         Ty::Struct(struct_sym, _) => {
                             // Closure-struct case: look up the call
-                            // method's signature to read its (P, R).
+                            // method's signature to read its params.
                             if let Some(&call_sym) = self
                                 .res
                                 .impl_methods
@@ -3254,12 +3264,23 @@ impl<'r> Checker<'r> {
                                 if let Some(Ty::Fn { params: cp, ret: cr }) =
                                     self.fn_signatures.get(&call_span)
                                 {
-                                    // call sig is [Self, A] → R, so
-                                    // skip the leading Self param.
-                                    if cp.len() == 2 && bound_arg_tys.len() == 2 {
+                                    // call sig is [Self, A, B, ...] → R;
+                                    // bound is [A, B, ..., R]. So
+                                    // cp.len() == bound_arg_tys.len().
+                                    if cp.len() == bound_arg_tys.len() && cp.len() >= 2 {
                                         let before_len = subst.len();
-                                        unify_typevars(&bound_arg_tys[0], &cp[1], &mut subst);
-                                        unify_typevars(&bound_arg_tys[1], cr, &mut subst);
+                                        for i in 0..cp.len() - 1 {
+                                            unify_typevars(
+                                                &bound_arg_tys[i],
+                                                &cp[i + 1],
+                                                &mut subst,
+                                            );
+                                        }
+                                        unify_typevars(
+                                            &bound_arg_tys[cp.len() - 1],
+                                            cr,
+                                            &mut subst,
+                                        );
                                         if subst.len() != before_len {
                                             changed = true;
                                         }

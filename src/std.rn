@@ -134,6 +134,23 @@ pub mod std {
         {
             Map { iter: self, f: f }
         }
+        /* Session 080: `.fold(init, f)` reduces the iterator with
+           a binary closure. `init` pins the accumulator type `U`;
+           `f: Fn2<U, Self::Item, U>` takes the running accumulator
+           and the next item, returns the next accumulator.
+           Closure args generally need explicit type annotations
+           (`|acc: i64, x: i64| ...`) because method-call sites
+           don't yet flow bidirectional hints into closure args. */
+        fn fold<F: Fn2<U, Self::Item, U>, U>(self: Self, init: U, f: F) -> U {
+            let mut acc: U = init;
+            while true {
+                match self.next() {
+                    Option::Some(x) => { acc = f.call(acc, x); }
+                    Option::None => { break; }
+                }
+            }
+            acc
+        }
     }
 
     /* One-argument callable: a closure literal `|x| body` that
@@ -147,6 +164,17 @@ pub mod std {
        path. */
     pub trait Fn1<A, R> {
         fn call(self: Self, a: A) -> R;
+    }
+
+    /* Two-argument callable. Used by `.fold(init, f)` where the
+       closure's first arg is the accumulator and the second is the
+       next item. Same closure-as-struct shape as Fn1: each two-arg
+       closure site synthesizes a fresh struct + a `call(self, a, b)
+       -> r` method. The bound-propagation cascade (session 080)
+       handles Fn2 the same way as Fn1 — the arity comparisons
+       are generic. */
+    pub trait Fn2<A, B, R> {
+        fn call(self: Self, a: A, b: B) -> R;
     }
 
     /* Conversion from `Self` to `T`. The `?` operator calls

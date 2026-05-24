@@ -107,15 +107,17 @@ rune: linked with clang -> primes.exe
   from the closure's return type via the `F: Fn1<I::Item, U>`
   bound (no need to mention U directly in a field).
   **Iterator default methods** — `.collect()`, `.count()`, `.sum()`,
-  `.min()`, `.max()`, `.filter(p)`, `.map(f)` are declared as
-  default-body methods on the `Iterator` trait, so every implementor
-  inherits them. The pipeline reads as a method chain end-to-end:
-  `v.iter().filter(|x| x > 1).map(|x: i64| x * 10).sum()`. `.min()`
-  and `.max()` return `Option<i64>::Some(best)` over non-empty
-  iterators (i64-only until a `Numeric` trait lands). `.filter` and
-  `.map` take any callable (named fn, non-capturing closure, or
-  capturing closure), pinned through method-level generic params
-  with `Fn1` bounds.
+  `.min()`, `.max()`, `.filter(p)`, `.map(f)`, `.fold(init, f)` are
+  declared as default-body methods on the `Iterator` trait, so every
+  implementor inherits them. The pipeline reads as a method chain
+  end-to-end: `v.iter().filter(|x| x > 1).map(|x: i64| x * 10)
+  .fold(0, |a: i64, x: i64| a + x)`. `.min()` and `.max()` return
+  `Option<i64>::Some(best)` over non-empty iterators (i64-only until
+  a `Numeric` trait lands). `.filter` and `.map` take any callable
+  (named fn, non-capturing closure, or capturing closure), pinned
+  through method-level generic params with `Fn1` bounds; `.fold`
+  uses `Fn2<U, Self::Item, U>` for its (acc, next) -> acc binary
+  closure.
 - **Function-pointer values + closures (capturing)** — named
   `fn` items are first-class values; closure literals `|x| body`
   / `|x, y| body` / `|| body` lower to anonymous fn items
@@ -324,8 +326,10 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `.fold(init, f)` and multi-missing-generic inference
-2. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` beyond i64
+1. Bidirectional hints at method-call sites — unblocks unannotated
+   closures in `.fold` / `.map` / `.filter` chains
+2. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
+   `.fold(init, +)` beyond i64
 3. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
 4. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
 5. Method-call-position `Into` inference (let / fn-arg / struct-field hints)

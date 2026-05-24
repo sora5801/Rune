@@ -538,6 +538,114 @@ fn iterator_min_via_map_adapter() {
 }
 
 #[test]
+fn iterator_fold_default_method() {
+    // Session 080: `.fold(init, f)` lands as a default method on
+    // Iterator. The closure takes (acc, x) and returns the next
+    // acc. Multi-arg closure via Fn2 trait; cascade pins both U
+    // (from init) and F (from closure).
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4);
+            v.iter().fold(0, |acc: i64, x: i64| acc + x)
+        }
+    "#;
+    // 0 + 1 + 2 + 3 + 4 = 10
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn iterator_fold_with_named_fn() {
+    let src = r#"
+        fn add(a: i64, b: i64) -> i64 { a + b }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20); v.push(30);
+            v.iter().fold(0, add)
+        }
+    "#;
+    // 0 + 10 + 20 + 30 = 60
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn iterator_fold_init_nonzero() {
+    // Verify init isn't accidentally zeroed somewhere.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            v.iter().fold(100, |acc: i64, x: i64| acc + x)
+        }
+    "#;
+    // 100 + 1 + 2 + 3 = 106
+    assert_eq!(run_main(src), 106);
+}
+
+#[test]
+fn iterator_fold_on_range() {
+    let src = r#"
+        fn main() -> i64 {
+            (1..6).fold(0, |acc: i64, x: i64| acc + x)
+        }
+    "#;
+    // 1+2+3+4+5 = 15
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn iterator_fold_via_filter_map_chain() {
+    // .fold composes at the end of a method chain. Three adapter
+    // specializations of .fold's default body fire — VecIter,
+    // Filter, Map.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter()
+                .filter(|x| x > 1)
+                .map(|x: i64| x * 10)
+                .fold(0, |acc: i64, x: i64| acc + x)
+        }
+    "#;
+    // filter > 1 = [2,3,4,5]; map *10 = [20,30,40,50]; fold sum = 140
+    assert_eq!(run_main(src), 140);
+}
+
+#[test]
+fn iterator_fold_multiplies() {
+    // Closure does multiplication, not addition — tests that fold
+    // doesn't accidentally hardcode the operator.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(2); v.push(3); v.push(4);
+            v.iter().fold(1, |acc: i64, x: i64| acc * x)
+        }
+    "#;
+    // 1 * 2 * 3 * 4 = 24
+    assert_eq!(run_main(src), 24);
+}
+
+#[test]
+fn iterator_fold_with_capturing_closure() {
+    // Capturing closure → synthesized struct implementing Fn2.
+    // Tests that the bound-propagation cascade reads the call
+    // method's 3-arg signature [Self, A, B] -> R and pins the
+    // method-level generics correctly.
+    let src = r#"
+        fn main() -> i64 {
+            let scale: i64 = 3;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(4);
+            v.iter().fold(0, |acc: i64, x: i64| acc + x * scale)
+        }
+    "#;
+    // (1 + 2 + 4) * 3 = 21
+    assert_eq!(run_main(src), 21);
+}
+
+#[test]
 fn hashmap_entries_iter_yields_pairs() {
     // Session 075: m.entries() yields (key, value) tuples for
     // every live slot. Mirror of m.keys() (session 068) plus
