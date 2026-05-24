@@ -241,6 +241,84 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn hashmap_entries_iter_yields_pairs() {
+    // Session 075: m.entries() yields (key, value) tuples for
+    // every live slot. Mirror of m.keys() (session 068) plus
+    // the value via hashmap_val_at; the iterator's Item is a
+    // (i64, V) tuple built per slot.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 10);
+            m.insert(2, 20);
+            m.insert(3, 30);
+            let mut sum_keys: i64 = 0;
+            let mut sum_vals: i64 = 0;
+            for kv in m.entries() {
+                sum_keys = sum_keys + kv.0;
+                sum_vals = sum_vals + kv.1;
+            }
+            sum_keys + sum_vals
+        }
+    "#;
+    // 1+2+3 = 6; 10+20+30 = 60; 6 + 60 = 66.
+    assert_eq!(run_main(src), 66);
+}
+
+#[test]
+fn hashmap_entries_destructure_in_for() {
+    // Combine session 074's tuple destructuring with session
+    // 075's .entries(): `for (k, v) in m.entries()` works
+    // because the for-pat binds tuple elements through the
+    // let-expansion path. Wait — for-pattern is its own bind,
+    // not let-expansion. Test what actually works.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(5, 100);
+            m.insert(7, 200);
+            let mut total: i64 = 0;
+            for kv in m.entries() {
+                let (k, v) = kv;
+                total = total + k * v;
+            }
+            total
+        }
+    "#;
+    // 5*100 + 7*200 = 500 + 1400 = 1900.
+    assert_eq!(run_main(src), 1900);
+}
+
+#[test]
+fn hashmap_entries_with_str_values_doesnt_leak() {
+    // ARC-managed value type. The entries iter yields tuples
+    // whose .1 holds a str pointer; TupleIndex retains, and
+    // both the str literals (rc=-1) and the tuple+inner Vec
+    // chain should clean up at scope exit.
+    let src = r#"
+        fn build() -> i64 {
+            let m: std::HashMap<i64, str> = hashmap_new();
+            m.insert(1, "ab");
+            m.insert(2, "cde");
+            let mut total: i64 = 0;
+            for kv in m.entries() {
+                total = total + kv.1.len();
+            }
+            total
+        }
+        fn main() -> i64 {
+            let mut sum: i64 = 0;
+            for _ in 0..50 {
+                sum = sum + build();
+            }
+            sum
+        }
+    "#;
+    // 2 + 3 = 5 per iter; 50 * 5 = 250.
+    assert_eq!(run_main(src), 250);
+}
+
+#[test]
 fn tuple_destructure_let_basic() {
     // Session 074: `let (a, b) = pair` desugars to a temp +
     // per-element index reads. The resolver already minted

@@ -138,6 +138,7 @@ unsafe extern "C" {
     fn rune_hashmap_cap(m: *const u8) -> i64;
     fn rune_hashmap_is_live_at(m: *const u8, i: i64) -> i8;
     fn rune_hashmap_key_at(m: *const u8, i: i64) -> i64;
+    fn rune_hashmap_val_at(m: *const u8, i: i64) -> i64;
     fn rune_retain_hashmap(m: *mut u8);
     fn rune_release_hashmap(m: *mut u8);
 }
@@ -1180,6 +1181,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_hashmap_cap", rune_hashmap_cap as *const u8);
         builder.symbol("rune_hashmap_is_live_at", rune_hashmap_is_live_at as *const u8);
         builder.symbol("rune_hashmap_key_at", rune_hashmap_key_at as *const u8);
+        builder.symbol("rune_hashmap_val_at", rune_hashmap_val_at as *const u8);
         builder.symbol("rune_retain_hashmap", rune_retain_hashmap as *const u8);
         builder.symbol("rune_release_hashmap", rune_release_hashmap as *const u8);
         let module = JITModule::new(builder);
@@ -4077,6 +4079,13 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_hashmap_key_at", sig)
+        }
+        "hashmap_val_at" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_val_at", sig)
         }
         "retain_hashmap" => {
             let mut sig = module.make_signature();

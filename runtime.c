@@ -488,6 +488,16 @@ int64_t rune_hashmap_key_at(const struct rune_hashmap* m, int64_t i) {
     return m->keys[i];
 }
 
+// Session 075: companion to rune_hashmap_key_at — returns the
+// raw 8-byte value at slot `i` (caller must have already
+// checked `rune_hashmap_is_live_at`). For ARC value types, the
+// codegen-side retain when consuming the entry is the caller's
+// responsibility, mirroring how hashmap_get's value is treated.
+int64_t rune_hashmap_val_at(const struct rune_hashmap* m, int64_t i) {
+    if (m->cap == 0 || i < 0 || i >= m->cap) return 0;
+    return m->vals[i];
+}
+
 void rune_retain_hashmap(struct rune_hashmap* m) {
     if (m == NULL || m->rc == -1) return;
     m->rc += 1;

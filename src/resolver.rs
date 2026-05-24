@@ -880,6 +880,11 @@ impl Resolver {
             SymbolKind::PolyBuiltinFn("hashmap_key_at"),
         );
         self.intern(
+            "hashmap_val_at".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_val_at"),
+        );
+        self.intern(
             "std::HashMap".to_string(),
             zero,
             SymbolKind::BuiltinType(Ty::HashMap(

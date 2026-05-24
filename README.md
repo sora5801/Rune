@@ -314,7 +314,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. HashMap `.entries()` — yields `(K, V)` tuples (now unblocked)
+1. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
 2. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
 3. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
 4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)

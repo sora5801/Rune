@@ -3686,6 +3686,31 @@ impl<'r> Checker<'r> {
                 }
                 Ty::Int(crate::ty::IntTy::I64)
             }
+            "hashmap_val_at" => {
+                // Session 075: returns the V at slot `i`. Type is
+                // the map's V argument; caller-side retain on ARC
+                // values is the same pattern hashmap_get uses.
+                if arg_tys.len() != 2
+                    || !matches!(arg_tys[1], Ty::Int(_) | Ty::Error)
+                {
+                    self.error(
+                        span,
+                        "`hashmap_val_at(map, i)` expects (HashMap, i64)".to_string(),
+                    );
+                    return Ty::Error;
+                }
+                match &arg_tys[0] {
+                    Ty::HashMap(_, v) => (**v).clone(),
+                    Ty::Error => Ty::Error,
+                    _ => {
+                        self.error(
+                            span,
+                            "`hashmap_val_at(map, i)` expects (HashMap, i64)".to_string(),
+                        );
+                        Ty::Error
+                    }
+                }
+            }
             "hashmap_new" => {
                 // hashmap_new() -> HashMap<i64, V>. The V is left as
                 // a fresh inference TypeVar so the surrounding let's
@@ -4043,6 +4068,15 @@ impl<'r> Checker<'r> {
                 return Some(MethodSig {
                     params: vec![],
                     ret: Ty::Struct(keys_iter_sym, vec![(**v).clone()]),
+                });
+            }
+        }
+        if name == "entries" {
+            if let Ty::HashMap(_, v) = recv {
+                let entries_iter_sym = self.find_struct_sym("HashMapEntriesIter")?;
+                return Some(MethodSig {
+                    params: vec![],
+                    ret: Ty::Struct(entries_iter_sym, vec![(**v).clone()]),
                 });
             }
         }
@@ -4454,6 +4488,22 @@ fn apply_subst_inner_with(
         Ty::Weak(inner) => Ty::Weak(Box::new(apply_subst_inner_with(
             inner, subst, self_ty, bindings, res,
         ))),
+        Ty::Tuple(elems) => Ty::Tuple(
+            elems
+                .iter()
+                .map(|t| apply_subst_inner_with(t, subst, self_ty, bindings, res))
+                .collect(),
+        ),
+        Ty::HashMap(k, v) => Ty::HashMap(
+            Box::new(apply_subst_inner_with(k, subst, self_ty, bindings, res)),
+            Box::new(apply_subst_inner_with(v, subst, self_ty, bindings, res)),
+        ),
+        Ty::Dyn(s, args) => Ty::Dyn(
+            *s,
+            args.iter()
+                .map(|t| apply_subst_inner_with(t, subst, self_ty, bindings, res))
+                .collect(),
+        ),
         _ => ty.clone(),
     }
 }
