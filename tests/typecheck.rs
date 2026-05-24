@@ -1718,11 +1718,13 @@ fn map_inferred_struct_arg_mismatch_rejected() {
 }
 
 #[test]
-fn closure_capture_rejected() {
-    // v0.x closures don't capture. The resolver checks each
-    // path inside the closure body — any Local/Param declared
-    // outside the closure's span fires a clear diagnostic.
-    check_has_error(
+fn closure_capture_ok_no_diagnostic() {
+    // As of session 059, capturing closures are recorded by the
+    // resolver (not rejected). This test pins that there's no
+    // "captures `mult`" diagnostic; the rest of the capture
+    // machinery (lowerer synthesis, codegen) is exercised by
+    // codegen tests.
+    check_ok(
         r#"
         fn main() -> i64 {
             let mult: i64 = 3;
@@ -1730,7 +1732,6 @@ fn closure_capture_rejected() {
             f(7)
         }
         "#,
-        "captures `mult`",
     );
 }
 

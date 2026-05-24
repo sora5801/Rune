@@ -131,6 +131,21 @@ pub struct Resolutions {
     /// needs these to build the synthesized `HirFn`'s params; the
     /// checker reads them to bind types under contextual inference.
     pub closure_params: HashMap<Span, Vec<SymbolId>>,
+    /// Captures detected per closure span — Local/Param symbols
+    /// referenced inside the body whose declaration lies outside
+    /// the closure's source range. The lowerer materializes one
+    /// struct field per capture; the checker registers the synth
+    /// struct's layout from this list.
+    pub closure_captures: HashMap<Span, Vec<SymbolId>>,
+    /// Per-closure synthesized struct sym — the type of the
+    /// closure value at runtime (when capturing). Pure
+    /// fn-pointer-shaped (non-capturing) closures keep
+    /// `closure_fn_sym` and synthesize via session 057's path.
+    pub closure_struct_sym: HashMap<Span, SymbolId>,
+    /// Per-closure synthesized `call` method sym. Inserted into
+    /// `impl_methods[(closure_struct_sym, "call")]` so method
+    /// lookup resolves uniformly.
+    pub closure_call_method_sym: HashMap<Span, SymbolId>,
     /// Associated-type names each trait declares, in source order.
     pub trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     /// `(struct sym, associated-type name) → bound type`, from an
@@ -187,6 +202,9 @@ pub struct Resolver {
     impls_for: HashMap<SymbolId, std::collections::HashSet<SymbolId>>,
     closure_fn_sym: HashMap<Span, SymbolId>,
     closure_params: HashMap<Span, Vec<SymbolId>>,
+    closure_captures: HashMap<Span, Vec<SymbolId>>,
+    closure_struct_sym: HashMap<Span, SymbolId>,
+    closure_call_method_sym: HashMap<Span, SymbolId>,
     /// Stack of currently-open closure-body spans, outermost first.
     /// Inside a closure body, a Local/Param path that resolves to a
     /// sym whose declaration span lies *outside* the innermost
@@ -258,6 +276,9 @@ impl Resolver {
             impls_for: HashMap::new(),
             closure_fn_sym: HashMap::new(),
             closure_params: HashMap::new(),
+            closure_captures: HashMap::new(),
+            closure_struct_sym: HashMap::new(),
+            closure_call_method_sym: HashMap::new(),
             open_closure_spans: Vec::new(),
             lambda_counter: 0,
             assoc_proj_bases: HashMap::new(),
@@ -304,6 +325,9 @@ impl Resolver {
                 impls_for: self.impls_for,
                 closure_fn_sym: self.closure_fn_sym,
                 closure_params: self.closure_params,
+                closure_captures: self.closure_captures,
+                closure_struct_sym: self.closure_struct_sym,
+                closure_call_method_sym: self.closure_call_method_sym,
                 assoc_proj_bases: self.assoc_proj_bases,
                 trait_assoc_types: self.trait_assoc_types,
                 impl_assoc_bindings: self.impl_assoc_bindings,
@@ -684,7 +708,7 @@ impl Resolver {
     /// declaration span lies outside the innermost closure's span.
     /// v0.x closures don't capture; the diagnostic is the
     /// definitive signal the user can fix.
-    fn check_closure_capture(&mut self, resolved: SymbolId, use_span: Span) {
+    fn check_closure_capture(&mut self, resolved: SymbolId, _use_span: Span) {
         let Some(&closure_span) = self.open_closure_spans.last() else {
             return;
         };
@@ -695,16 +719,14 @@ impl Resolver {
         if sym.span.start >= closure_span.start && sym.span.end <= closure_span.end {
             return;
         }
-        let name = sym.name.clone();
-        self.error(
-            format!(
-                "closure captures `{}` from the enclosing scope; \
-                 capturing closures are not yet supported in v0.x — \
-                 use a named `fn` item or inline the value",
-                name
-            ),
-            use_span,
-        );
+        // Capture detected. Record it (deduped) on the closure's
+        // span list. The lowerer + checker materialize a synth
+        // struct field per capture; codegen treats the closure as
+        // a struct value with one field per captured binding.
+        let entry = self.closure_captures.entry(closure_span).or_default();
+        if !entry.contains(&resolved) {
+            entry.push(resolved);
+        }
     }
 
     fn intern_generic_param(&mut self, g: &crate::ast::GenericParam) -> SymbolId {
@@ -1546,6 +1568,57 @@ impl Resolver {
         self.resolve_expr(body);
         self.open_closure_spans.pop();
         self.exit_scope();
+        // If any captures were detected during body resolution,
+        // mint the synth struct + call method syms now. The
+        // lowerer materializes a struct value with one field per
+        // capture, plus an impl method whose body is the
+        // capture-rewritten lambda body. Non-capturing closures
+        // skip this and reuse the session-057 anonymous-fn path
+        // via `closure_fn_sym`.
+        if self.closure_captures.get(&span).map(|c| !c.is_empty()).unwrap_or(false) {
+            let struct_name = format!("__Closure_{}", counter);
+            let struct_sym = SymbolId(self.symbols.len() as u32);
+            self.symbols.push(Symbol {
+                name: struct_name.clone(),
+                span,
+                kind: SymbolKind::Struct,
+            });
+            let struct_qualified = if self.current_path.is_empty() {
+                struct_name.clone()
+            } else {
+                format!("{}::{}", self.current_path.join("::"), struct_name)
+            };
+            self.scopes[0].insert(struct_qualified, struct_sym);
+            self.closure_struct_sym.insert(span, struct_sym);
+
+            let call_name = format!("__Closure_{}__call", counter);
+            let call_sym = SymbolId(self.symbols.len() as u32);
+            self.symbols.push(Symbol {
+                name: call_name,
+                span,
+                kind: SymbolKind::Fn,
+            });
+            self.closure_call_method_sym.insert(span, call_sym);
+            // Register as an impl method so monomorphize's
+            // resolve_method_calls can rewrite `x.call(arg)` on a
+            // closure struct into a direct Call.
+            self.impl_methods.insert((struct_sym, "call".into()), call_sym);
+            // Mark the closure struct as implementing Fn1 (found
+            // by name). The conformance check in `check_assignable`
+            // reads this set when a closure value is coerced to a
+            // Ty::Fn position. If Fn1 isn't in the prelude yet
+            // (shouldn't happen at this point), skip silently —
+            // the dispatch falls through to other paths.
+            for (idx, sym) in self.symbols.iter().enumerate() {
+                if sym.name == "Fn1" && matches!(sym.kind, SymbolKind::Trait) {
+                    self.impls_for
+                        .entry(struct_sym)
+                        .or_default()
+                        .insert(SymbolId(idx as u32));
+                    break;
+                }
+            }
+        }
     }
 }
 

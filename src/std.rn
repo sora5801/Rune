@@ -28,6 +28,19 @@ pub mod std {
         fn next(self: dyn Iterator) -> Option<Self::Item>;
     }
 
+    /* One-argument callable: a closure literal `|x| body` that
+       captures from the enclosing scope synthesizes a fresh
+       struct implementing this trait (the closure-as-struct
+       design). Each closure site has its own concrete impl with
+       `A` and `R` pinned to the closure's actual signature; the
+       call dispatches via the synthesized `call` method. Named
+       `fn` items don't implement `Fn1` explicitly — they remain
+       `Ty::Fn` pointers, called via the existing IndirectCall
+       path. */
+    pub trait Fn1<A, R> {
+        fn call(self: Self, a: A) -> R;
+    }
+
     /* Iterator over the elements of a `Vec<T>`. Holds the source
        vec and the current index; constructed by the builtin
        `vec.iter()` method. */
