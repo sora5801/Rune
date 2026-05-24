@@ -1665,6 +1665,11 @@ impl Resolver {
                     self.declare_pattern(sub, mutable_let);
                 }
             }
+            Pattern::Tuple { patterns, .. } => {
+                for sub in patterns {
+                    self.declare_pattern(sub, mutable_let);
+                }
+            }
         }
     }
 

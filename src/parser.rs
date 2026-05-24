@@ -790,6 +790,41 @@ impl Parser {
     fn parse_pattern_atom(&mut self) -> ParseResult<Pattern> {
         let span = self.peek_span();
         match self.peek() {
+            TokenKind::LParen => {
+                // Session 074: tuple pattern (p0, p1, ...). The
+                // parser disambiguates `(p)` parenthesized
+                // (returns the inner pattern) from `(p, q, ...)`
+                // tuple by checking for a comma after the first
+                // inner pattern. `()` and `(p,)` are also
+                // accepted as 0- and 1-tuples for symmetry with
+                // the value-position syntax.
+                self.bump();
+                if self.check(&TokenKind::RParen) {
+                    let close = self.expect(&TokenKind::RParen, "`)`")?;
+                    return Ok(Pattern::Tuple {
+                        patterns: Vec::new(),
+                        span: Span::new(span.start, close.span.end),
+                    });
+                }
+                let first = self.parse_pattern()?;
+                if self.eat(&TokenKind::Comma) {
+                    let mut patterns = vec![first];
+                    while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                        patterns.push(self.parse_pattern()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RParen, "`)`")?;
+                    Ok(Pattern::Tuple {
+                        patterns,
+                        span: Span::new(span.start, close.span.end),
+                    })
+                } else {
+                    self.expect(&TokenKind::RParen, "`)`")?;
+                    Ok(first)
+                }
+            }
             TokenKind::Ident(name) if name == "_" => {
                 self.bump();
                 Ok(Pattern::Wildcard(span))

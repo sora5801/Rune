@@ -1315,6 +1315,14 @@ impl<'r> Checker<'r> {
                     );
                 }
             }
+            Pattern::Tuple { span, .. } => {
+                // Session 074: tuple patterns aren't a match-arm
+                // pattern in v0.x — only let-binding destructuring.
+                // Treat as catch-all for now so match-coverage
+                // doesn't crash; the type-check will already have
+                // rejected non-let usages.
+                *catchall_seen = Some(*span);
+            }
         }
     }
 
@@ -1392,6 +1400,37 @@ impl<'r> Checker<'r> {
                         );
                     }
                     self.check_pattern_matches(sub, scrutinee_ty);
+                }
+            }
+            Pattern::Tuple { patterns, span } => {
+                // Session 074: tuple patterns in match arms aren't
+                // supported in v0.x (deferred). Surface a clear
+                // error rather than silently accepting.
+                match scrutinee_ty {
+                    Ty::Tuple(elems) => {
+                        if patterns.len() != elems.len() {
+                            self.error(
+                                *span,
+                                format!(
+                                    "tuple pattern arity {} doesn't match `{}`",
+                                    patterns.len(),
+                                    scrutinee_ty.display()
+                                ),
+                            );
+                        }
+                        // Best-effort: type-check sub-patterns.
+                        for (sub, elem_ty) in patterns.iter().zip(elems.iter()) {
+                            self.check_pattern_matches(sub, elem_ty);
+                        }
+                    }
+                    Ty::Error => {}
+                    _ => self.error(
+                        *span,
+                        format!(
+                            "tuple pattern cannot match value of type `{}`",
+                            scrutinee_ty.display()
+                        ),
+                    ),
                 }
             }
         }
@@ -1526,6 +1565,46 @@ impl<'r> Checker<'r> {
             Pattern::Or { patterns, .. } => {
                 for sub in patterns {
                     self.bind_pattern(sub, ty);
+                }
+            }
+            Pattern::Tuple { patterns, span } => {
+                // Bind each sub-pattern to the corresponding tuple
+                // element type. Mismatches between pattern arity
+                // and the scrutinee's Ty::Tuple length surface as
+                // a type error here; the lowerer's let-desugar
+                // assumes lengths match.
+                match ty {
+                    Ty::Tuple(elems) => {
+                        if patterns.len() != elems.len() {
+                            self.error(
+                                *span,
+                                format!(
+                                    "tuple pattern has {} element(s) but value has type `{}` with {}",
+                                    patterns.len(),
+                                    ty.display(),
+                                    elems.len()
+                                ),
+                            );
+                            return;
+                        }
+                        for (sub, elem_ty) in patterns.iter().zip(elems.iter()) {
+                            self.bind_pattern(sub, elem_ty);
+                        }
+                    }
+                    Ty::Error => {
+                        for sub in patterns {
+                            self.bind_pattern(sub, &Ty::Error);
+                        }
+                    }
+                    _ => {
+                        self.error(
+                            *span,
+                            format!(
+                                "tuple pattern cannot destructure value of type `{}`",
+                                ty.display()
+                            ),
+                        );
+                    }
                 }
             }
         }

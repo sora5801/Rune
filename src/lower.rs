@@ -201,6 +201,7 @@ impl<'a> Lowerer<'a> {
             // Filled by the monomorphizer once every type is concrete.
             vec_arc_elem_tys: Vec::new(),
             hashmap_arc_val_tys: Vec::new(),
+            tuple_shapes: Vec::new(),
             array_tys: Vec::new(),
             trait_methods,
             trait_methods_flat,
@@ -342,6 +343,22 @@ impl<'a> Lowerer<'a> {
         for s in &b.stmts {
             match s {
                 ast::Stmt::Let(l) => {
+                    // Session 074: `let (a, b) = pair` destructures
+                    // via a synthetic temporary that gets the
+                    // whole tuple, plus one `let` per leaf binding
+                    // reading via TupleIndex. The resolver already
+                    // minted symbols for the leaf Idents (through
+                    // declare_pattern), so the only fresh sym we
+                    // need is the temp's. Nested tuple patterns
+                    // recurse through the same path: bind to a
+                    // fresh inner-tuple temp, then index into it.
+                    if let ast::Pattern::Tuple { patterns, .. } = &l.pat {
+                        if let Some(init) = &l.init {
+                            self.expand_tuple_let(patterns, init, &mut stmts);
+                            last_ty = Ty::Unit;
+                            continue;
+                        }
+                    }
                     stmts.push(HirStmt::Let(self.lower_let(l)));
                     last_ty = Ty::Unit;
                 }
@@ -359,6 +376,150 @@ impl<'a> Lowerer<'a> {
         HirBlock { stmts, ty: last_ty }
     }
 
+    /// Session 074: expand `let (a, b) = init` into:
+    ///   let __tmp = init;
+    ///   let a = __tmp.0;
+    ///   let b = __tmp.1;
+    /// Nested tuple sub-patterns recurse — `let (a, (b, c)) = ...`
+    /// emits an inner temp for the `(b, c)` shape. Wildcard
+    /// sub-patterns produce no binding for that slot (the value
+    /// is still loaded and immediately dropped — for ARC types
+    /// this is wrong without an explicit release; deferred,
+    /// like session-073's release walk caveats).
+    fn expand_tuple_let(
+        &self,
+        patterns: &[ast::Pattern],
+        init: &ast::Expr,
+        out: &mut Vec<HirStmt>,
+    ) {
+        let init_hir = self.lower_expr(init);
+        let elem_tys: Vec<Ty> = match &init_hir.ty {
+            Ty::Tuple(elems) => elems.clone(),
+            _ => return, // checker already errored
+        };
+        let temp_sym = self.fresh_sym();
+        let tuple_ty = init_hir.ty.clone();
+        out.push(HirStmt::Let(HirLet {
+            sym: Some(temp_sym),
+            mutable: false,
+            ty: tuple_ty.clone(),
+            init: Some(init_hir),
+        }));
+        for (i, sub_pat) in patterns.iter().enumerate() {
+            let Some(elem_ty) = elem_tys.get(i).cloned() else { continue };
+            let read = HirExpr {
+                kind: HirExprKind::TupleIndex {
+                    receiver: Box::new(HirExpr {
+                        kind: HirExprKind::Local(temp_sym),
+                        ty: tuple_ty.clone(),
+                    }),
+                    index: i as u32,
+                    elem_ty: elem_ty.clone(),
+                },
+                ty: elem_ty.clone(),
+            };
+            match sub_pat {
+                ast::Pattern::Wildcard(_) => {
+                    // Evaluate-and-discard. For non-ARC slots
+                    // this is a no-op load; for ARC slots
+                    // TupleIndex retains, so we'd need to
+                    // release — defer (rare in destructuring).
+                    out.push(HirStmt::Expr(read, true));
+                }
+                ast::Pattern::Ident { name, mutable, .. } => {
+                    let sym = self.res.decl_to_sym.get(&name.span).copied();
+                    out.push(HirStmt::Let(HirLet {
+                        sym,
+                        mutable: *mutable,
+                        ty: elem_ty,
+                        init: Some(read),
+                    }));
+                }
+                ast::Pattern::Tuple { patterns: inner, .. } => {
+                    // Recurse: bind to a temp, then expand
+                    // the inner pattern. We can't call
+                    // expand_tuple_let directly (it takes an
+                    // ast::Expr, not HirExpr), so synthesize an
+                    // anonymous HirLet for the inner temp and
+                    // proceed recursively via a re-entry.
+                    let inner_tmp = self.fresh_sym();
+                    out.push(HirStmt::Let(HirLet {
+                        sym: Some(inner_tmp),
+                        mutable: false,
+                        ty: elem_ty.clone(),
+                        init: Some(read),
+                    }));
+                    self.expand_tuple_let_from_local(inner, inner_tmp, &elem_ty, out);
+                }
+                _ => {
+                    // Other sub-patterns (Literal, Range, Or,
+                    // EnumVariant) aren't supported in let
+                    // destructuring; the checker will have
+                    // accepted them as best-effort but lower
+                    // here just drops the value.
+                    out.push(HirStmt::Expr(read, true));
+                }
+            }
+        }
+    }
+
+    /// Variant of expand_tuple_let where the source is already
+    /// a HIR local (the inner-tuple temp). Mirror of the outer
+    /// case minus the init lowering.
+    fn expand_tuple_let_from_local(
+        &self,
+        patterns: &[ast::Pattern],
+        source_sym: SymbolId,
+        source_ty: &Ty,
+        out: &mut Vec<HirStmt>,
+    ) {
+        let elem_tys: Vec<Ty> = match source_ty {
+            Ty::Tuple(elems) => elems.clone(),
+            _ => return,
+        };
+        for (i, sub_pat) in patterns.iter().enumerate() {
+            let Some(elem_ty) = elem_tys.get(i).cloned() else { continue };
+            let read = HirExpr {
+                kind: HirExprKind::TupleIndex {
+                    receiver: Box::new(HirExpr {
+                        kind: HirExprKind::Local(source_sym),
+                        ty: source_ty.clone(),
+                    }),
+                    index: i as u32,
+                    elem_ty: elem_ty.clone(),
+                },
+                ty: elem_ty.clone(),
+            };
+            match sub_pat {
+                ast::Pattern::Wildcard(_) => {
+                    out.push(HirStmt::Expr(read, true));
+                }
+                ast::Pattern::Ident { name, mutable, .. } => {
+                    let sym = self.res.decl_to_sym.get(&name.span).copied();
+                    out.push(HirStmt::Let(HirLet {
+                        sym,
+                        mutable: *mutable,
+                        ty: elem_ty,
+                        init: Some(read),
+                    }));
+                }
+                ast::Pattern::Tuple { patterns: inner, .. } => {
+                    let inner_tmp = self.fresh_sym();
+                    out.push(HirStmt::Let(HirLet {
+                        sym: Some(inner_tmp),
+                        mutable: false,
+                        ty: elem_ty.clone(),
+                        init: Some(read),
+                    }));
+                    self.expand_tuple_let_from_local(inner, inner_tmp, &elem_ty, out);
+                }
+                _ => {
+                    out.push(HirStmt::Expr(read, true));
+                }
+            }
+        }
+    }
+
     fn lower_let(&self, l: &ast::LetStmt) -> HirLet {
         let (sym, mutable) = match &l.pat {
             ast::Pattern::Wildcard(_) => (None, l.mutable),
@@ -371,6 +532,7 @@ impl<'a> Lowerer<'a> {
             | ast::Pattern::Range { .. }
             | ast::Pattern::TupleVariant { .. }
             | ast::Pattern::NamedVariant { .. }
+            | ast::Pattern::Tuple { .. }
             | ast::Pattern::Or { .. } => {
                 // `let` doesn't currently use any of these patterns;
                 // resolver / checker either accept them as no-ops or
@@ -1645,6 +1807,14 @@ impl<'a> Lowerer<'a> {
                     self.collect_arm_patterns(sub, out, subst)?;
                 }
             }
+            ast::Pattern::Tuple { .. } => {
+                // Session 074: tuple patterns aren't supported in
+                // match arms (only in `let` destructuring, which
+                // lower_block handles before reaching this path).
+                return Err(
+                    "tuple patterns in match arms aren't supported in v0.x".into(),
+                );
+            }
         }
         Ok(())
     }
@@ -1663,6 +1833,7 @@ impl<'a> Lowerer<'a> {
             | ast::Pattern::Range { .. }
             | ast::Pattern::TupleVariant { .. }
             | ast::Pattern::NamedVariant { .. }
+            | ast::Pattern::Tuple { .. }
             | ast::Pattern::Or { .. } => {
                 return HirExprKind::Unsupported(
                     "for-loop pattern must be an identifier or `_`".into(),

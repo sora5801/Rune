@@ -69,6 +69,10 @@ pub struct Codegen<M: Module> {
     /// `Ty`; the function walks a Vec's live elements releasing each.
     vec_release_funcs: HashMap<Ty, FuncId>,
     hashmap_release_funcs: HashMap<Ty, FuncId>,
+    /// Session 074: per-tuple-shape release fn IDs. Keyed by the
+    /// element-types list (cloned from `HirModule::tuple_shapes`)
+    /// — distinct shapes hash to distinct entries.
+    tuple_release_funcs: HashMap<Vec<Ty>, FuncId>,
     /// Per-trait ordered method names — the trait-object method-table
     /// layout. `(type_sym, method) → impl fn sym` for building tables.
     trait_methods: HashMap<SymbolId, Vec<String>>,
@@ -188,6 +192,24 @@ impl<M: Module> Codegen<M> {
                 .map_err(|e| CodegenError(e.to_string()))?;
             self.vec_release_funcs.insert(elem.clone(), id);
         }
+        // Pass 0 (cont.): declare a per-shape release function for
+        // each distinct tuple shape used in the program. The body
+        // walks ARC elements before deallocating the heap block.
+        for shape in &hir.tuple_shapes {
+            let mangled = shape
+                .iter()
+                .map(mangle_ty_name)
+                .collect::<Vec<_>>()
+                .join("_");
+            let name = format!("__rune_release_tuple${}_{}", shape.len(), mangled);
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = self
+                .module
+                .declare_function(&name, Linkage::Local, &sig)
+                .map_err(|e| CodegenError(e.to_string()))?;
+            self.tuple_release_funcs.insert(shape.clone(), id);
+        }
         // Pass 0 (cont.): declare a per-V release function for each
         // ARC-managed HashMap value type. Walks the occupied slots
         // releasing each value, then hands off to the runtime's
@@ -258,6 +280,9 @@ impl<M: Module> Codegen<M> {
         }
         for (v_ty, &func_id) in &self.hashmap_release_funcs.clone() {
             self.define_hashmap_release(v_ty, func_id)?;
+        }
+        for (shape, &func_id) in &self.tuple_release_funcs.clone() {
+            self.define_tuple_release(shape, func_id)?;
         }
         for (&sym, &func_id) in &self.dyn_release_funcs.clone() {
             self.define_dyn_release(sym, func_id)?;
@@ -604,6 +629,16 @@ impl<M: Module> Codegen<M> {
                 return Ok(());
             }
         }
+        // Session 074: tuples dispatch to the per-shape release fn
+        // synthesized in Pass 3. Each shape's body decrements rc
+        // and, at zero, releases ARC slots and deallocates.
+        if let Ty::Tuple(elems) = ty {
+            if let Some(&func_id) = self.tuple_release_funcs.get(elems) {
+                let local = self.module.declare_func_in_func(func_id, builder.func);
+                builder.ins().call(local, &[value]);
+                return Ok(());
+            }
+        }
         // Vec / Str: runtime helper.
         let helper = arc_helper_name("release", ty)?;
         let func_id = self.ensure_runtime_func(helper)?;
@@ -695,6 +730,92 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(done);
         builder.ins().return_(&[]);
         builder.finalize();
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| CodegenError(e.to_string()))?;
+        self.module.clear_context(&mut ctx);
+        Ok(())
+    }
+
+    /// Session 074: per-shape release function for a tuple
+    /// `(T0, T1, ..., Tn-1)`. The heap block is `N*8` field bytes
+    /// followed by an rc slot (the layout `rune_struct_new`
+    /// produces). The walk:
+    ///   - null guard.
+    ///   - load rc; bail if not 1 (only the final drop walks).
+    ///   - for each ARC-typed slot i, load the i*8 word and
+    ///     dispatch to that type's release helper.
+    ///   - call rune_struct_dealloc to free the block.
+    fn define_tuple_release(
+        &mut self,
+        shape: &[Ty],
+        func_id: FuncId,
+    ) -> Result<(), CodegenError> {
+        let mut ctx = self.module.make_context();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        ctx.func.signature = sig;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_ctx);
+
+        let entry = builder.create_block();
+        let walk = builder.create_block();
+        let finish = builder.create_block();
+        let done = builder.create_block();
+
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+        let p = builder.block_params(entry)[0];
+        let zero = builder.ins().iconst(types::I64, 0);
+        let is_null = builder.ins().icmp(IntCC::Equal, p, zero);
+        builder.ins().brif(is_null, done, &[], walk, &[]);
+
+        builder.switch_to_block(walk);
+        builder.seal_block(walk);
+        // rc is at offset N*8 (the trailing slot rune_struct_new
+        // appends; the field area is exactly N*8 bytes).
+        let field_size = (shape.len() as u32) * 8;
+        let rc_offset = field_size as i32;
+        // Decrement rc. If still >0, the tuple has other owners;
+        // bail without releasing slots.
+        let rc = builder.ins().load(types::I64, MemFlags::new(), p, rc_offset);
+        let one = builder.ins().iconst(types::I64, 1);
+        let new_rc = builder.ins().isub(rc, one);
+        builder.ins().store(MemFlags::new(), new_rc, p, rc_offset);
+        let still_alive = builder.ins().icmp(IntCC::SignedGreaterThan, new_rc, zero);
+        builder.ins().brif(still_alive, done, &[], finish, &[]);
+
+        builder.switch_to_block(finish);
+        builder.seal_block(finish);
+        // Release each ARC element. Non-ARC slots get a no-op
+        // (emit_release_field handles primitives by passing them
+        // through to a release helper that null-checks, but for
+        // types like i64 / bool there is no helper — so skip
+        // those slots entirely.
+        for (i, elem_ty) in shape.iter().enumerate() {
+            if !is_arc_type(elem_ty, &self.struct_arc_fields, &self.enum_has_payload) {
+                continue;
+            }
+            let off = (i as i32) * 8;
+            let v = builder.ins().load(types::I64, MemFlags::new(), p, off);
+            self.emit_release_field(&mut builder, elem_ty, v)?;
+        }
+        // Free the heap block. rune_struct_dealloc signature
+        // matches what compile_struct_lit and friends use.
+        let dealloc_id = self.ensure_runtime_func("struct_dealloc")?;
+        let dealloc_local = self.module.declare_func_in_func(dealloc_id, builder.func);
+        let size_v = builder
+            .ins()
+            .iconst(types::I64, field_size as i64);
+        builder.ins().call(dealloc_local, &[p, size_v]);
+        builder.ins().jump(done, &[]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+        builder.ins().return_(&[]);
+        builder.finalize();
+
         self.module
             .define_function(func_id, &mut ctx)
             .map_err(|e| CodegenError(e.to_string()))?;
@@ -949,6 +1070,7 @@ impl<M: Module> Codegen<M> {
             enum_payload_tys: &self.enum_payload_tys,
             vec_release_funcs: &self.vec_release_funcs,
             hashmap_release_funcs: &self.hashmap_release_funcs,
+            tuple_release_funcs: &self.tuple_release_funcs,
             trait_methods_flat: &self.trait_methods_flat,
             impl_methods: &self.impl_methods,
             dyn_release_funcs: &self.dyn_release_funcs,
@@ -1075,6 +1197,7 @@ impl Codegen<JITModule> {
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
             hashmap_release_funcs: HashMap::new(),
+            tuple_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
@@ -1136,6 +1259,7 @@ impl Codegen<ObjectModule> {
             enum_release_funcs: HashMap::new(),
             vec_release_funcs: HashMap::new(),
             hashmap_release_funcs: HashMap::new(),
+            tuple_release_funcs: HashMap::new(),
             trait_methods: HashMap::new(),
             trait_methods_flat: HashMap::new(),
             impl_methods: HashMap::new(),
@@ -1218,6 +1342,7 @@ struct FnCodegen<'a, M: Module> {
     enum_payload_tys: &'a HashMap<SymbolId, Vec<Vec<Ty>>>,
     vec_release_funcs: &'a HashMap<Ty, FuncId>,
     hashmap_release_funcs: &'a HashMap<Ty, FuncId>,
+    tuple_release_funcs: &'a HashMap<Vec<Ty>, FuncId>,
     trait_methods_flat: &'a HashMap<SymbolId, Vec<(SymbolId, String)>>,
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
@@ -1520,6 +1645,41 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     self.builder.ins().call(local_func, &[value]);
                     return Ok(());
                 }
+            }
+        }
+        // Session 074: tuples — retain bumps the trailing rc
+        // slot (at offset N*8) directly; release dispatches to
+        // the synthesized per-shape release fn.
+        if let Ty::Tuple(elems) = ty {
+            match action {
+                "retain" => {
+                    let off = (elems.len() as i32) * 8;
+                    let rc = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        value,
+                        off,
+                    );
+                    let one = self.builder.ins().iconst(types::I64, 1);
+                    let new_rc = self.builder.ins().iadd(rc, one);
+                    self.builder.ins().store(
+                        MemFlags::new(),
+                        new_rc,
+                        value,
+                        off,
+                    );
+                    return Ok(());
+                }
+                "release" => {
+                    if let Some(&func_id) = self.tuple_release_funcs.get(elems) {
+                        let local_func = self
+                            .module
+                            .declare_func_in_func(func_id, self.builder.func);
+                        self.builder.ins().call(local_func, &[value]);
+                        return Ok(());
+                    }
+                }
+                _ => {}
             }
         }
         let helper = arc_helper_name(action, ty)?;
@@ -3702,14 +3862,11 @@ fn is_arc_type(
         Ty::Dyn(_, _) => true,
         // A heap array is a refcounted block in its own right.
         Ty::Array(_, _) => true,
-        // Session 073: tuples ARE heap blocks but ARC release per
-        // shape (walking ARC elements before dealloc) isn't wired
-        // yet. For v0.x, treat tuples as non-ARC so the codegen
-        // skips retain/release on them — the heap block leaks at
-        // scope exit, but the program runs correctly. Adding the
-        // synth release walk per shape is the natural next step;
-        // mirrors session 067's HashMap pattern.
-        Ty::Tuple(_) => false,
+        // Session 074: tuples are heap blocks reclaimed by their
+        // synth per-shape release fn — same shape as Vec / array /
+        // HashMap. The release walks ARC elements before calling
+        // rune_struct_dealloc to free the block.
+        Ty::Tuple(_) => true,
         _ => false,
     }
 }

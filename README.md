@@ -314,8 +314,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Tuple destructuring patterns + per-shape ARC release
-2. HashMap `.entries()` — yields `(K, V)` tuples
+1. HashMap `.entries()` — yields `(K, V)` tuples (now unblocked)
+2. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
 3. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
 4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
 5. Self-hosted bootstrap (long-term)

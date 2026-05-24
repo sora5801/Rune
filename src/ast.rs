@@ -303,6 +303,12 @@ pub enum Pattern {
     /// `pat | pat | pat` — matches if any alternative matches. Nested Or
     /// is flattened by the parser; the inner Vec never contains another Or.
     Or { patterns: Vec<Pattern>, span: Span },
+    /// Session 074: `(p0, p1, ...)` — destructures a tuple. v0.x
+    /// supports this only in `let` bindings; the lowerer desugars
+    /// `let (a, b) = pair` into `let __tmp = pair; let a = __tmp.0;
+    /// let b = __tmp.1;`. Match-arm tuple patterns aren't wired
+    /// yet (would need a HirPattern::Tuple equivalent).
+    Tuple { patterns: Vec<Pattern>, span: Span },
 }
 
 impl Pattern {
@@ -316,6 +322,7 @@ impl Pattern {
             Pattern::NamedVariant { span, .. } => *span,
             Pattern::Range { span, .. } => *span,
             Pattern::Or { span, .. } => *span,
+            Pattern::Tuple { span, .. } => *span,
         }
     }
 }

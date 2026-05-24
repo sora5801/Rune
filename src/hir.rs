@@ -51,6 +51,15 @@ pub struct HirModule {
     /// walks its occupied slots and releases each value before
     /// freeing the descriptor — closes the leak from session 064.
     pub hashmap_arc_val_tys: Vec<Ty>,
+    /// Distinct tuple shapes reachable from the program. Each
+    /// shape (a `Vec<Ty>`) gets a synthesized
+    /// `__rune_release_tuple$<shape>` function in codegen that
+    /// walks ARC elements before freeing the heap block. Sized
+    /// as `N*8` bytes for an N-tuple, plus the trailing rc slot
+    /// (allocated by `rune_struct_new`, the same path Vec / array
+    /// / dyn / struct use). Shapes are kept verbatim so the
+    /// element-by-element release walk knows each slot's type.
+    pub tuple_shapes: Vec<Vec<Ty>>,
     /// Distinct fixed-size array types (`[T; N]`) used anywhere in
     /// the program. A heap array is a refcounted block, so codegen
     /// synthesizes one release function (`__rune_release_array$<ty>`)

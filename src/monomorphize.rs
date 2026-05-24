@@ -189,6 +189,7 @@ impl MonoState {
         // element types so codegen can synthesize per-element release.
         module.vec_arc_elem_tys = collect_vec_arc_elems(module);
         module.hashmap_arc_val_tys = collect_hashmap_arc_vals(module);
+        module.tuple_shapes = collect_tuple_shapes(module);
         module.array_tys = collect_array_tys(module);
     }
 
@@ -1105,6 +1106,7 @@ fn is_arc_mono(t: &Ty, enum_has_payload: &std::collections::HashSet<SymbolId>) -
         Ty::Vec(_) | Ty::Str | Ty::Struct(_, _) | Ty::Weak(_) | Ty::Dyn(_, _) => true,
         Ty::HashMap(_, _) => true,
         Ty::Array(_, _) => true,
+        Ty::Tuple(_) => true,
         Ty::Enum(s, _) => enum_has_payload.contains(s),
         _ => false,
     }
@@ -1130,6 +1132,11 @@ fn scan_ty_for_vec_elems(
         Ty::Array(e, _) | Ty::Weak(e) => {
             scan_ty_for_vec_elems(e, enum_has_payload, out)
         }
+        Ty::Tuple(elems) => {
+            for e in elems {
+                scan_ty_for_vec_elems(e, enum_has_payload, out);
+            }
+        }
         Ty::Struct(_, args) | Ty::Enum(_, args) => {
             for a in args {
                 scan_ty_for_vec_elems(a, enum_has_payload, out);
@@ -1137,6 +1144,68 @@ fn scan_ty_for_vec_elems(
         }
         _ => {}
     }
+}
+
+/// Record every tuple shape used in the (fully monomorphized)
+/// module. A shape is just the Vec<Ty> of element types in
+/// declaration order; the codegen pass synthesizes one
+/// release function per distinct shape. Recurses so a
+/// `Vec<(i64, str)>` contributes the `(i64, str)` shape.
+fn scan_ty_for_tuple_shapes(ty: &Ty, out: &mut Vec<Vec<Ty>>) {
+    match ty {
+        Ty::Tuple(elems) => {
+            if !out.contains(elems) {
+                out.push(elems.clone());
+            }
+            for e in elems {
+                scan_ty_for_tuple_shapes(e, out);
+            }
+        }
+        Ty::Vec(e) | Ty::Array(e, _) | Ty::Weak(e) => {
+            scan_ty_for_tuple_shapes(e, out);
+        }
+        Ty::HashMap(k, v) => {
+            scan_ty_for_tuple_shapes(k, out);
+            scan_ty_for_tuple_shapes(v, out);
+        }
+        Ty::Struct(_, args) | Ty::Enum(_, args) | Ty::Dyn(_, args) => {
+            for a in args {
+                scan_ty_for_tuple_shapes(a, out);
+            }
+        }
+        Ty::Fn { params, ret } => {
+            for p in params {
+                scan_ty_for_tuple_shapes(p, out);
+            }
+            scan_ty_for_tuple_shapes(ret, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_tuple_shapes(module: &HirModule) -> Vec<Vec<Ty>> {
+    let mut out: Vec<Vec<Ty>> = Vec::new();
+    for item in &module.items {
+        let HirItem::Fn(f) = item;
+        for p in &f.params {
+            scan_ty_for_tuple_shapes(&p.ty, &mut out);
+        }
+        scan_ty_for_tuple_shapes(&f.ret_ty, &mut out);
+        walk_tys_block(&f.body, &mut |t| scan_ty_for_tuple_shapes(t, &mut out));
+    }
+    for fields in module.struct_arc_fields.values() {
+        for (_, t) in fields {
+            scan_ty_for_tuple_shapes(t, &mut out);
+        }
+    }
+    for variants in module.enum_payload_tys.values() {
+        for v in variants {
+            for t in v {
+                scan_ty_for_tuple_shapes(t, &mut out);
+            }
+        }
+    }
+    out
 }
 
 fn scan_ty_for_hashmap_vals(
@@ -1153,6 +1222,11 @@ fn scan_ty_for_hashmap_vals(
         }
         Ty::Vec(elem) | Ty::Array(elem, _) | Ty::Weak(elem) => {
             scan_ty_for_hashmap_vals(elem, enum_has_payload, out);
+        }
+        Ty::Tuple(elems) => {
+            for e in elems {
+                scan_ty_for_hashmap_vals(e, enum_has_payload, out);
+            }
         }
         Ty::Struct(_, args) | Ty::Enum(_, args) => {
             for a in args {
@@ -1237,6 +1311,11 @@ fn scan_ty_for_arrays(ty: &Ty, out: &mut Vec<Ty>) {
         }
         Ty::Vec(e) | Ty::Weak(e) => scan_ty_for_arrays(e, out),
         Ty::HashMap(_, v) => scan_ty_for_arrays(v, out),
+        Ty::Tuple(elems) => {
+            for e in elems {
+                scan_ty_for_arrays(e, out);
+            }
+        }
         Ty::Struct(_, args) | Ty::Enum(_, args) => {
             for a in args {
                 scan_ty_for_arrays(a, out);

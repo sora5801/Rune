@@ -241,6 +241,77 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn tuple_destructure_let_basic() {
+    // Session 074: `let (a, b) = pair` desugars to a temp +
+    // per-element index reads. The resolver already minted
+    // bindings for `a` and `b`; the lowerer emits three lets.
+    let src = r#"
+        fn main() -> i64 {
+            let (a, b) = (10, 32);
+            a + b
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn tuple_destructure_let_with_arc_elements() {
+    // Tuple containing Vec elements; destructuring reads each
+    // out and the inner Vecs survive past the tuple's scope
+    // because TupleIndex retains on ARC element types.
+    let src = r#"
+        fn main() -> i64 {
+            let v1: Vec<i64> = vec_new();
+            v1.push(7); v1.push(8);
+            let v2: Vec<i64> = vec_new();
+            v2.push(100);
+            let (a, b) = (v1, v2);
+            a.get(0) + a.get(1) + b.get(0)
+        }
+    "#;
+    // 7 + 8 + 100 = 115
+    assert_eq!(run_main(src), 115);
+}
+
+#[test]
+fn tuple_destructure_with_wildcard() {
+    let src = r#"
+        fn main() -> i64 {
+            let (a, _, c) = (1, 99, 4);
+            a + c
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn tuple_release_arc_elements_at_scope_exit() {
+    // Session 074: per-shape release walks ARC elements before
+    // freeing the heap block. A tight loop constructs tuples
+    // holding Vec<i64> values; if the inner Vecs leaked the
+    // process would balloon under a tracker. Here we just pin
+    // "constructs + releases without crashing" and the value
+    // is right.
+    let src = r#"
+        fn build() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let t = (v, 99);
+            t.0.get(0) + t.0.get(1) + t.0.get(2) + t.1
+        }
+        fn main() -> i64 {
+            let mut total: i64 = 0;
+            for _ in 0..100 {
+                total = total + build();
+            }
+            total
+        }
+    "#;
+    // build() = 1+2+3+99 = 105. 100 * 105 = 10500.
+    assert_eq!(run_main(src), 10500);
+}
+
+#[test]
 fn tuple_literal_and_index() {
     // Session 073: (a, b) tuple literal + t.0 / t.1 indexing.
     // The tuple is heap-allocated as N*8 bytes + trailing rc;
