@@ -4891,6 +4891,123 @@ fn closure_capture_in_map() {
 }
 
 #[test]
+fn closure_capture_in_map_unannotated() {
+    // Session 062: the `:i64` annotation is no longer required.
+    // `expand_callable_typevar` synthesizes a `Ty::Fn` hint from
+    // F's `Fn1<I::Item, U>` bound and applies the current subst
+    // (which has `I = VecIter<i64>`); the closure param `x`
+    // binds to `VecIter<i64>::Item = i64` automatically.
+    let src = r#"
+        fn main() -> i64 {
+            let mult: i64 = 3;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped = std::Map { iter: v.iter(), f: |x| x * mult };
+            let mut total: i64 = 0;
+            for y in mapped {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    // 1*3 + 2*3 + 3*3 = 18
+    assert_eq!(run_main(src), 18);
+}
+
+#[test]
+fn closure_capture_in_filter_unannotated() {
+    // Filter parallel: pred's bound `P: Fn1<I::Item, bool>`
+    // expands to a Ty::Fn hint binding x to I::Item = i64.
+    let src = r#"
+        fn main() -> i64 {
+            let threshold: i64 = 2;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let filtered = std::Filter { iter: v.iter(), pred: |x| x > threshold };
+            let mut total: i64 = 0;
+            for y in filtered {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    // 3 + 4 + 5 = 12
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn closure_bare_let_unannotated() {
+    // Session 062: bare let with no annotation and no surrounding
+    // hint. The body `x * mult` pins x to mult's type (i64)
+    // through check_binary's `try_pin_infer_typevar`. The
+    // closure's resolution pass after the body picks up the pin
+    // and replaces the param's fresh Ty::TypeVar with i64.
+    let src = r#"
+        fn main() -> i64 {
+            let mult: i64 = 3;
+            let f = |x| x * mult;
+            f(7)
+        }
+    "#;
+    assert_eq!(run_main(src), 21);
+}
+
+#[test]
+fn closure_bare_let_inferred_from_comparison() {
+    // The pin happens through a comparison rather than
+    // arithmetic. `x > 5` pins x to i64 via the literal.
+    let src = r#"
+        fn pick(x: i64) -> i64 {
+            let is_big = |v| v > 5;
+            if is_big(x) { 100 } else { 0 }
+        }
+        fn main() -> i64 {
+            pick(7) + pick(3)
+        }
+    "#;
+    // is_big(7)=true → 100; is_big(3)=false → 0. Total 100.
+    assert_eq!(run_main(src), 100);
+}
+
+#[test]
+fn closure_bare_let_unannotated_with_capture() {
+    // Same but with a real capture — confirms inference still
+    // works when the closure becomes a synth struct.
+    let src = r#"
+        fn main() -> i64 {
+            let base: i64 = 100;
+            let f = |x| x + base;
+            f(7) + f(3)
+        }
+    "#;
+    // (7 + 100) + (3 + 100) = 210
+    assert_eq!(run_main(src), 210);
+}
+
+#[test]
+fn closure_in_map_unannotated_no_capture() {
+    // Non-capturing closure, unannotated. The bound-derived hint
+    // works the same way: x: VecIter<i64>::Item = i64. The
+    // closure value is a session-057 anonymous fn item
+    // (Ty::Fn), not a closure struct, but the inference flow
+    // through the bound is identical.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped = std::Map { iter: v.iter(), f: |x| x + 10 };
+            let mut total: i64 = 0;
+            for y in mapped {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    // (1+10) + (2+10) + (3+10) = 36
+    assert_eq!(run_main(src), 36);
+}
+
+#[test]
 fn closure_capture_in_filter() {
     // Filter<I, P> mirror of the Map test. The captured threshold
     // gates the predicate; only values strictly greater than 2

@@ -110,11 +110,12 @@ rune: linked with clang -> primes.exe
   (non-capturing) or to a synthesized struct holding the
   captured fields plus a `call` method (capturing). The prelude
   declares `trait Fn1<A, R> { fn call(self: Self, a: A) -> R; }`.
-  Capturing closures need a type-pinning annotation today (`let
-  f: fn(i64) -> i64 = |x| x * mult;`) OR a contextual hint
-  (`let m = std::Map { iter: ..., f: |x: i64| x * mult };` — the
-  bound flows the param's type in); bottom-up param inference
-  from body usage is the remaining follow-up.
+  Closure-param annotations are inferred from any of three
+  sources: an explicit `let f: fn(i64) -> i64 = |x| ...`, a
+  callable-bounded generic context (`let m = std::Map { iter:
+  ..., f: |x| x * mult }` — F's `Fn1<I::Item, U>` bound supplies
+  the shape), or the body's own usage (`let f = |x| x * mult` —
+  the binop with `mult: i64` pins x to i64).
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -298,16 +299,14 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Bottom-up param inference for closures (`let f = |x| x *
-   mult` without the annotation)
-2. `HashMap<K, V>` — the bigger collections piece
-3. Range as a `RangeIter` struct — unify the for-over-range
+1. `HashMap<K, V>` — the bigger collections piece
+2. Range as a `RangeIter` struct — unify the for-over-range
    codegen with the Iterator protocol
-4. `From`-based error conversion for `?`
-6. `continue` keyword — mirror of `break` over the existing
+3. `From`-based error conversion for `?`
+4. `continue` keyword — mirror of `break` over the existing
    loop-exit-stack pattern
-7. Trait default-method bodies — `.collect()` as a chained method
-8. Self-hosted bootstrap (long-term)
+5. Trait default-method bodies — `.collect()` as a chained method
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

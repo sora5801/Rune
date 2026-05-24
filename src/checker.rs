@@ -111,6 +111,18 @@ pub struct Checker<'r> {
     /// `check_item` for traits and impls, used to resolve
     /// `Self::Item` to a concrete type.
     current_self: Option<SelfContext>,
+    /// Session 062: pool of fresh inference TypeVars minted for
+    /// unannotated closure params with no contextual hint.
+    /// `closure_infer_pool[sym]` is `Some(ty)` once the body's
+    /// type-checking pins the param via a binop / call / etc.;
+    /// `None` means still unpinned. After the closure body
+    /// check, `check_closure` walks each fresh sym, replacing
+    /// the param's `Ty::TypeVar(s)` with the pinned type.
+    closure_infer_pool: std::cell::RefCell<HashMap<SymbolId, Option<Ty>>>,
+    /// Counter for fresh inference TypeVar syms. Starts at
+    /// u32::MAX and decrements so it never collides with the
+    /// resolver's symbol table (which grows from 0 up).
+    next_fresh_sym: std::cell::Cell<u32>,
 }
 
 impl<'r> Checker<'r> {
@@ -126,6 +138,8 @@ impl<'r> Checker<'r> {
             impl_assoc_bindings_ty: HashMap::new(),
             closure_param_tys: HashMap::new(),
             closure_ret_tys: HashMap::new(),
+            closure_infer_pool: std::cell::RefCell::new(HashMap::new()),
+            next_fresh_sym: std::cell::Cell::new(u32::MAX),
             errors: Vec::new(),
             current_return: Ty::Unit,
             current_self: None,
@@ -1554,6 +1568,13 @@ impl<'r> Checker<'r> {
         expected: Option<&Ty>,
     ) -> Ty {
         // Pull `(expected_params, expected_ret)` from a Ty::Fn hint.
+        // The hint flows in from `let f: fn(i64) -> i64 = |x| ...`,
+        // struct-lit field types, fn-arg positions, etc. — session
+        // 057 wired the bidirectional pass; session 062's
+        // `expand_callable_typevar` (called by `check_struct_lit`)
+        // converts a `Ty::TypeVar(F)` hint into a `Ty::Fn` hint
+        // when F has a `Fn1<...>`-shaped bound, so unannotated
+        // closures bind their params from the bound.
         let (exp_params, exp_ret) = match expected {
             Some(Ty::Fn { params: ep, ret: er }) => {
                 (Some(ep.clone()), Some((**er).clone()))
@@ -1574,30 +1595,29 @@ impl<'r> Checker<'r> {
             }
         }
         // Bind each parameter's type: annotation if present,
-        // otherwise the hint's corresponding param. Missing both
-        // is a hard error.
+        // hint's corresponding param if available, otherwise mint
+        // a fresh inference TypeVar (session 062). Inference
+        // TypeVars get pinned by the body's binops / call-arg
+        // checks; after the body check below we walk back through
+        // them and replace each param's type with the pinned one.
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
+        let mut fresh_syms: Vec<Option<SymbolId>> = Vec::with_capacity(params.len());
         for (i, p) in params.iter().enumerate() {
-            let pty = if let Some(t) = &p.ty {
-                self.resolve_type(t)
+            let (pty, fresh) = if let Some(t) = &p.ty {
+                (self.resolve_type(t), None)
             } else if let Some(ep) = exp_params.as_ref().and_then(|ep| ep.get(i)) {
-                ep.clone()
+                (ep.clone(), None)
             } else {
-                self.error(
-                    p.span,
-                    format!(
-                        "closure parameter `{}` needs a type annotation \
-                         (no contextual hint at this position)",
-                        p.name.name
-                    ),
-                );
-                Ty::Error
+                let s = self.fresh_sym();
+                self.closure_infer_pool.borrow_mut().insert(s, None);
+                (Ty::TypeVar(s), Some(s))
             };
             // Record the param's type at its declaration span so
             // the body's reads of the param resolve correctly via
             // `path_value_type → local_types`.
             self.local_types.insert(p.name.span, pty.clone());
             param_tys.push(pty);
+            fresh_syms.push(fresh);
         }
         self.closure_param_tys.insert(span, param_tys.clone());
         // Check the body. If the hint provided an expected return
@@ -1605,6 +1625,39 @@ impl<'r> Checker<'r> {
         // bottom-up typing for the body itself; the hint just
         // tightens what we'll claim the closure's overall type is.
         let body_ty = self.check_expr(body);
+        // Session 062: resolve fresh inference TypeVars now that
+        // the body has been checked. Each unannotated, unhinted
+        // param's `Ty::TypeVar(s)` should have been pinned by a
+        // body-level use (binop, call arg, etc.); if not, error.
+        for (i, fresh_opt) in fresh_syms.iter().enumerate() {
+            let Some(fresh) = fresh_opt else { continue };
+            let pinned = self
+                .closure_infer_pool
+                .borrow()
+                .get(fresh)
+                .cloned()
+                .flatten();
+            match pinned {
+                Some(t) => {
+                    param_tys[i] = t.clone();
+                    self.local_types.insert(params[i].name.span, t);
+                }
+                None => {
+                    self.error(
+                        params[i].span,
+                        format!(
+                            "closure parameter `{}` needs a type annotation \
+                             (no contextual hint and no body usage to infer from)",
+                            params[i].name.name
+                        ),
+                    );
+                    param_tys[i] = Ty::Error;
+                    self.local_types.insert(params[i].name.span, Ty::Error);
+                }
+            }
+            self.closure_infer_pool.borrow_mut().remove(fresh);
+        }
+        self.closure_param_tys.insert(span, param_tys.clone());
         // The return type comes from the body. The hint's ret is
         // only used to *check* compatibility — when the hint is a
         // bare TypeVar (e.g. Map's `U`), the body type is the
@@ -1798,12 +1851,51 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Mint a fresh inference TypeVar sym (session 062). Counts
+    /// downward from `u32::MAX` so it never collides with
+    /// resolver-minted symbols (which grow from 0 up). The
+    /// caller registers the sym in `closure_infer_pool`; the
+    /// body's type-checking pins it via `try_pin_infer_typevar`.
+    fn fresh_sym(&self) -> SymbolId {
+        let v = self.next_fresh_sym.get();
+        self.next_fresh_sym.set(v.wrapping_sub(1));
+        SymbolId(v)
+    }
+
+    /// If `ty` is an unpinned inference TypeVar (session 062),
+    /// record `concrete` as its resolved type. Used by binop /
+    /// call-arg checks to pin an unannotated closure param from
+    /// its first informative use.
+    fn try_pin_infer_typevar(&self, ty: &Ty, concrete: &Ty) {
+        let Ty::TypeVar(s) = ty else { return };
+        // Don't pin to a TypeVar (no information gained).
+        if matches!(concrete, Ty::TypeVar(_)) {
+            return;
+        }
+        let mut pool = self.closure_infer_pool.borrow_mut();
+        if let Some(slot) = pool.get_mut(s) {
+            if slot.is_none() {
+                *slot = Some(concrete.clone());
+            }
+        }
+    }
+
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         let lt = self.check_expr(lhs);
         let rt = self.check_expr(rhs);
         if lt.is_error() || rt.is_error() {
             return Ty::Error;
         }
+        // Session 062: if one side is an inference TypeVar from
+        // an unannotated closure param, pin it from the other.
+        // `x * mult` over `mult: i64` learns `x: i64`. Done
+        // before the compatibility check so the rest of the
+        // binop sees the pinned type via local_types — but the
+        // pin is recorded externally; we still use `lt`/`rt` as
+        // checked. The closure's resolution pass picks the pin
+        // up after the body check finishes.
+        self.try_pin_infer_typevar(&lt, &rt);
+        self.try_pin_infer_typevar(&rt, &lt);
         if !lt.compatible(&rt) {
             self.error(
                 span,
@@ -1816,7 +1908,19 @@ impl<'r> Checker<'r> {
             );
             return Ty::Error;
         }
-        let t = if lt.is_never() { rt.clone() } else { lt.clone() };
+        // Pick the concrete side as `t` so the operator's
+        // numeric / integer checks see a real type. When both
+        // are non-TypeVar we keep the historical choice (lt
+        // unless lt is Never).
+        let t = if matches!(lt, Ty::TypeVar(_)) {
+            rt.clone()
+        } else if matches!(rt, Ty::TypeVar(_)) {
+            lt.clone()
+        } else if lt.is_never() {
+            rt.clone()
+        } else {
+            lt.clone()
+        };
         match op {
             BinOp::Add => {
                 // `+` concatenates strings as well as adding numbers.
@@ -2086,6 +2190,49 @@ impl<'r> Checker<'r> {
     /// structural — any trait that "looks like" a callable (args ==
     /// fn-params + 1) gets propagated; Fn1 is the only such trait
     /// the prelude declares right now.
+    /// When `expected` is a raw `Ty::TypeVar(F)` whose bound
+    /// names a callable trait (`F: Fn1<I::Item, U>`), build a
+    /// `Ty::Fn { params, ret }` from the bound's args and apply
+    /// the current substitution so impl-side TypeVars and
+    /// already-pinned outer generics resolve. The result is a
+    /// "thicker" hint than the bare TypeVar: it tells the closure
+    /// how many params it has and what their concrete types are
+    /// (modulo unpinned generics like the return-side `U`, which
+    /// the body's actual return pins later through
+    /// `propagate_bound_inference`).
+    fn expand_callable_typevar(
+        &self,
+        expected: &Ty,
+        subst: &std::collections::HashMap<SymbolId, Ty>,
+    ) -> Option<Ty> {
+        let Ty::TypeVar(struct_sym) = expected else {
+            return None;
+        };
+        let impl_sym = self
+            .res
+            .impl_to_struct_generic
+            .iter()
+            .find(|&(_, &s)| s == *struct_sym)
+            .map(|(&i, _)| i)?;
+        for (&(p, _t), arg_spans) in self.res.generic_bound_args.iter() {
+            if p != impl_sym || arg_spans.is_empty() {
+                continue;
+            }
+            let last = arg_spans.len() - 1;
+            let mut params: Vec<Ty> = Vec::with_capacity(last);
+            for sp in &arg_spans[..last] {
+                let ty = self.type_resolutions.get(sp)?;
+                let translated = self.translate_impl_to_struct(ty);
+                params.push(self.apply_subst(&translated, subst, None));
+            }
+            let ret_ty = self.type_resolutions.get(&arg_spans[last])?;
+            let translated = self.translate_impl_to_struct(ret_ty);
+            let ret = self.apply_subst(&translated, subst, None);
+            return Some(Ty::Fn { params, ret: Box::new(ret) });
+        }
+        None
+    }
+
     /// Like `propagate_bound_inference` but also returns a list of
     /// `(span, expected, actual)` for any concrete-vs-concrete
     /// mismatches between a bound arg and the concrete fn it's
@@ -2711,6 +2858,19 @@ impl<'r> Checker<'r> {
                 continue;
             };
             let expected = self.apply_subst(&decl_field.ty, &subst, None);
+            // Session 062: when the field's declared type is a
+            // raw generic param (`F`) with a callable-shaped
+            // bound, synthesize a Ty::Fn hint from the bound's
+            // args. Applies the current subst so I::Item resolves
+            // to the iter's actual element type — `Map { iter:
+            // v.iter(), f: |x| x * mult }` binds x to i64
+            // (VecIter<i64>::Item) without any annotation. The
+            // synthesized hint's return type may still carry
+            // unpinned TypeVars (Map's `U`), which the body's
+            // type pins later through propagate_bound_inference.
+            let synthesized_hint =
+                self.expand_callable_typevar(&expected, &subst);
+            let hint_for_closure = synthesized_hint.as_ref().unwrap_or(&expected);
             let value_ty = match value_ty_in {
                 Some(t) => t.clone(),
                 None => {
@@ -2720,7 +2880,7 @@ impl<'r> Checker<'r> {
                     // so any generic params it pinned (e.g. `U` in
                     // Map's `f: fn(I::Item) -> U`) propagate to
                     // the struct's resulting type arg list.
-                    let ty = self.check_expr_with_hint(&init.value, Some(&expected));
+                    let ty = self.check_expr_with_hint(&init.value, Some(hint_for_closure));
                     unify_typevars(&decl_field.ty, &ty, &mut subst);
                     // Re-propagate after a deferred closure pins F:
                     // the closure's struct type still satisfies a
