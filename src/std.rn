@@ -63,35 +63,39 @@ pub mod std {
     }
 
     /* Adapter: yields `f(x)` for each `x` in the wrapped iterator.
-       `f` is a named function pointer (no closures in v0.x). */
-    pub struct Map<I, U> {
+       `F` is any one-argument callable — typically a closure literal
+       (capturing or not) or a synthesized fn wrapper. The Fn1 bound
+       pins the call signature; `self.f.call(x)` dispatches via the
+       impl. After monomorphization, the call site is rewritten to a
+       direct Call when F is concrete. */
+    pub struct Map<I, F, U> {
         iter: I,
-        f: fn(I::Item) -> U,
+        f: F,
     }
 
-    pub impl<I: Iterator, U> Iterator for Map<I, U> {
+    pub impl<I: Iterator, F: Fn1<I::Item, U>, U> Iterator for Map<I, F, U> {
         type Item = U;
-        fn next(self: Map<I, U>) -> Option<U> {
+        fn next(self: Map<I, F, U>) -> Option<U> {
             match self.iter.next() {
-                Option::Some(x) => Option::Some((self.f)(x)),
+                Option::Some(x) => Option::Some(self.f.call(x)),
                 Option::None    => Option::None,
             }
         }
     }
 
-    /* Adapter: yields only those `x` for which `pred(x)` is true. */
-    pub struct Filter<I> {
+    /* Adapter: yields only those `x` for which `pred.call(x)` is true. */
+    pub struct Filter<I, P> {
         iter: I,
-        pred: fn(I::Item) -> bool,
+        pred: P,
     }
 
-    pub impl<I: Iterator> Iterator for Filter<I> {
+    pub impl<I: Iterator, P: Fn1<I::Item, bool>> Iterator for Filter<I, P> {
         type Item = I::Item;
-        fn next(self: Filter<I>) -> Option<I::Item> {
+        fn next(self: Filter<I, P>) -> Option<I::Item> {
             while true {
                 match self.iter.next() {
                     Option::Some(x) => {
-                        if (self.pred)(x) {
+                        if self.pred.call(x) {
                             return Option::Some(x);
                         }
                     }

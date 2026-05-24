@@ -4606,21 +4606,20 @@ fn vec_iter_via_next() {
 
 #[test]
 fn iter_map_alone() {
-    // `Map<I, U> { iter, f: fn(I::Item) -> U }` — the adapter
-    // construction exercises projection resolution in two places:
-    // (1) `f`'s declared field type `fn(I::Item) -> U` substitutes
-    // through `I = VecIter<i64>` so the field accepts a
-    // `fn(i64) -> i64`; (2) `Map::next` returns `Option<U>` which
-    // monomorphizes to `Option<i64>`. The session-056 projection
-    // fixes (checker's impl-T -> struct-T remap + monomorphizer's
-    // two-layer Assoc substitution) are both required.
+    // `Map<I, F, U> { iter, f: F }` with `F: Fn1<I::Item, U>` —
+    // session 061 made `f` a generic callable so closures (with or
+    // without captures) fit alongside named fns. A bare `fn double`
+    // passed as the `f` field has type `fn(i64) -> i64`; when the
+    // body calls `self.f.call(x)`, the monomorphizer rewrites the
+    // method call into an IndirectCall once F is pinned to the
+    // fn-pointer type (the "Ty::Fn satisfies Fn1" coercion happens
+    // at the call site, not at the value site).
     let src = r#"
         fn double(x: i64) -> i64 { x * 2 }
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3);
-            let mapped: std::Map<std::VecIter<i64>, i64> =
-                std::Map { iter: v.iter(), f: double };
+            let mapped = std::Map { iter: v.iter(), f: double };
             let mut total: i64 = 0;
             for x in mapped {
                 total = total + x;
@@ -4634,16 +4633,15 @@ fn iter_map_alone() {
 
 #[test]
 fn iter_filter_alone() {
-    // `Filter<I>` shares the same projection shape (predicate
-    // takes `I::Item`). Confirms the fix scales to bool-returning
-    // predicates.
+    // Session 061: Filter<I, P> with `P: Fn1<I::Item, bool>` —
+    // pred is a generic callable. A named fn `is_even` satisfies
+    // the bound through the IndirectCall coercion at the call site.
     let src = r#"
         fn is_even(x: i64) -> bool { x - (x / 2) * 2 == 0 }
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3); v.push(4); v.push(5); v.push(6);
-            let filtered: std::Filter<std::VecIter<i64>> =
-                std::Filter { iter: v.iter(), pred: is_even };
+            let filtered = std::Filter { iter: v.iter(), pred: is_even };
             let mut total: i64 = 0;
             for x in filtered {
                 total = total + x;
@@ -4657,22 +4655,20 @@ fn iter_filter_alone() {
 
 #[test]
 fn iter_collect_map_filter_pipeline() {
-    // The headline. Vec -> iter -> Map -> Filter -> collect into
-    // Vec<i64>. Each layer's `next` works because every
-    // projection through every nested `T::Item` resolves cleanly
-    // through the session-056 fixes. `collect`'s return type
-    // `Vec<T::Item>` is itself a generic projection that
-    // monomorphization concretizes.
+    // Session 056's headline, adjusted for session 061's signature.
+    // Vec -> iter -> Map -> Filter -> collect into Vec<i64>. Each
+    // layer's `next` works because every projection through every
+    // nested `T::Item` resolves cleanly, and the `F`/`P` bounds
+    // pin the closure types via session 061's bound-arg
+    // propagation. The collect call materializes Vec<T::Item>.
     let src = r#"
         fn double(x: i64) -> i64 { x * 2 }
         fn gt_three(x: i64) -> bool { if x > 3 { true } else { false } }
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3);
-            let mapped: std::Map<std::VecIter<i64>, i64> =
-                std::Map { iter: v.iter(), f: double };
-            let filtered: std::Filter<std::Map<std::VecIter<i64>, i64>> =
-                std::Filter { iter: mapped, pred: gt_three };
+            let mapped = std::Map { iter: v.iter(), f: double };
+            let filtered = std::Filter { iter: mapped, pred: gt_three };
             let result: Vec<i64> = std::collect(filtered);
             // doubled: [2,4,6]; >3: [4,6]; len + sum = 2 + 10 = 12
             result.len() + result.get(0) + result.get(1)
@@ -4683,11 +4679,11 @@ fn iter_collect_map_filter_pipeline() {
 
 #[test]
 fn iter_count_bounded_generic() {
-    // `<T: Iterator>` bounded generic over an adapter. The
-    // monomorphizer specializes `count` for `Map<VecIter<i64>,
-    // i64>`; inside that specialization the for-loop desugar
-    // sees a fully concrete iterator type, projection resolves,
-    // codegen is happy.
+    // `<T: Iterator>` bounded generic over a session-061 Map. The
+    // monomorphizer specializes `count` for the full Map type;
+    // inside that specialization the for-loop desugar sees a
+    // fully concrete iterator, projection resolves, codegen is
+    // happy.
     let src = r#"
         fn double(x: i64) -> i64 { x * 2 }
         fn count<T: std::Iterator>(it: T) -> i64 {
@@ -4700,8 +4696,7 @@ fn iter_count_bounded_generic() {
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
-            let mapped: std::Map<std::VecIter<i64>, i64> =
-                std::Map { iter: v.iter(), f: double };
+            let mapped = std::Map { iter: v.iter(), f: double };
             count(mapped)
         }
     "#;
@@ -4744,12 +4739,14 @@ fn closure_non_capturing_basic() {
 
 #[test]
 fn closure_in_map_pipeline() {
+    // Session 061: a closure literal flows into Map's `f: F`
+    // field. F is inferred to Ty::Fn (non-capturing closure ==
+    // session-057 anonymous fn item).
     let src = r#"
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3);
-            let mapped: std::Map<std::VecIter<i64>, i64> =
-                std::Map { iter: v.iter(), f: |x| x * 2 };
+            let mapped = std::Map { iter: v.iter(), f: |x: i64| x * 2 };
             let mut total: i64 = 0;
             for y in mapped {
                 total = total + y;
@@ -4766,8 +4763,7 @@ fn closure_in_filter_pipeline() {
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
-            let filtered: std::Filter<std::VecIter<i64>> =
-                std::Filter { iter: v.iter(), pred: |x| x > 2 };
+            let filtered = std::Filter { iter: v.iter(), pred: |x: i64| x > 2 };
             let mut total: i64 = 0;
             for y in filtered {
                 total = total + y;
@@ -4784,10 +4780,8 @@ fn closure_chain_map_filter_collect() {
         fn main() -> i64 {
             let v: Vec<i64> = vec_new();
             v.push(1); v.push(2); v.push(3);
-            let mapped: std::Map<std::VecIter<i64>, i64> =
-                std::Map { iter: v.iter(), f: |x| x * 2 };
-            let filtered: std::Filter<std::Map<std::VecIter<i64>, i64>> =
-                std::Filter { iter: mapped, pred: |x| x > 3 };
+            let mapped = std::Map { iter: v.iter(), f: |x: i64| x * 2 };
+            let filtered = std::Filter { iter: mapped, pred: |x: i64| x > 3 };
             let result: Vec<i64> = std::collect(filtered);
             result.len() + result.get(0) + result.get(1)
         }
@@ -4867,6 +4861,81 @@ fn closure_capture_session_059_groundwork() {
         }
     "#;
     assert_eq!(run_main(src), 21);
+}
+
+#[test]
+fn closure_capture_in_map() {
+    // Session 061 headline: a capturing closure flows into Map's
+    // `f` field. Map<I, F, U>'s F is inferred to the closure's
+    // synth struct type; the impl's `F: Fn1<I::Item, U>` bound
+    // propagation pins `U = i64` (the closure's return) and
+    // verifies `A = I::Item = i64` matches. Inside Map::next the
+    // monomorphizer rewrites `self.f.call(x)` to a direct call to
+    // the closure's synth `call` method (since `self.f` is a
+    // struct, not a Ty::Fn).
+    let src = r#"
+        fn main() -> i64 {
+            let mult: i64 = 3;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped = std::Map { iter: v.iter(), f: |x: i64| x * mult };
+            let mut total: i64 = 0;
+            for y in mapped {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    // 1*3 + 2*3 + 3*3 = 18
+    assert_eq!(run_main(src), 18);
+}
+
+#[test]
+fn closure_capture_in_filter() {
+    // Filter<I, P> mirror of the Map test. The captured threshold
+    // gates the predicate; only values strictly greater than 2
+    // pass through. `P: Fn1<I::Item, bool>` propagates bool back
+    // through the bound.
+    let src = r#"
+        fn main() -> i64 {
+            let threshold: i64 = 2;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let filtered = std::Filter { iter: v.iter(), pred: |x: i64| x > threshold };
+            let mut total: i64 = 0;
+            for y in filtered {
+                total = total + y;
+            }
+            total
+        }
+    "#;
+    // 3 + 4 + 5 = 12
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn closure_capture_chain_map_filter_collect() {
+    // Two captures across a 2-stage adapter pipeline + collect.
+    // Map captures `factor`; Filter captures `min_v`. The
+    // monomorphizer specializes Map::next and Filter::next once
+    // each (per the concrete F / P closure-struct type) and the
+    // generated code dispatches through each stage's synth call
+    // method. Confirms session 061's bound-propagation +
+    // closure-struct-dispatch round trip end-to-end.
+    let src = r#"
+        fn main() -> i64 {
+            let factor: i64 = 2;
+            let min_v: i64 = 3;
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            let mapped = std::Map { iter: v.iter(), f: |x: i64| x * factor };
+            let filtered = std::Filter { iter: mapped, pred: |y: i64| y > min_v };
+            let result: Vec<i64> = std::collect(filtered);
+            // 1*2=2, 2*2=4, 3*2=6; >3: [4, 6]; len + sum = 2 + 10
+            result.len() + result.get(0) + result.get(1)
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
 }
 
 #[test]

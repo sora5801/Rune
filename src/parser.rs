@@ -254,9 +254,12 @@ impl Parser {
                 let name = self.expect_ident()?;
                 let mut bounds = Vec::new();
                 if self.eat(&TokenKind::Colon) {
-                    // One or more `+`-separated trait bounds.
+                    // One or more `+`-separated trait bounds. A bound
+                    // path may carry generic args of its own — e.g.
+                    // `F: Fn1<I::Item, U>` — so consume optional
+                    // `<...>` after each path segment.
                     loop {
-                        bounds.push(self.parse_path()?);
+                        bounds.push(self.parse_bound_path()?);
                         if !self.eat(&TokenKind::Plus) {
                             break;
                         }
@@ -270,6 +273,30 @@ impl Parser {
         }
         self.expect(&TokenKind::Gt, "`>`")?;
         Ok(params)
+    }
+
+    /// Path in trait-bound position: `Fn1<I::Item, U>` or just
+    /// `Iterator`. Mirrors the generic-arg consumption that
+    /// `parse_type`'s path-with-args branch does, but here the path
+    /// is read as a bound (the result is `Path`, not `Type`).
+    fn parse_bound_path(&mut self) -> ParseResult<Path> {
+        let mut path = self.parse_path()?;
+        if self.check(&TokenKind::Lt) {
+            self.bump();
+            let mut args = Vec::new();
+            if !self.check(&TokenKind::Gt) {
+                loop {
+                    args.push(self.parse_type()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            let gt = self.expect_generic_close()?;
+            path.generic_args = args;
+            path.span = Span::new(path.span.start, gt.end);
+        }
+        Ok(path)
     }
 
     fn parse_param(&mut self) -> ParseResult<Param> {

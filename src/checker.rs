@@ -135,6 +135,13 @@ impl<'r> Checker<'r> {
     pub fn check_module(mut self, m: &Module) -> CheckResults {
         // Pass 1a: struct layouts — recurse into modules.
         self.collect_struct_layouts(&m.items);
+        // Pass 1a.5: pre-resolve trait-bound generic args so
+        // `generic_bound_args` entries (which store spans) have
+        // matching `type_resolutions` entries. The checker uses
+        // these at struct-lit time to propagate inference from a
+        // pinned `F` back to the bound's other type params (`U` in
+        // `F: Fn1<I::Item, U>`).
+        self.resolve_bound_args(&m.items);
         // Pass 1b: function signatures + const types + impl methods +
         // trait signature types — recurse into modules.
         self.register_signatures(&m.items);
@@ -154,6 +161,75 @@ impl<'r> Checker<'r> {
             closure_param_tys: self.closure_param_tys,
             closure_ret_tys: self.closure_ret_tys,
             errors: self.errors,
+        }
+    }
+
+    /// Pass 1a.5 — for every generic-param bound in the module,
+    /// resolve its generic args' types into `type_resolutions`. The
+    /// resolver records the AST spans in `generic_bound_args`; the
+    /// checker's `resolve_type` is what builds `Ty` values, so we
+    /// must call it eagerly so later `propagate_bound_inference`
+    /// lookups succeed.
+    fn resolve_bound_args(&mut self, items: &[Item]) {
+        for item in items {
+            match item {
+                Item::Fn(f) => {
+                    for g in &f.generics {
+                        for b in &g.bounds {
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                            }
+                        }
+                    }
+                }
+                Item::Impl(i) => {
+                    for g in &i.generics {
+                        for b in &g.bounds {
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                            }
+                        }
+                    }
+                    for method in &i.methods {
+                        for g in &method.generics {
+                            for b in &g.bounds {
+                                for a in &b.generic_args {
+                                    self.resolve_type(a);
+                                }
+                            }
+                        }
+                    }
+                }
+                Item::Trait(t) => {
+                    for g in &t.generics {
+                        for b in &g.bounds {
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                            }
+                        }
+                    }
+                }
+                Item::Struct(s) => {
+                    for g in &s.generics {
+                        for b in &g.bounds {
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                            }
+                        }
+                    }
+                }
+                Item::Enum(e) => {
+                    for g in &e.generics {
+                        for b in &g.bounds {
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                            }
+                        }
+                    }
+                }
+                Item::Mod(md) => self.resolve_bound_args(&md.items),
+                _ => {}
+            }
         }
     }
 
@@ -2001,6 +2077,221 @@ impl<'r> Checker<'r> {
         })
     }
 
+    /// Walk subst; for each `param → Ty::Fn(P, R)` entry, look at
+    /// `param`'s registered trait-bound generic args. If the bound's
+    /// arg list has shape `[A1, ..., An, R_param]` and the concrete
+    /// fn has matching arity, unify positional pairs. This is the
+    /// "callable trait" inference: `<F: Fn1<I::Item, U>>` lets `U`
+    /// fall out from `f: F → fn(i64) -> i64`. The shape check is
+    /// structural — any trait that "looks like" a callable (args ==
+    /// fn-params + 1) gets propagated; Fn1 is the only such trait
+    /// the prelude declares right now.
+    /// Like `propagate_bound_inference` but also returns a list of
+    /// `(span, expected, actual)` for any concrete-vs-concrete
+    /// mismatches between a bound arg and the concrete fn it's
+    /// supposed to describe. The struct-lit caller turns these
+    /// into field-type errors at the offending init's span.
+    fn propagate_bound_inference_with_mismatches(
+        &self,
+        subst: &mut std::collections::HashMap<SymbolId, Ty>,
+    ) -> Vec<(Ty, Ty)> {
+        let mut mismatches: Vec<(Ty, Ty)> = Vec::new();
+        let entries: Vec<(SymbolId, Ty)> = subst.iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        for (param, concrete) in entries {
+            // Two concrete shapes a callable-bounded F can take:
+            // - `Ty::Fn(P..., R)` — fn pointer or non-capturing
+            //   closure (session 057's anonymous fn item).
+            // - `Ty::Struct(closure_sym, [])` whose impl_methods
+            //   has a `call` entry — capturing closure (sessions
+            //   059/060). Extract the call method's signature
+            //   minus the leading Self param and treat it like a
+            //   Ty::Fn for the purpose of bound matching.
+            let (owned_params, owned_ret);
+            let (c_params, c_ret): (&Vec<Ty>, &Ty) = match &concrete {
+                Ty::Fn { params, ret } => (params, ret.as_ref()),
+                Ty::Struct(s, _) => {
+                    let Some(&call_sym) =
+                        self.res.impl_methods.get(&(*s, "call".to_string()))
+                    else {
+                        continue;
+                    };
+                    // The closure's synth call method has its
+                    // signature registered under the closure's
+                    // source span (the lambda's span), not the
+                    // method's span — that's session 060's
+                    // wiring. Walk the symbol's span instead.
+                    let call_span = self.res.symbol(call_sym).span;
+                    let Some(Ty::Fn { params, ret }) =
+                        self.fn_signatures.get(&call_span)
+                    else {
+                        continue;
+                    };
+                    // Drop the leading Self param.
+                    if params.is_empty() { continue; }
+                    owned_params = params[1..].to_vec();
+                    owned_ret = (**ret).clone();
+                    (&owned_params, &owned_ret)
+                }
+                _ => continue,
+            };
+            for (&(impl_p, _trait_sym), arg_spans) in
+                self.res.generic_bound_args.iter()
+            {
+                let Some(&struct_p) =
+                    self.res.impl_to_struct_generic.get(&impl_p)
+                else {
+                    continue;
+                };
+                if struct_p != param {
+                    continue;
+                }
+                if arg_spans.len() != c_params.len() + 1 {
+                    continue;
+                }
+                for (i, c_param) in c_params.iter().enumerate() {
+                    if let Some(bound_arg_ty) =
+                        self.type_resolutions.get(&arg_spans[i])
+                    {
+                        let translated = self.translate_impl_to_struct(bound_arg_ty);
+                        let resolved = self.apply_subst(&translated, subst, None);
+                        if !unify_or_record(&resolved, c_param, subst) {
+                            mismatches.push((resolved, c_param.clone()));
+                        }
+                    }
+                }
+                if let Some(bound_ret_ty) =
+                    self.type_resolutions.get(&arg_spans[arg_spans.len() - 1])
+                {
+                    let translated = self.translate_impl_to_struct(bound_ret_ty);
+                    let resolved = self.apply_subst(&translated, subst, None);
+                    if !unify_or_record(&resolved, c_ret, subst) {
+                        mismatches.push((resolved, c_ret.clone()));
+                    }
+                }
+            }
+        }
+        mismatches
+    }
+
+    fn propagate_bound_inference(
+        &self,
+        subst: &mut std::collections::HashMap<SymbolId, Ty>,
+    ) {
+        // Snapshot keys so the iteration doesn't see new insertions
+        // while we walk. Newly-pinned vars only matter for a later
+        // call to propagate (which `check_struct_lit` invokes after
+        // pass 2).
+        let entries: Vec<(SymbolId, Ty)> = subst.iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        for (param, concrete) in entries {
+            // Same two-shape extraction as the
+            // _with_mismatches sibling. Repeated here so the
+            // non-error path stays a single concrete loop.
+            let (owned_params, owned_ret);
+            let (c_params, c_ret): (&Vec<Ty>, &Ty) = match &concrete {
+                Ty::Fn { params, ret } => (params, ret.as_ref()),
+                Ty::Struct(s, _) => {
+                    let Some(&call_sym) =
+                        self.res.impl_methods.get(&(*s, "call".to_string()))
+                    else {
+                        continue;
+                    };
+                    let call_span = self.res.symbol(call_sym).span;
+                    let Some(Ty::Fn { params, ret }) =
+                        self.fn_signatures.get(&call_span)
+                    else {
+                        continue;
+                    };
+                    if params.is_empty() { continue; }
+                    owned_params = params[1..].to_vec();
+                    owned_ret = (**ret).clone();
+                    (&owned_params, &owned_ret)
+                }
+                _ => continue,
+            };
+            // Iterate every registered bound. Bounds live on
+            // impl-side TypeParam syms; struct-side params (used as
+            // subst keys here) connect via `impl_to_struct_generic`.
+            // Match a bound when its impl-side param maps to the
+            // struct-side param currently in subst.
+            for (&(impl_p, _trait_sym), arg_spans) in
+                self.res.generic_bound_args.iter()
+            {
+                let Some(&struct_p) =
+                    self.res.impl_to_struct_generic.get(&impl_p)
+                else {
+                    continue;
+                };
+                if struct_p != param {
+                    continue;
+                }
+                if arg_spans.len() != c_params.len() + 1 {
+                    continue;
+                }
+                for (i, c_param) in c_params.iter().enumerate() {
+                    if let Some(bound_arg_ty) =
+                        self.type_resolutions.get(&arg_spans[i])
+                    {
+                        let translated = self.translate_impl_to_struct(bound_arg_ty);
+                        let resolved = self.apply_subst(&translated, subst, None);
+                        unify_typevars(&resolved, c_param, subst);
+                    }
+                }
+                if let Some(bound_ret_ty) =
+                    self.type_resolutions.get(&arg_spans[arg_spans.len() - 1])
+                {
+                    let translated = self.translate_impl_to_struct(bound_ret_ty);
+                    let resolved = self.apply_subst(&translated, subst, None);
+                    unify_typevars(&resolved, c_ret, subst);
+                }
+            }
+        }
+    }
+
+    /// Replace impl-side TypeVar syms with their struct-side
+    /// counterparts via `impl_to_struct_generic`. The bound arg
+    /// types resolve in the impl's scope (their TypeVars refer to
+    /// `<I_impl, F_impl, U_impl>`); the checker's subst is keyed by
+    /// struct-side syms.
+    fn translate_impl_to_struct(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::TypeVar(s) => {
+                if let Some(&struct_s) =
+                    self.res.impl_to_struct_generic.get(s)
+                {
+                    Ty::TypeVar(struct_s)
+                } else {
+                    ty.clone()
+                }
+            }
+            Ty::Assoc(base, name) => {
+                Ty::Assoc(Box::new(self.translate_impl_to_struct(base)), name.clone())
+            }
+            Ty::Struct(s, args) => Ty::Struct(
+                *s,
+                args.iter().map(|a| self.translate_impl_to_struct(a)).collect(),
+            ),
+            Ty::Enum(s, args) => Ty::Enum(
+                *s,
+                args.iter().map(|a| self.translate_impl_to_struct(a)).collect(),
+            ),
+            Ty::Vec(e) => Ty::Vec(Box::new(self.translate_impl_to_struct(e))),
+            Ty::Array(e, n) => Ty::Array(Box::new(self.translate_impl_to_struct(e)), *n),
+            Ty::Fn { params, ret } => Ty::Fn {
+                params: params.iter().map(|p| self.translate_impl_to_struct(p)).collect(),
+                ret: Box::new(self.translate_impl_to_struct(ret)),
+            },
+            Ty::Dyn(s, args) => Ty::Dyn(
+                *s,
+                args.iter().map(|a| self.translate_impl_to_struct(a)).collect(),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
         // Intercept calls to polymorphic builtins before checking the callee
         // as a value expression — they have no single signature to bind.
@@ -2384,6 +2675,30 @@ impl<'r> Checker<'r> {
                 );
             }
         }
+        // Propagate from trait bounds. After the field unification,
+        // some struct generics may be pinned (`F → Ty::Fn(P, R)`)
+        // while others (`U`) remain TypeVars because no field
+        // mentions them — only the bound `F: Fn1<A, U>` ties them
+        // together. Walk each bound; if F resolves to a Ty::Fn and
+        // the bound's arg list shape matches a "callable" trait
+        // (N+1 args for an N-arg fn), unify the args with F's
+        // call signature parts so U gets pinned to R. A
+        // concrete-vs-concrete mismatch (e.g. `f: takes_str` when
+        // `I::Item = i64`) is surfaced as a field-type error.
+        let mismatches = self.propagate_bound_inference_with_mismatches(&mut subst);
+        for (expected, actual) in mismatches {
+            // Find the field whose value type pins F; attribute the
+            // error there. We don't know which field exactly, so
+            // attribute to the struct-lit's overall span.
+            self.error(
+                span,
+                format!(
+                    "field bound mismatch: expected `{}` from the trait bound, found `{}`",
+                    expected.display(),
+                    actual.display(),
+                ),
+            );
+        }
         // Pass 2: substitute the gathered subst into each declared
         // field type, then check assignability. Closure values
         // (deferred in pass 1) get type-checked here with the
@@ -2407,6 +2722,11 @@ impl<'r> Checker<'r> {
                     // the struct's resulting type arg list.
                     let ty = self.check_expr_with_hint(&init.value, Some(&expected));
                     unify_typevars(&decl_field.ty, &ty, &mut subst);
+                    // Re-propagate after a deferred closure pins F:
+                    // the closure's struct type still satisfies a
+                    // callable-shaped bound, so a third pass picks
+                    // up any U-like params left over from pass 1.
+                    self.propagate_bound_inference(&mut subst);
                     ty
                 }
             };
@@ -2505,8 +2825,28 @@ impl<'r> Checker<'r> {
                     // it to the bound type `recv` (a `Ty::TypeVar(T)`),
                     // yielding `Ty::Assoc(TypeVar(T), name)` which
                     // monomorphization resolves once `T` is concrete.
-                    let empty: std::collections::HashMap<SymbolId, Ty> =
+                    //
+                    // For generic traits (`Fn1<A, R>`), build a
+                    // substitution from the trait's params to the
+                    // bound's args so the method's param/ret types
+                    // pin against the call site's `A`/`R`. Without
+                    // this, `self.f.call(x)` ends up with `e.ty` as
+                    // Fn1's `R` (TypeVar that the outer monomorphize
+                    // subst can't reach because R lives in Fn1's
+                    // generic list, not Map's).
+                    let mut trait_subst: std::collections::HashMap<SymbolId, Ty> =
                         std::collections::HashMap::new();
+                    if let Some(trait_gens) = self.res.trait_generics.get(&trait_sym) {
+                        if let Some(arg_spans) =
+                            self.res.generic_bound_args.get(&(*tvar, trait_sym))
+                        {
+                            for (g, sp) in trait_gens.iter().zip(arg_spans.iter()) {
+                                if let Some(arg_ty) = self.type_resolutions.get(sp) {
+                                    trait_subst.insert(*g, arg_ty.clone());
+                                }
+                            }
+                        }
+                    }
                     let mut params: Vec<Ty> = Vec::new();
                     for p in m.params.iter().skip(1) {
                         let raw = self
@@ -2514,14 +2854,14 @@ impl<'r> Checker<'r> {
                             .get(&p.ty.span())
                             .cloned()
                             .unwrap_or(Ty::Error);
-                        params.push(self.apply_subst(&raw, &empty, Some(recv)));
+                        params.push(self.apply_subst(&raw, &trait_subst, Some(recv)));
                     }
                     let raw_ret = m
                         .return_type
                         .as_ref()
                         .and_then(|t| self.type_resolutions.get(&t.span()).cloned())
                         .unwrap_or(Ty::Unit);
-                    let ret = self.apply_subst(&raw_ret, &empty, Some(recv));
+                    let ret = self.apply_subst(&raw_ret, &trait_subst, Some(recv));
                     return Some(MethodSig { params, ret });
                 }
             }
@@ -3215,6 +3555,46 @@ impl<'r> Checker<'r> {
 /// param side binds `t` to the corresponding concrete on the arg
 /// side. Struct/Enum type args unify element-wise so passing
 /// `Box<i64>` to `unbox<T>(b: Box<T>) -> T` infers T = i64.
+/// Like `unify_typevars` but returns `false` when concrete sides
+/// disagree (instead of silently dropping it). The struct-lit
+/// bound-conformance check uses this to surface fn-signature
+/// mismatches: `Map { f: takes_str }` over `iter: VecIter<i64>` —
+/// the bound `Fn1<I::Item=i64, U>` clashes with the actual
+/// `fn(str, ...) -> ...`, so we want a diagnostic instead of
+/// silent acceptance.
+fn unify_or_record(
+    param: &Ty,
+    arg: &Ty,
+    subst: &mut std::collections::HashMap<SymbolId, Ty>,
+) -> bool {
+    match (param, arg) {
+        (Ty::TypeVar(t), concrete) => {
+            match subst.get(t) {
+                None => {
+                    subst.insert(*t, concrete.clone());
+                    true
+                }
+                Some(prev) => prev == concrete,
+            }
+        }
+        (Ty::Struct(s1, p), Ty::Struct(s2, a))
+        | (Ty::Enum(s1, p), Ty::Enum(s2, a))
+            if s1 == s2 && p.len() == a.len() =>
+        {
+            p.iter().zip(a.iter()).all(|(pp, aa)| unify_or_record(pp, aa, subst))
+        }
+        (Ty::Vec(p), Ty::Vec(a)) => unify_or_record(p, a, subst),
+        (Ty::Array(p, _), Ty::Array(a, _)) => unify_or_record(p, a, subst),
+        (Ty::Fn { params: pp, ret: pr }, Ty::Fn { params: ap, ret: ar })
+            if pp.len() == ap.len() =>
+        {
+            pp.iter().zip(ap.iter()).all(|(p, a)| unify_or_record(p, a, subst))
+                && unify_or_record(pr, ar, subst)
+        }
+        (a, b) => a == b,
+    }
+}
+
 fn unify_typevars(
     param: &Ty,
     arg: &Ty,

@@ -154,6 +154,29 @@ pub struct Resolutions {
     /// Generic-param symbol → trait-bound symbols. `<T: Display>`
     /// records `T_sym → [Display_sym]`.
     pub generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Generic-param symbol + trait-bound symbol → spans of the
+    /// trait's generic args at the bound site. `<F: Fn1<I::Item,
+    /// U>>` records `(F, Fn1) → [span_of_I::Item, span_of_U]`. The
+    /// checker resolves these spans through `type_resolutions` to
+    /// recover the Ty values, then uses them to propagate
+    /// inference: when F is unified with a concrete `fn(P) -> R`,
+    /// the bound says `A = P, R_arg = R` (positional), so any
+    /// TypeVars among the bound args get pinned. This is the only
+    /// way `let m = Map { iter: ..., f: |x| x * 2 }` can pin Map's
+    /// `U` — there's no field that mentions U directly. */
+    pub generic_bound_args: HashMap<(SymbolId, SymbolId), Vec<Span>>,
+    /// Impl-side generic param sym → struct-side generic param sym
+    /// (positional). `impl<I, F, U> Iterator for Map<I, F, U>`
+    /// declares its own `[I_impl, F_impl, U_impl]` separate from
+    /// the struct's `[I_struct, F_struct, U_struct]` (different
+    /// spans). The checker keeps subst keyed by struct-side syms;
+    /// `generic_bound_args` entries on impl-side syms (which is
+    /// where bounds live) need this map to find the corresponding
+    /// struct-side sym, AND its TypeVars in the bound's arg types
+    /// need translation. Positional mapping suffices for v0.x
+    /// (impls always have impl's generics positionally aligned with
+    /// the for-type's args).
+    pub impl_to_struct_generic: HashMap<SymbolId, SymbolId>,
     /// Enums that have at least one payload-bearing variant. These use
     /// a heap-allocated `{ tag, payload, rc }` descriptor at runtime
     /// instead of the plain i64 discriminant used by tag-only enums.
@@ -221,6 +244,8 @@ pub struct Resolver {
     trait_assoc_types: HashMap<SymbolId, Vec<String>>,
     impl_assoc_bindings: HashMap<(SymbolId, String), crate::ast::Type>,
     generic_bounds: HashMap<SymbolId, Vec<SymbolId>>,
+    generic_bound_args: HashMap<(SymbolId, SymbolId), Vec<Span>>,
+    impl_to_struct_generic: HashMap<SymbolId, SymbolId>,
     /// Names of the modules currently being declared / resolved,
     /// outermost first. Empty means the root module. Item lookups
     /// qualify against this path; functions mangle with it.
@@ -285,6 +310,8 @@ impl Resolver {
             trait_assoc_types: HashMap::new(),
             impl_assoc_bindings: HashMap::new(),
             generic_bounds: HashMap::new(),
+            generic_bound_args: HashMap::new(),
+            impl_to_struct_generic: HashMap::new(),
             current_path: Vec::new(),
             item_vis: HashMap::new(),
             pub_reexport_keys: std::collections::HashSet::new(),
@@ -332,6 +359,8 @@ impl Resolver {
                 trait_assoc_types: self.trait_assoc_types,
                 impl_assoc_bindings: self.impl_assoc_bindings,
                 generic_bounds: self.generic_bounds,
+                generic_bound_args: self.generic_bound_args,
+                impl_to_struct_generic: self.impl_to_struct_generic,
             },
             self.errors,
         )
@@ -1065,6 +1094,31 @@ impl Resolver {
             Item::Enum(e) => self.resolve_enum(e),
             Item::Const(c) => self.resolve_const(c),
             Item::Impl(i) => {
+                // Now that struct_generics is populated (we're past
+                // the source-order resolve_struct of the for-type),
+                // wire impl-side generic syms to struct-side ones
+                // positionally. Bound info recorded in resolve_fn
+                // (called below for each method) is keyed by impl's
+                // syms; the checker translates via this map at
+                // struct-lit time.
+                if let Some(&struct_sym) =
+                    self.path_to_sym.get(&i.type_path.span)
+                {
+                    if let Some(struct_gens) =
+                        self.struct_generics.get(&struct_sym).cloned()
+                    {
+                        for (idx, g) in i.generics.iter().enumerate() {
+                            if let Some(&impl_g_sym) =
+                                self.decl_to_sym.get(&g.name.span)
+                            {
+                                if let Some(&struct_g) = struct_gens.get(idx) {
+                                    self.impl_to_struct_generic
+                                        .insert(impl_g_sym, struct_g);
+                                }
+                            }
+                        }
+                    }
+                }
                 for method in &i.methods {
                     self.resolve_fn(method);
                 }
@@ -1143,6 +1197,13 @@ impl Resolver {
 
     fn resolve_fn(&mut self, f: &FnDecl) {
         self.enter_scope();
+        // Two passes over generic params: first intern every name so
+        // a later param's bound can mention an earlier param OR a
+        // later one — `<I, F: Fn1<I::Item, U>, U>` references `U`
+        // before its declaration. Without this, bound resolution of
+        // F sees `U` unresolved. Second pass does the bound-arg
+        // resolution itself.
+        let mut param_ids: Vec<SymbolId> = Vec::with_capacity(f.generics.len());
         for g in &f.generics {
             // A generic-impl method carries the impl's `<T>` (merged
             // in by the parser). The first method of the impl to
@@ -1160,15 +1221,30 @@ impl Resolver {
                 self.decl_to_sym.insert(g.name.span, id);
                 id
             };
+            param_ids.push(id);
+        }
+        for (g, id) in f.generics.iter().zip(param_ids.iter().copied()) {
             // Resolve each `T: Bound` to the bound trait's symbol.
             // Bounds may be paths (`std::Iterator`), so dispatch
-            // through `lookup_path` rather than `lookup`.
+            // through `lookup_path` rather than `lookup`. Each bound
+            // path may carry generic args (`F: Fn1<I::Item, U>`);
+            // resolve those into `type_resolutions` so the checker
+            // can propagate inference from bound args back to outer
+            // type params.
             let mut bound_syms: Vec<SymbolId> = Vec::new();
             for b in &g.bounds {
                 let display = path_display(b);
                 if let Some((bsym, _)) = self.lookup_path(&b.segments) {
                     if matches!(self.symbols[bsym.0 as usize].kind, SymbolKind::Trait) {
                         bound_syms.push(bsym);
+                        if !b.generic_args.is_empty() {
+                            let mut arg_spans = Vec::with_capacity(b.generic_args.len());
+                            for a in &b.generic_args {
+                                self.resolve_type(a);
+                                arg_spans.push(a.span());
+                            }
+                            self.generic_bound_args.insert((id, bsym), arg_spans);
+                        }
                     } else {
                         self.error(
                             format!("`{}` is not a trait", display),

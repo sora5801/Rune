@@ -95,11 +95,15 @@ rune: linked with clang -> primes.exe
   construct, threaded through codegen's per-loop exit-block stack
   with ARC-local cleanup at the snapshot. `Vec<T>` joins the protocol
   through `v.iter() -> std::VecIter<T>`, plus prelude adapters
-  `std::Map<I, U>` (with a named-fn callback), `std::Filter<I>`
-  (with a named-fn predicate), and `std::collect<T: Iterator>(it: T)
-  -> Vec<T::Item>` — the pipeline-style
-  `collect(Filter { iter: Map { iter: v.iter(), f: double },
-  pred: gt_three })` works end-to-end.
+  `std::Map<I, F, U>` and `std::Filter<I, P>` (with `F: Fn1<I::Item,
+  U>` / `P: Fn1<I::Item, bool>` — any callable: named fns,
+  non-capturing closures, OR capturing closures), and
+  `std::collect<T: Iterator>(it: T) -> Vec<T::Item>` — the pipeline-
+  style `collect(Filter { iter: Map { iter: v.iter(), f: |x: i64|
+  x * mult }, pred: |y: i64| y > min })` works end-to-end including
+  captures. Bound-arg propagation in the checker pins Map's `U`
+  from the closure's return type via the `F: Fn1<I::Item, U>`
+  bound (no need to mention U directly in a field).
 - **Function-pointer values + closures (capturing)** — named
   `fn` items are first-class values; closure literals `|x| body`
   / `|x, y| body` / `|| body` lower to anonymous fn items
@@ -107,10 +111,10 @@ rune: linked with clang -> primes.exe
   captured fields plus a `call` method (capturing). The prelude
   declares `trait Fn1<A, R> { fn call(self: Self, a: A) -> R; }`.
   Capturing closures need a type-pinning annotation today (`let
-  f: fn(i64) -> i64 = |x| x * mult;`); the iterator-adapter
-  pipeline (`Map { f: |x| ... }`) is deferred — the field type
-  needs a closure-to-fn-pointer coercion that lands in a
-  follow-up.
+  f: fn(i64) -> i64 = |x| x * mult;`) OR a contextual hint
+  (`let m = std::Map { iter: ..., f: |x: i64| x * mult };` — the
+  bound flows the param's type in); bottom-up param inference
+  from body usage is the remaining follow-up.
 - **`dyn Trait`** — dynamic dispatch. A concrete type coerces to a
   trait object (a boxed method table); `s.method()` on a `dyn`
   dispatches through it via `call_indirect`. The box is ARC-managed —
@@ -294,15 +298,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Closures in iterator adapters (`Map { f: |x| ... }`) — the
-   closure-to-fn-pointer-field coercion that the Map-pipeline
-   needs
-2. Bottom-up param inference for closures (`let f = |x| x *
+1. Bottom-up param inference for closures (`let f = |x| x *
    mult` without the annotation)
-3. `HashMap<K, V>` — the bigger collections piece
-4. Range as a `RangeIter` struct — unify the for-over-range
+2. `HashMap<K, V>` — the bigger collections piece
+3. Range as a `RangeIter` struct — unify the for-over-range
    codegen with the Iterator protocol
-5. `From`-based error conversion for `?`
+4. `From`-based error conversion for `?`
 6. `continue` keyword — mirror of `break` over the existing
    loop-exit-stack pattern
 7. Trait default-method bodies — `.collect()` as a chained method

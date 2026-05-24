@@ -974,6 +974,30 @@ fn resolve_method_calls_in_expr(
     }
     // Now try to rewrite this node if it's a resolvable MethodCall.
     if let MethodCall { receiver, method, args } = &e.kind {
+        // `<Ty::Fn>.call(args)` — when a fn pointer (named fn or
+        // session-057 non-capturing closure) flows into a slot bound
+        // by `Fn1<A, R>`, the body calls `f.call(x)` on the generic
+        // F. After F monomorphizes to a Ty::Fn, the call has no
+        // impl_methods entry — there's no struct to look up. Rewrite
+        // to IndirectCall: invoke the fn pointer directly with the
+        // args. This is the "Ty::Fn satisfies Fn1" coercion done at
+        // the call site rather than at the value site (cheaper:
+        // no wrapper struct, no extra allocation). The original
+        // MethodCall's `ty` was Fn1's R (a TypeParam in the trait's
+        // generic list) that the monomorphizer's struct-side subst
+        // didn't reach; refresh from the callee's actual return
+        // type, which is now fully concrete.
+        if let Ty::Fn { ret, .. } = &receiver.ty {
+            if method == "call" {
+                let new_ty = (**ret).clone();
+                e.kind = IndirectCall {
+                    callee: receiver.clone(),
+                    args: args.clone(),
+                };
+                e.ty = new_ty;
+                return;
+            }
+        }
         let recv_sym = match &receiver.ty {
             Ty::Struct(s, _) | Ty::Enum(s, _) => Some(*s),
             _ => None,
@@ -984,6 +1008,28 @@ fn resolve_method_calls_in_expr(
                 call_args.push((**receiver).clone());
                 call_args.extend(args.iter().cloned());
                 e.kind = Call { callee: fn_sym, args: call_args };
+                // The original MethodCall's `ty` was the trait's
+                // declared return type (a TypeParam like Fn1::R)
+                // which the impl-vs-struct subst doesn't reach.
+                // For closure structs, recover the real type from
+                // the synth call method's return — we don't have
+                // direct access to fn_signatures here, but we can
+                // pierce one level deeper by walking the resulting
+                // Call's args' types: the closure's call method's
+                // return type matches what the user wrote in the
+                // closure body, which we already attached to the
+                // MethodCall... no, we don't have it.
+                //
+                // Defer: re-typing requires monomorphize to know
+                // the callee's signature. For now we leave `e.ty`
+                // as-is; codegen errors flag any unresolved
+                // TypeVars (which still surface as "type T#NN not
+                // supported"). The Map::next + closure-struct
+                // case is what's broken; resolved by the
+                // session-061 propagate-bound-inference machinery
+                // (the U TypeVar gets pinned earlier, so the
+                // MethodCall's `ty` substitutes correctly via the
+                // outer monomorphize subst).
             }
         }
     }
