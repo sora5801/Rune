@@ -216,17 +216,15 @@ void rune_struct_dealloc(void* p, int64_t size) {
 // Open-addressing linear-probed table with i64 keys + 8-byte values
 // (any Rune type that fits a slot — primitives, struct/vec/str
 // pointers, fn-pointers, dyn boxes). Initial cap 8, doubles when
-// occupancy exceeds 75%. No deletion in v0.x (no tombstones).
-// Layout: `occupied` byte (0 = empty, 1 = live), parallel `keys`
-// and `vals` arrays, plus the standard rc + weak_count for ARC.
-//
-// Value-side ARC is the user's responsibility — the runtime stores
-// raw 8-byte slots and doesn't retain/release the values it holds.
-// A future session can add a "drop helper fn pointer" field per
-// hashmap instance, but v0.x keeps the type i64-only for both
-// position aware analysis (`is_arc_type(Ty::HashMap(_,_))` returns
-// true for the *container itself*; the user explicitly retains any
-// reference-counted V before insert if they want correctness).
+// occupancy exceeds 75%. Tombstone-based deletion: `occupied` is
+// a tri-state byte — 0=empty, 1=live, 2=tombstone. Probes continue
+// past tombstones (since the key being looked up may have been
+// inserted after a now-removed neighbor and lives further down the
+// chain), but matching only happens against live slots. Insert
+// reuses the first tombstone seen along the probe path. Grow drops
+// tombstones (they don't carry over to the rehashed table). The
+// per-V release walk synthesized at codegen time matches occupied
+// == 1 specifically to skip tombstoned slots.
 struct rune_hashmap {
     int64_t* keys;
     int64_t* vals;
@@ -263,18 +261,49 @@ struct rune_hashmap* rune_hashmap_new(void) {
     return m;
 }
 
-// Find the bucket index for `k`: either the slot already holding
-// `k` (occupied=1, key matches), or the first empty slot reached
-// during linear probing. Caller checks `occupied[i]` to know which.
+// Find the bucket index for `k` — the slot holding `k` (occupied==1
+// && key matches), the first empty slot (occupied==0), or the first
+// tombstone if no later match is found. Caller distinguishes by
+// reading `occupied[i]`. Linear probe stops at empty; continues
+// past tombstones (the key may have been inserted before a removal
+// later in the chain).
 static int64_t rune_hashmap_probe(
     const struct rune_hashmap* m,
     int64_t k
 ) {
     uint64_t mask = (uint64_t)(m->cap - 1);
     uint64_t i = rune_hashmap_hash_i64(k) & mask;
-    while (m->occupied[i] && m->keys[i] != k) {
+    while (m->occupied[i] != 0) {
+        if (m->occupied[i] == 1 && m->keys[i] == k) {
+            return (int64_t)i;
+        }
         i = (i + 1) & mask;
     }
+    return (int64_t)i;
+}
+
+// Like probe but tracks the first tombstone seen — so an insert
+// can reuse it instead of extending the probe chain. Returns the
+// insertion slot directly: if `k` is already live, that slot; if
+// not but a tombstone was passed, that one; otherwise the first
+// empty slot.
+static int64_t rune_hashmap_probe_for_insert(
+    const struct rune_hashmap* m,
+    int64_t k
+) {
+    uint64_t mask = (uint64_t)(m->cap - 1);
+    uint64_t i = rune_hashmap_hash_i64(k) & mask;
+    int64_t first_tomb = -1;
+    while (m->occupied[i] != 0) {
+        if (m->occupied[i] == 1 && m->keys[i] == k) {
+            return (int64_t)i;
+        }
+        if (m->occupied[i] == 2 && first_tomb < 0) {
+            first_tomb = (int64_t)i;
+        }
+        i = (i + 1) & mask;
+    }
+    if (first_tomb >= 0) return first_tomb;
     return (int64_t)i;
 }
 
@@ -283,11 +312,13 @@ static void rune_hashmap_grow(struct rune_hashmap* m) {
     int64_t* new_keys = (int64_t*)malloc((size_t)new_cap * sizeof(int64_t));
     int64_t* new_vals = (int64_t*)malloc((size_t)new_cap * sizeof(int64_t));
     int8_t*  new_occ  = (int8_t*) calloc((size_t)new_cap, sizeof(int8_t));
-    // Rehash live entries into the new table by probing from the
-    // hash. The relative order changes but the contents don't.
+    // Rehash live entries into the new table; tombstones are
+    // dropped (they're not real data and don't carry over). The
+    // probe chains shrink because tombstone-extended chains
+    // collapse.
     uint64_t mask = (uint64_t)(new_cap - 1);
     for (int64_t i = 0; i < m->cap; i++) {
-        if (!m->occupied[i]) continue;
+        if (m->occupied[i] != 1) continue;
         int64_t k = m->keys[i];
         uint64_t j = rune_hashmap_hash_i64(k) & mask;
         while (new_occ[j]) j = (j + 1) & mask;
@@ -311,8 +342,12 @@ void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
     if (m->cap == 0 || (m->len + 1) * 4 > m->cap * 3) {
         rune_hashmap_grow(m);
     }
-    int64_t i = rune_hashmap_probe(m, k);
-    if (!m->occupied[i]) {
+    int64_t i = rune_hashmap_probe_for_insert(m, k);
+    if (m->occupied[i] != 1) {
+        // Empty or tombstone — fresh insert. (Empty contributes to
+        // load-factor; tombstone reuse doesn't, but we still
+        // increment len since the slot transitions to live and the
+        // user's `len` counter goes up.)
         m->occupied[i] = 1;
         m->keys[i] = k;
         m->len += 1;
@@ -323,17 +358,53 @@ void rune_hashmap_insert(struct rune_hashmap* m, int64_t k, int64_t v) {
 int64_t rune_hashmap_get(const struct rune_hashmap* m, int64_t k) {
     if (m->cap == 0) return 0;
     int64_t i = rune_hashmap_probe(m, k);
-    return m->occupied[i] ? m->vals[i] : 0;
+    return m->occupied[i] == 1 ? m->vals[i] : 0;
 }
 
 int8_t rune_hashmap_contains_key(const struct rune_hashmap* m, int64_t k) {
     if (m->cap == 0) return 0;
     int64_t i = rune_hashmap_probe(m, k);
-    return m->occupied[i] ? 1 : 0;
+    return m->occupied[i] == 1 ? 1 : 0;
 }
 
 int64_t rune_hashmap_len(const struct rune_hashmap* m) {
     return m->len;
+}
+
+// Remove the entry for `k`. Returns the value that was stored
+// (or 0 if `k` wasn't present). The slot becomes a tombstone so
+// later probes still continue past it for keys inserted after a
+// neighboring removal — but the slot is reusable on insert.
+// Callers releasing ARC values should read the returned val and
+// release it themselves; the runtime doesn't know V's type.
+int64_t rune_hashmap_remove(struct rune_hashmap* m, int64_t k) {
+    if (m->cap == 0) return 0;
+    int64_t i = rune_hashmap_probe(m, k);
+    if (m->occupied[i] != 1) return 0;
+    int64_t v = m->vals[i];
+    m->occupied[i] = 2;
+    // Don't clear keys[i] / vals[i] — probe checks occupied first.
+    m->len -= 1;
+    return v;
+}
+
+// Low-level inspectors used by the HashMapKeysIter (defined in
+// std.rn) to walk occupied slots without going through the
+// hash-driven probe path. `cap` and `is_live_at` are read-only;
+// `key_at` returns the slot's key (caller's responsibility to
+// only invoke when is_live_at returned 1).
+int64_t rune_hashmap_cap(const struct rune_hashmap* m) {
+    return m->cap;
+}
+
+int8_t rune_hashmap_is_live_at(const struct rune_hashmap* m, int64_t i) {
+    if (m->cap == 0 || i < 0 || i >= m->cap) return 0;
+    return m->occupied[i] == 1 ? 1 : 0;
+}
+
+int64_t rune_hashmap_key_at(const struct rune_hashmap* m, int64_t i) {
+    if (m->cap == 0 || i < 0 || i >= m->cap) return 0;
+    return m->keys[i];
 }
 
 void rune_retain_hashmap(struct rune_hashmap* m) {

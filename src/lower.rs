@@ -545,6 +545,15 @@ impl<'a> Lowerer<'a> {
                         return desugar;
                     }
                 }
+                // Session 068: `m.keys()` on a HashMap builds a
+                // HashMapKeysIter struct lit holding the map and a
+                // zero cursor. The Iterator impl in std.rn walks
+                // cursor 0..cap, skipping non-live slots.
+                if matches!(&receiver_hir.ty, Ty::HashMap(_, _)) && method.name == "keys" {
+                    if let Some(desugar) = self.lower_hashmap_keys(receiver_hir.clone()) {
+                        return desugar;
+                    }
+                }
                 // User-defined methods on structs (via `impl`) are lowered
                 // to a regular Call with the receiver as the first
                 // argument. Builtin methods go through HirExprKind::MethodCall.
@@ -1974,6 +1983,47 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Build `std::HashMapKeysIter<V> { map: <receiver>, cursor: 0 }`
+    /// from a `HashMap<i64, V>` receiver. The Iterator impl in
+    /// std.rn walks cursor 0..cap via the three poly-builtin
+    /// inspection fns (`hashmap_cap`, `hashmap_is_live_at`,
+    /// `hashmap_key_at`), skipping non-live slots.
+    fn lower_hashmap_keys(&self, receiver_hir: HirExpr) -> Option<HirExprKind> {
+        let v_ty = match &receiver_hir.ty {
+            Ty::HashMap(_, v) => (**v).clone(),
+            _ => return None,
+        };
+        let keys_sym = self.find_struct_sym("HashMapKeysIter")?;
+        let layout = self.check.struct_layouts.get(&keys_sym)?;
+        let map_offset = layout.fields.iter().find(|f| f.name == "map").map(|f| f.offset)?;
+        let cursor_offset =
+            layout.fields.iter().find(|f| f.name == "cursor").map(|f| f.offset)?;
+        let map_ty_hir = Ty::HashMap(Box::new(Ty::Int(IntTy::I64)), Box::new(v_ty));
+        let cursor_lit = HirExpr {
+            kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+            ty: Ty::Int(IntTy::I64),
+        };
+        let mut fields_in_decl_order: Vec<(u32, HirExpr)> = Vec::with_capacity(2);
+        for decl in &layout.fields {
+            match decl.name.as_str() {
+                "map" => fields_in_decl_order.push((
+                    map_offset,
+                    HirExpr {
+                        kind: receiver_hir.kind.clone(),
+                        ty: map_ty_hir.clone(),
+                    },
+                )),
+                "cursor" => fields_in_decl_order.push((cursor_offset, cursor_lit.clone())),
+                _ => return None,
+            }
+        }
+        Some(HirExprKind::StructLit {
+            sym: keys_sym,
+            fields: fields_in_decl_order,
+            size: layout.size,
+        })
+    }
+
     /// Discriminant of a variant on an enum, looked up by name.
     fn enum_variant_disc(
         &self,
@@ -2026,6 +2076,14 @@ impl<'a> Lowerer<'a> {
             // hashmap_new() takes no args — the dispatch is by name
             // alone (no arg type to discriminate on).
             ("hashmap_new", None) => "hashmap_new",
+            // Session 068: low-level hashmap inspectors used by
+            // HashMapKeysIter. The first arg is the HashMap; the
+            // second (if present) is an i64 index. The runtime
+            // helpers ignore K/V — they just read the descriptor's
+            // i64 fields.
+            ("hashmap_cap", Some(Ty::HashMap(_, _))) => "hashmap_cap",
+            ("hashmap_is_live_at", Some(Ty::HashMap(_, _))) => "hashmap_is_live_at",
+            ("hashmap_key_at", Some(Ty::HashMap(_, _))) => "hashmap_key_at",
             _ => {
                 return HirExprKind::Unsupported(format!(
                     "no dispatch for polymorphic builtin `{}` with that argument type",

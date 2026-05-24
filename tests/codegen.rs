@@ -303,6 +303,121 @@ fn hashmap_value_is_str_releases_via_walk() {
 }
 
 #[test]
+fn hashmap_remove_returns_previous_value() {
+    // Session 068: m.remove(k) returns the previous value (or 0
+    // when k was absent). The slot becomes a tombstone — len
+    // decrements, contains_key returns false.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 100);
+            m.insert(2, 200);
+            m.insert(3, 300);
+            let removed: i64 = m.remove(2);
+            let present_after: i64 = if m.contains_key(2) { 1 } else { 0 };
+            let len_after: i64 = m.len();
+            removed + present_after * 10000 + len_after
+        }
+    "#;
+    // Removed 200; contains(2)=false (=0); len=2. Sum = 200 + 0 + 2 = 202.
+    assert_eq!(run_main(src), 202);
+}
+
+#[test]
+fn hashmap_remove_missing_key_returns_zero() {
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 100);
+            let r1: i64 = m.remove(99);  // missing
+            let r2: i64 = m.remove(99);  // double-missing
+            r1 + r2 + m.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn hashmap_remove_then_reinsert_reuses_tombstone() {
+    // Inserting back the removed key should restore m.contains.
+    // The probe-for-insert reuses the tombstone slot.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(7, 77);
+            m.remove(7);
+            m.insert(7, 88);
+            m.get(7) + m.len()
+        }
+    "#;
+    // get(7)=88, len=1, total=89
+    assert_eq!(run_main(src), 89);
+}
+
+#[test]
+fn hashmap_keys_iter_visits_each_live_key_once() {
+    // Session 068: HashMapKeysIter yields every live key exactly
+    // once. Order is hash-driven (not insertion order) so we
+    // accumulate via sum which is order-independent.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 10);
+            m.insert(2, 20);
+            m.insert(3, 30);
+            m.insert(4, 40);
+            m.insert(5, 50);
+            let mut key_sum: i64 = 0;
+            let mut val_sum: i64 = 0;
+            for k in m.keys() {
+                key_sum = key_sum + k;
+                val_sum = val_sum + m.get(k);
+            }
+            key_sum * 1000 + val_sum
+        }
+    "#;
+    // keys sum = 1+2+3+4+5 = 15; vals sum = 10+20+30+40+50 = 150.
+    // 15 * 1000 + 150 = 15150.
+    assert_eq!(run_main(src), 15150);
+}
+
+#[test]
+fn hashmap_keys_iter_skips_tombstones() {
+    // After removing keys, the iterator must skip their slots.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 10);
+            m.insert(2, 20);
+            m.insert(3, 30);
+            m.remove(2);
+            let mut sum: i64 = 0;
+            for k in m.keys() {
+                sum = sum + k * 100 + m.get(k);
+            }
+            sum
+        }
+    "#;
+    // Live keys: 1, 3. 1*100+10 + 3*100+30 = 110 + 330 = 440.
+    assert_eq!(run_main(src), 440);
+}
+
+#[test]
+fn hashmap_keys_iter_empty_map() {
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            let mut sum: i64 = 0;
+            for k in m.keys() {
+                sum = sum + k;
+            }
+            sum
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
 fn hashmap_count_distinct_via_insert() {
     // Idiom: count by inserting `1` (or += 1) on each occurrence.
     // Here we just insert once per key and read m.len() to confirm

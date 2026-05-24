@@ -129,6 +129,10 @@ unsafe extern "C" {
     fn rune_hashmap_get(m: *const u8, k: i64) -> i64;
     fn rune_hashmap_contains_key(m: *const u8, k: i64) -> i8;
     fn rune_hashmap_len(m: *const u8) -> i64;
+    fn rune_hashmap_remove(m: *mut u8, k: i64) -> i64;
+    fn rune_hashmap_cap(m: *const u8) -> i64;
+    fn rune_hashmap_is_live_at(m: *const u8, i: i64) -> i8;
+    fn rune_hashmap_key_at(m: *const u8, i: i64) -> i64;
     fn rune_retain_hashmap(m: *mut u8);
     fn rune_release_hashmap(m: *mut u8);
 }
@@ -756,16 +760,19 @@ impl<M: Module> Codegen<M> {
         let more = builder.ins().icmp(IntCC::SignedLessThan, iv, cap);
         builder.ins().brif(more, body, &[], finish, &[]);
 
-        // body: read occupied[i] (i8); if non-zero, release vals[i].
+        // body: read occupied[i] (i8); release vals[i] only when
+        // == 1 (live). Session 068's tombstones use 2 — skipping
+        // them avoids double-free of a value that the user already
+        // released via the .remove path.
         builder.switch_to_block(body);
         builder.seal_block(body);
         let occ_ptr = builder.ins().load(types::I64, MemFlags::new(), p, 16);
         let iv2 = builder.use_var(Variable::new(0));
         let occ_addr = builder.ins().iadd(occ_ptr, iv2);
         let occ = builder.ins().load(types::I8, MemFlags::new(), occ_addr, 0);
-        let zero_i8 = builder.ins().iconst(types::I8, 0);
-        let is_occupied = builder.ins().icmp(IntCC::NotEqual, occ, zero_i8);
-        builder.ins().brif(is_occupied, slot_release, &[], after_slot, &[]);
+        let one_i8 = builder.ins().iconst(types::I8, 1);
+        let is_live = builder.ins().icmp(IntCC::Equal, occ, one_i8);
+        builder.ins().brif(is_live, slot_release, &[], after_slot, &[]);
 
         // slot_release: load vals[i] (i64), release the V value.
         builder.switch_to_block(slot_release);
@@ -1045,6 +1052,10 @@ impl Codegen<JITModule> {
         builder.symbol("rune_hashmap_get", rune_hashmap_get as *const u8);
         builder.symbol("rune_hashmap_contains_key", rune_hashmap_contains_key as *const u8);
         builder.symbol("rune_hashmap_len", rune_hashmap_len as *const u8);
+        builder.symbol("rune_hashmap_remove", rune_hashmap_remove as *const u8);
+        builder.symbol("rune_hashmap_cap", rune_hashmap_cap as *const u8);
+        builder.symbol("rune_hashmap_is_live_at", rune_hashmap_is_live_at as *const u8);
+        builder.symbol("rune_hashmap_key_at", rune_hashmap_key_at as *const u8);
         builder.symbol("rune_retain_hashmap", rune_retain_hashmap as *const u8);
         builder.symbol("rune_release_hashmap", rune_release_hashmap as *const u8);
         let module = JITModule::new(builder);
@@ -2566,7 +2577,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
             (Ty::HashMap(_, v_ty), m)
-                if matches!(m, "insert" | "get" | "contains_key" | "len") =>
+                if matches!(m, "insert" | "get" | "contains_key" | "len" | "remove") =>
             {
                 let val_ty = (**v_ty).clone();
                 let val_cty = cranelift_type(&val_ty)?;
@@ -2580,6 +2591,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     "get" => "hashmap_get",
                     "contains_key" => "hashmap_contains_key",
                     "len" => "hashmap_len",
+                    "remove" => "hashmap_remove",
                     _ => unreachable!(),
                 };
                 let func_id = self.ensure_runtime_func(runtime_key)?;
@@ -2621,6 +2633,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         self.emit_arc_call("retain", &val_ty, raw)?;
                         Ok(Some(raw))
                     } else if val_cty != types::I64 {
+                        Ok(Some(self.builder.ins().ireduce(val_cty, raw)))
+                    } else {
+                        Ok(Some(raw))
+                    }
+                } else if m == "remove" {
+                    // The slot transferred its +1 to the caller —
+                    // no retain. (The slot itself became a
+                    // tombstone, so the release walk skips it.)
+                    if val_cty != types::I64 {
                         Ok(Some(self.builder.ins().ireduce(val_cty, raw)))
                     } else {
                         Ok(Some(raw))
@@ -3749,6 +3770,33 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             ("rune_hashmap_len", sig)
+        }
+        "hashmap_remove" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_remove", sig)
+        }
+        "hashmap_cap" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_cap", sig)
+        }
+        "hashmap_is_live_at" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_hashmap_is_live_at", sig)
+        }
+        "hashmap_key_at" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_hashmap_key_at", sig)
         }
         "retain_hashmap" => {
             let mut sig = module.make_signature();

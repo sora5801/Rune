@@ -733,6 +733,25 @@ impl Resolver {
             zero,
             SymbolKind::PolyBuiltinFn("hashmap_new"),
         );
+        // Low-level inspection builtins used by std::HashMapKeysIter
+        // — the user shouldn't call these directly, but they're
+        // resolved like any other polybuiltin so std.rn can wire
+        // them into the iterator's `next` body.
+        self.intern(
+            "hashmap_cap".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_cap"),
+        );
+        self.intern(
+            "hashmap_is_live_at".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_is_live_at"),
+        );
+        self.intern(
+            "hashmap_key_at".to_string(),
+            zero,
+            SymbolKind::PolyBuiltinFn("hashmap_key_at"),
+        );
         self.intern(
             "std::HashMap".to_string(),
             zero,

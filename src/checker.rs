@@ -3372,6 +3372,41 @@ impl<'r> Checker<'r> {
                 }
                 inner
             }
+            "hashmap_cap" => {
+                if arg_tys.len() != 1
+                    || !matches!(arg_tys[0], Ty::HashMap(_, _) | Ty::Error)
+                {
+                    self.error(span, "`hashmap_cap` expects a HashMap argument".to_string());
+                    return Ty::Error;
+                }
+                Ty::Int(crate::ty::IntTy::I64)
+            }
+            "hashmap_is_live_at" => {
+                if arg_tys.len() != 2
+                    || !matches!(arg_tys[0], Ty::HashMap(_, _) | Ty::Error)
+                    || !matches!(arg_tys[1], Ty::Int(_) | Ty::Error)
+                {
+                    self.error(
+                        span,
+                        "`hashmap_is_live_at(map, i)` expects (HashMap, i64)".to_string(),
+                    );
+                    return Ty::Error;
+                }
+                Ty::Bool
+            }
+            "hashmap_key_at" => {
+                if arg_tys.len() != 2
+                    || !matches!(arg_tys[0], Ty::HashMap(_, _) | Ty::Error)
+                    || !matches!(arg_tys[1], Ty::Int(_) | Ty::Error)
+                {
+                    self.error(
+                        span,
+                        "`hashmap_key_at(map, i)` expects (HashMap, i64)".to_string(),
+                    );
+                    return Ty::Error;
+                }
+                Ty::Int(crate::ty::IntTy::I64)
+            }
             "hashmap_new" => {
                 // hashmap_new() -> HashMap<i64, V>. The V is left as
                 // a fresh inference TypeVar so the surrounding let's
@@ -3692,17 +3727,29 @@ impl<'r> Checker<'r> {
     /// `vec.iter()` builtin method. Constructs a `std::VecIter<elem>`
     /// from a `Vec<elem>`. The actual heap construction is emitted
     /// by the lowerer (`MethodCall` on a `Ty::Vec` with name "iter"
-    /// is intercepted there).
+    /// is intercepted there). Same pattern for `m.keys()` on a
+    /// HashMap: returns `std::HashMapKeysIter<V>`; the lowerer
+    /// builds the struct literal.
     fn builtin_vec_iter_sig(&self, recv: &Ty, name: &str) -> Option<MethodSig> {
-        if name != "iter" {
-            return None;
+        if name == "iter" {
+            if let Ty::Vec(elem) = recv {
+                let vec_iter_sym = self.find_struct_sym("VecIter")?;
+                return Some(MethodSig {
+                    params: vec![],
+                    ret: Ty::Struct(vec_iter_sym, vec![(**elem).clone()]),
+                });
+            }
         }
-        let Ty::Vec(elem) = recv else { return None };
-        let vec_iter_sym = self.find_struct_sym("VecIter")?;
-        Some(MethodSig {
-            params: vec![],
-            ret: Ty::Struct(vec_iter_sym, vec![(**elem).clone()]),
-        })
+        if name == "keys" {
+            if let Ty::HashMap(_, v) = recv {
+                let keys_iter_sym = self.find_struct_sym("HashMapKeysIter")?;
+                return Some(MethodSig {
+                    params: vec![],
+                    ret: Ty::Struct(keys_iter_sym, vec![(**v).clone()]),
+                });
+            }
+        }
+        None
     }
 
     fn check_match(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Ty {
@@ -4228,6 +4275,14 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
         (Ty::HashMap(_, _), "len") => Some(MethodSig {
             params: vec![],
             ret: Ty::Int(IntTy::I64),
+        }),
+        // Session 068: remove returns the previous value (or 0
+        // when the key was absent). For ARC value types, the
+        // caller owns a +1 on the returned value; the runtime
+        // doesn't retain. See compile_method_call below.
+        (Ty::HashMap(k, v), "remove") => Some(MethodSig {
+            params: vec![(**k).clone()],
+            ret: (**v).clone(),
         }),
         _ => None,
     }

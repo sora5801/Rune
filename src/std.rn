@@ -100,6 +100,35 @@ pub mod std {
         }
     }
 
+    /* Iterator over a HashMap's keys. Session 068 introduces it
+       alongside the runtime's tombstone-based remove. The body
+       walks slot indices 0..cap, skipping non-live slots
+       (occupied != 1, including tombstones). The user calls
+       `m.keys()` to construct one; the iterator yields i64 keys
+       in arbitrary order (hash-driven, not insertion-driven).
+       For values, the user looks each key up: `for k in m.keys()
+       { let v = m.get(k); ... }`. */
+    pub struct HashMapKeysIter<V> {
+        map: HashMap<i64, V>,
+        cursor: i64,
+    }
+
+    pub impl<V> Iterator for HashMapKeysIter<V> {
+        type Item = i64;
+        fn next(self: HashMapKeysIter<V>) -> Option<i64> {
+            let cap: i64 = hashmap_cap(self.map);
+            while self.cursor < cap {
+                if hashmap_is_live_at(self.map, self.cursor) {
+                    let k: i64 = hashmap_key_at(self.map, self.cursor);
+                    self.cursor = self.cursor + 1;
+                    return Option::Some(k);
+                }
+                self.cursor = self.cursor + 1;
+            }
+            Option::None
+        }
+    }
+
     /* Adapter: yields `f(x)` for each `x` in the wrapped iterator.
        `F` is any one-argument callable — typically a closure literal
        (capturing or not) or a synthesized fn wrapper. The Fn1 bound
