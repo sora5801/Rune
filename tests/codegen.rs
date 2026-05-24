@@ -241,6 +241,105 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn iterator_count_default_method() {
+    // Session 076: .count() is a default method on Iterator —
+    // every impl (VecIter, RangeIter, Map, Filter,
+    // HashMapKeysIter, HashMapEntriesIter) inherits it. Each
+    // call specializes the synth default fn per Self.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter().count()
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn iterator_count_on_range() {
+    let src = r#"
+        fn main() -> i64 {
+            (0..7).count()
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn iterator_count_on_filter_adapter() {
+    // Compose: count via the Filter adapter's inherited
+    // default. Filter is constructed via struct-lit since
+    // .filter() isn't a method yet (would need method-level
+    // generic params).
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let f: std::Filter<std::VecIter<i64>, fn(i64) -> bool> =
+                std::Filter { iter: v.iter(), pred: |x| x > 2 };
+            f.count()
+        }
+    "#;
+    // 3, 4, 5 → 3 elements
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn iterator_sum_default_method() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(10); v.push(20); v.push(30);
+            v.iter().sum()
+        }
+    "#;
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn iterator_sum_on_range() {
+    let src = r#"
+        fn main() -> i64 {
+            (1..6).sum()
+        }
+    "#;
+    // 1 + 2 + 3 + 4 + 5 = 15
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn iterator_sum_on_map_adapter_with_closure() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4);
+            let m = std::Map { iter: v.iter(), f: |x| x * x };
+            m.sum()
+        }
+    "#;
+    // 1 + 4 + 9 + 16 = 30
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn iterator_count_through_filter_and_map() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            let f: std::Filter<std::VecIter<i64>, fn(i64) -> bool> =
+                std::Filter { iter: v.iter(), pred: |x| x > 1 };
+            let m = std::Map { iter: f, f: |x| x * 10 };
+            m.count()
+        }
+    "#;
+    // After filter > 1: 2,3,4,5 → 4 elements. Map doesn't
+    // change count.
+    assert_eq!(run_main(src), 4);
+}
+
+#[test]
 fn hashmap_entries_iter_yields_pairs() {
     // Session 075: m.entries() yields (key, value) tuples for
     // every live slot. Mirror of m.keys() (session 068) plus

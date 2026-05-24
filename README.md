@@ -314,11 +314,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
-2. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
-3. More default-body trait methods — `.map(f)`, `.filter(p)`, `.fold`, `.count`, `.sum`
-4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
-5. Self-hosted bootstrap (long-term)
+1. Method-level generic params in trait methods — unblocks `.map(f)`, `.filter(p)`, `.fold` as methods
+2. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` beyond i64
+3. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
+4. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
+5. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+6. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

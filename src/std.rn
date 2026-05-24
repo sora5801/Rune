@@ -43,6 +43,35 @@ pub mod std {
             }
             v
         }
+        /* Session 076: count the elements the iterator yields.
+           Every Iterator impl inherits this; the monomorphizer
+           specializes per Self, so `self.next()` dispatches to
+           the impl's concrete next at each call site. */
+        fn count(self: Self) -> i64 {
+            let mut n: i64 = 0;
+            while true {
+                match self.next() {
+                    Option::Some(_) => { n = n + 1; }
+                    Option::None => { break; }
+                }
+            }
+            n
+        }
+        /* Sum the elements. v0.x assumes `Self::Item` is `i64` —
+           the body's `total + x` is i64 arithmetic and codegen
+           rejects non-i64 specializations. A future session
+           with numeric trait bounds (`Self::Item: Add<Output =
+           Self::Item>`) would generalize this. */
+        fn sum(self: Self) -> i64 {
+            let mut total: i64 = 0;
+            while true {
+                match self.next() {
+                    Option::Some(x) => { total = total + x; }
+                    Option::None => { break; }
+                }
+            }
+            total
+        }
     }
 
     /* One-argument callable: a closure literal `|x| body` that
