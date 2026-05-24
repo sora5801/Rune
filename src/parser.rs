@@ -984,11 +984,20 @@ impl Parser {
                     lhs = Expr::Cast { expr: Box::new(lhs), ty, span };
                 }
                 InfixKind::Range(inclusive) => {
-                    let rhs = self.parse_expr_bp(rbp)?;
-                    let span = Span::new(lhs.span().start, rhs.span().end);
+                    // Session 066: `n..` with no end — check if the
+                    // next token can start an expression; if not,
+                    // leave end as None.
+                    let (rhs, end_pos) = if self.can_start_expr() {
+                        let r = self.parse_expr_bp(rbp)?;
+                        let e = r.span().end;
+                        (Some(Box::new(r)), e)
+                    } else {
+                        (None, lhs.span().end)
+                    };
+                    let span = Span::new(lhs.span().start, end_pos);
                     lhs = Expr::Range {
                         start: Some(Box::new(lhs)),
-                        end: Some(Box::new(rhs)),
+                        end: rhs,
                         inclusive,
                         span,
                     };
@@ -1000,6 +1009,32 @@ impl Parser {
 
     fn parse_unary(&mut self) -> ParseResult<Expr> {
         let span = self.peek_span();
+        // Session 066: `..n` / `..=n` / `..` as a prefix expression
+        // — a range with no start. The end (if present) follows.
+        // The infix arm in parse_expr_bp handles `lhs..rhs`; this
+        // one handles the no-lhs case at expression-start position.
+        if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
+            let inclusive = matches!(self.peek(), TokenKind::DotDotEq);
+            self.bump();
+            // Look at the next token: if it can't start an
+            // expression, the range is fully open (`..`). Otherwise
+            // parse the end. Range binding power is low (3, 4), so
+            // `..3 + 1` parses as `..(3 + 1)` only if we go all the
+            // way; here we use parse_expr_bp's range rbp so the
+            // result lines up with the infix case's right-side.
+            let end_expr = if self.can_start_expr() {
+                Some(Box::new(self.parse_expr_bp(4)?))
+            } else {
+                None
+            };
+            let end = end_expr.as_deref().map(|e| e.span().end).unwrap_or(span.end);
+            return Ok(Expr::Range {
+                start: None,
+                end: end_expr,
+                inclusive,
+                span: Span::new(span.start, end),
+            });
+        }
         let op = match self.peek() {
             TokenKind::Minus => Some(UnOp::Neg),
             TokenKind::Bang => Some(UnOp::Not),
@@ -1020,6 +1055,31 @@ impl Parser {
         } else {
             self.parse_primary()
         }
+    }
+
+    /// Whether the next token can plausibly start a new expression.
+    /// Used by session-066's open-range prefix to decide between
+    /// `..end` (consume the end) and `..` (fully open). A
+    /// conservative whitelist — `(`, `-`, `!`, literals, idents.
+    fn can_start_expr(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::LParen
+                | TokenKind::Minus
+                | TokenKind::Bang
+                | TokenKind::Tilde
+                | TokenKind::Ident(_)
+                | TokenKind::Int(_)
+                | TokenKind::Float(_)
+                | TokenKind::Str(_)
+                | TokenKind::Char(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::If
+                | TokenKind::Match
+                | TokenKind::Pipe
+                | TokenKind::PipePipe
+        )
     }
 
     fn parse_postfix_chain(&mut self, mut lhs: Expr) -> ParseResult<Expr> {

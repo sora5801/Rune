@@ -413,6 +413,66 @@ fn range_iter_through_map_pipeline() {
 }
 
 #[test]
+fn range_open_start_in_for_loop() {
+    // Session 066: `..n` (no start) defaults start to 0 in the
+    // for-over-range fast path.
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum: i64 = 0;
+            for i in ..5 {
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    // 0+1+2+3+4 = 10
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn range_open_end_with_break() {
+    // `n..` (no end) defaults end to i64::MAX — the user is
+    // expected to break out themselves.
+    let src = r#"
+        fn main() -> i64 {
+            let mut sum: i64 = 0;
+            for i in 5.. {
+                if i > 10 { break; }
+                sum = sum + i;
+            }
+            sum
+        }
+    "#;
+    // 5+6+7+8+9+10 = 45
+    assert_eq!(run_main(src), 45);
+}
+
+#[test]
+fn range_open_end_as_iter_value() {
+    // Open-ended range as a bound RangeIter value. Drive it with
+    // explicit `.next()` calls so the test terminates.
+    let src = r#"
+        fn main() -> i64 {
+            let r: std::RangeIter = 100..;
+            let mut sum: i64 = 0;
+            let mut taken: i64 = 0;
+            while taken < 3 {
+                match r.next() {
+                    std::Option::Some(v) => {
+                        sum = sum + v;
+                        taken = taken + 1;
+                    }
+                    std::Option::None => { break; }
+                }
+            }
+            sum
+        }
+    "#;
+    // 100 + 101 + 102 = 303
+    assert_eq!(run_main(src), 303);
+}
+
+#[test]
 fn range_iter_inclusive_form() {
     // The `..=` inclusive form bumps the upper bound by 1 at lower
     // time so the runtime exit `cur < end` yields end items.

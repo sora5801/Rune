@@ -1479,7 +1479,10 @@ impl<'a> Lowerer<'a> {
             }
         };
         // Special-case `for x in a..b` so users don't need a real
-        // iterator protocol to iterate integer ranges.
+        // iterator protocol to iterate integer ranges. Session 066:
+        // missing-start defaults to 0; missing-end defaults to
+        // i64::MAX (the sentinel for "no upper bound" — the user
+        // is expected to break out themselves).
         if let ast::Expr::Range { start, end, inclusive, .. } = iter {
             let start_h = start
                 .as_deref()
@@ -1492,7 +1495,7 @@ impl<'a> Lowerer<'a> {
                 .as_deref()
                 .map(|e| self.lower_expr(e))
                 .unwrap_or_else(|| HirExpr {
-                    kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                    kind: HirExprKind::Lit(HirLit::Int(i64::MAX, IntTy::I64)),
                     ty: Ty::Int(IntTy::I64),
                 });
             return HirExprKind::ForRange {
@@ -1887,10 +1890,15 @@ impl<'a> Lowerer<'a> {
                 kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
                 ty: Ty::Int(IntTy::I64),
             });
+        // Session 066: when end is missing (`n..` or `..`), use
+        // i64::MAX as the sentinel "no upper bound". The user
+        // breaks out of the loop themselves; the runtime exit
+        // `cur < end` only triggers if the user iterates ~2^63
+        // times, which is effectively never.
         let raw_end = end
             .map(|e| self.lower_expr(e))
             .unwrap_or_else(|| HirExpr {
-                kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
+                kind: HirExprKind::Lit(HirLit::Int(i64::MAX, IntTy::I64)),
                 ty: Ty::Int(IntTy::I64),
             });
         // For inclusive ranges, bump `end` by 1 so the runtime exit

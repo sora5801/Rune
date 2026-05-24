@@ -313,10 +313,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. HashMap value-release walk (close the V-leak)
 2. HashMap str-keys + remove + iteration
-3. Open-ended ranges (`..n`, `n..`)
-4. Trait default-method bodies — `.collect()` as a chained method
-5. `?` on Option + multi-impl `Into` disambiguation
-6. Self-hosted bootstrap (long-term)
+3. Trait default-method bodies — `.collect()` as a chained method
+4. `?` on Option + multi-impl `Into` disambiguation
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 
