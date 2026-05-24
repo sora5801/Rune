@@ -241,6 +241,103 @@ fn hashmap_value_is_str() {
 }
 
 #[test]
+fn try_op_with_multi_into_picks_right_target() {
+    // Session 072: a single source error struct impls Into for
+    // TWO different target error structs. Each `?` site picks
+    // the impl whose target matches the surrounding fn's err
+    // type. Pre-072 impl_methods[(SourceErr, "into")] was
+    // silently overwritten by the second impl, so only one of
+    // these tests would have worked; with disambiguation both do.
+    let src = r#"
+        struct IoErr   { code: i64 }
+        struct AppErr  { tag: i64 }
+        struct WireErr { kind: i64 }
+
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr {
+                AppErr { tag: self.code + 1000 }
+            }
+        }
+        impl std::Into<WireErr> for IoErr {
+            fn into(self: IoErr) -> WireErr {
+                WireErr { kind: self.code + 2000 }
+            }
+        }
+
+        fn read() -> std::Result<i64, IoErr> {
+            std::Result::Err(IoErr { code: 5 })
+        }
+
+        fn into_app() -> std::Result<i64, AppErr> {
+            let v: i64 = read()?;
+            std::Result::Ok(v)
+        }
+        fn into_wire() -> std::Result<i64, WireErr> {
+            let v: i64 = read()?;
+            std::Result::Ok(v)
+        }
+
+        fn main() -> i64 {
+            let a: i64 = match into_app() {
+                std::Result::Ok(_)    => 0,
+                std::Result::Err(e)   => e.tag,
+            };
+            let w: i64 = match into_wire() {
+                std::Result::Ok(_)    => 0,
+                std::Result::Err(e)   => e.kind,
+            };
+            a + w
+        }
+    "#;
+    // a = 1005 (AppErr.tag = 5+1000); w = 2005 (WireErr.kind = 5+2000)
+    // a + w = 3010
+    assert_eq!(run_main(src), 3010);
+}
+
+#[test]
+fn try_op_on_option_some_unwraps() {
+    // Session 072: `?` on Option<T>. Some(x)? produces x; the
+    // ? operator already existed for Result, this extends it
+    // to Option with the equivalent desugar.
+    let src = r#"
+        fn get() -> std::Option<i64> {
+            std::Option::Some(42)
+        }
+        fn use_get() -> std::Option<i64> {
+            let v: i64 = get()?;
+            std::Option::Some(v + 8)
+        }
+        fn main() -> i64 {
+            match use_get() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 50);
+}
+
+#[test]
+fn try_op_on_option_none_propagates() {
+    let src = r#"
+        fn get_none() -> std::Option<i64> {
+            std::Option::None
+        }
+        fn use_get() -> std::Option<i64> {
+            let v: i64 = get_none()?;
+            std::Option::Some(v + 1)
+        }
+        fn main() -> i64 {
+            match use_get() {
+                std::Option::Some(x) => x,
+                std::Option::None => 99,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
 fn trait_default_method_collect_chained() {
     // Session 071: the headline — `.collect()` as a default method
     // on Iterator. The trait declares the default body; impls

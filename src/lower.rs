@@ -1229,11 +1229,36 @@ impl<'a> Lowerer<'a> {
     /// enclosing function returns a `Result` with a matching error.
     fn lower_try(&self, inner: &ast::Expr, span: crate::token::Span) -> HirExprKind {
         let scrutinee = self.lower_expr(inner);
+        // Session 072: dispatch on Option<T> vs Result<T, E>. The
+        // checker already enforced that the surrounding fn returns
+        // the matching enum; here we just pick the right desugar.
+        let option_match = if let Ty::Enum(osym, args) = &scrutinee.ty {
+            if args.len() == 1 {
+                let is_option = self
+                    .res
+                    .enum_variants
+                    .get(osym)
+                    .map(|v| v.contains_key("Some") && v.contains_key("None"))
+                    .unwrap_or(false);
+                if is_option {
+                    Some((*osym, args[0].clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((osym, ok_ty)) = option_match {
+            return self.lower_try_option(scrutinee, osym, ok_ty);
+        }
         let (rsym, ok_ty, err_ty) = match &scrutinee.ty {
             Ty::Enum(s, args) if args.len() == 2 => {
                 (*s, args[0].clone(), args[1].clone())
             }
-            _ => return HirExprKind::Unsupported("`?` on a non-Result".into()),
+            _ => return HirExprKind::Unsupported("`?` on a non-Result/Option".into()),
         };
         // Read the Ok / Err discriminants off the enum rather than
         // assuming declaration order.
@@ -1279,37 +1304,25 @@ impl<'a> Lowerer<'a> {
         // enum sym IS the same — both sides are Result, only the
         // E type arg differs).
         let conversion = self.check.try_conversions.get(&span).copied();
-        let err_payload_expr = if let Some(source_sym) = conversion {
-            // Look up the into method on the source err type.
-            if let Some(&into_sym) = self
-                .res
-                .impl_methods
-                .get(&(source_sym, "into".to_string()))
-            {
-                // Pull the target err type off the into method's
-                // signature so the converted payload has its real
-                // type (codegen needs the concrete Ty to lay out
-                // the Err variant's payload slot).
-                let into_method_span = self.res.symbol(into_sym).span;
-                let target_ty = match self.check.fn_signatures.get(&into_method_span) {
-                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
-                    _ => Ty::Error,
-                };
-                HirExpr {
-                    kind: HirExprKind::Call {
-                        callee: into_sym,
-                        args: vec![HirExpr {
-                            kind: HirExprKind::Local(err_bind),
-                            ty: err_ty.clone(),
-                        }],
-                    },
-                    ty: target_ty,
-                }
-            } else {
-                HirExpr {
-                    kind: HirExprKind::Local(err_bind),
-                    ty: err_ty.clone(),
-                }
+        let err_payload_expr = if let Some(into_sym) = conversion {
+            // Session 072: the checker picked the right `into` fn
+            // (disambiguated by target type when the source struct
+            // has multiple Into impls). The value here IS the fn
+            // sym; no further lookup needed.
+            let into_method_span = self.res.symbol(into_sym).span;
+            let target_ty = match self.check.fn_signatures.get(&into_method_span) {
+                Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                _ => Ty::Error,
+            };
+            HirExpr {
+                kind: HirExprKind::Call {
+                    callee: into_sym,
+                    args: vec![HirExpr {
+                        kind: HirExprKind::Local(err_bind),
+                        ty: err_ty.clone(),
+                    }],
+                },
+                ty: target_ty,
             }
         } else {
             HirExpr {
@@ -1341,6 +1354,73 @@ impl<'a> Lowerer<'a> {
         HirExprKind::Match {
             scrutinee: Box::new(scrutinee),
             arms: vec![ok_arm, err_arm],
+        }
+    }
+
+    /// Session 072: desugar `expr?` on an `Option<T>` operand.
+    /// `Some(v) => v, None => return None`. No conversion exists
+    /// for Option (no err type to convert); the checker already
+    /// pinned the surrounding fn's return type to the same Option
+    /// enum sym.
+    fn lower_try_option(
+        &self,
+        scrutinee: HirExpr,
+        osym: SymbolId,
+        ok_ty: Ty,
+    ) -> HirExprKind {
+        let disc = |name: &str| -> Option<u32> {
+            self.res.enum_variants.get(&osym)?.get(name).and_then(|&vs| {
+                match self.res.symbol(vs).kind {
+                    SymbolKind::EnumVariant { discriminant, .. } => {
+                        Some(discriminant)
+                    }
+                    _ => None,
+                }
+            })
+        };
+        let (Some(some_disc), Some(none_disc)) = (disc("Some"), disc("None"))
+        else {
+            return HirExprKind::Unsupported(
+                "`?` target is not Option-shaped".into(),
+            );
+        };
+        let bind = self.fresh_sym();
+        let some_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: some_disc,
+                bindings: vec![(ok_ty.clone(), Some(bind))],
+            }],
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Local(bind),
+                ty: ok_ty.clone(),
+            },
+        };
+        // `None => return None` — reconstruct the None variant
+        // matching the scrutinee's Option type so codegen lays
+        // out the payload correctly even for Option<ARC types>.
+        let none_value = HirExpr {
+            kind: HirExprKind::EnumPayloadCtor {
+                enum_sym: osym,
+                discriminant: none_disc,
+                payloads: Vec::new(),
+            },
+            ty: scrutinee.ty.clone(),
+        };
+        let none_arm = HirMatchArm {
+            patterns: vec![HirPattern::EnumPayload {
+                discriminant: none_disc,
+                bindings: Vec::new(),
+            }],
+            guard: None,
+            body: HirExpr {
+                kind: HirExprKind::Return(Some(Box::new(none_value))),
+                ty: Ty::Never,
+            },
+        };
+        HirExprKind::Match {
+            scrutinee: Box::new(scrutinee),
+            arms: vec![some_arm, none_arm],
         }
     }
 

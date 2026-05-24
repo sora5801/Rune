@@ -63,9 +63,14 @@ pub struct CheckResults {
     /// `?` sites that need an Into-based error conversion. Keyed by
     /// the `?` expression's span; value is the source err's
     /// struct/enum sym so the lowerer can look up its
-    /// `impl_methods[(sym, "into")]` entry. Absent → the inner
-    /// result's err type already matches the enclosing function's,
-    /// no conversion needed.
+    /// Span → fn sym of the `into` method to call at this `?`
+    /// site. Pre-session-072 the value was the *source struct's*
+    /// sym; the lowerer then looked up `impl_methods[(sym,
+    /// "into")]` which silently overwrote with the last Into impl
+    /// declared. Storing the actual fn sym directly lets the
+    /// checker disambiguate when the source struct implements
+    /// `Into<A>` AND `Into<B>` — pick whichever target matches
+    /// the surrounding fn's err type.
     pub try_conversions: HashMap<Span, SymbolId>,
     pub errors: Vec<TypeError>,
 }
@@ -3965,6 +3970,46 @@ impl<'r> Checker<'r> {
         if inner_ty.is_error() {
             return Ty::Error;
         }
+        // Session 072: `?` on Option<T>. The operand is an
+        // `Option<T>`; the surrounding fn must also return an
+        // `Option<U>` for any U (no conversion is supported on
+        // Option since there's no err type to convert). Desugar:
+        // `Some(x) => x, None => return None`.
+        let option_shape = match &inner_ty {
+            Ty::Enum(s, args) if args.len() == 1 => {
+                let is_option = self
+                    .res
+                    .enum_variants
+                    .get(s)
+                    .map(|v| v.contains_key("Some") && v.contains_key("None"))
+                    .unwrap_or(false);
+                if is_option {
+                    Some((*s, args[0].clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((osym, ok_ty)) = option_shape {
+            match &self.current_return {
+                Ty::Enum(s2, _) if *s2 == osym => {
+                    return ok_ty;
+                }
+                other => {
+                    self.error(
+                        span,
+                        format!(
+                            "the `?` operator on `Option` can only be used \
+                             in a function returning `Option`, but this one \
+                             returns `{}`",
+                            other.display()
+                        ),
+                    );
+                    return Ty::Error;
+                }
+            }
+        }
         let result_shape = match &inner_ty {
             Ty::Enum(s, args) if args.len() == 2 => {
                 let is_result = self
@@ -3985,34 +4030,45 @@ impl<'r> Checker<'r> {
             self.error(
                 span,
                 format!(
-                    "the `?` operator requires a `Result`, but the operand \
-                     has type `{}`",
+                    "the `?` operator requires a `Result` or `Option`, but \
+                     the operand has type `{}`",
                     inner_ty.display()
                 ),
             );
             return Ty::Error;
         };
-        match &self.current_return {
-            Ty::Enum(s2, ret_args) if *s2 == rsym && ret_args.len() == 2 => {
+        // Clone the surrounding return type so we don't hold a
+        // borrow on `self.current_return` while calling
+        // `self.resolve_type(...)` (which needs `&mut self`).
+        let cur_return = self.current_return.clone();
+        match cur_return {
+            Ty::Enum(s2, ret_args) if s2 == rsym && ret_args.len() == 2 => {
                 if !ret_args[1].compatible(&err_ty) {
-                    // Session 065: try an Into-based conversion
-                    // before erroring. If the source err type has
-                    // an `into` impl method, the lowerer will call
-                    // it to bridge the gap. Record the source sym
-                    // so the lowerer can find the method.
+                    // Session 065 + 072: try an Into-based
+                    // conversion. The source err type must have
+                    // at least one `impl Into<T> for SourceErr`;
+                    // when multiple exist (session 072), we pick
+                    // the one whose target T matches the surrounding
+                    // fn's err type.
                     let source_sym = match &err_ty {
                         Ty::Struct(s, _) | Ty::Enum(s, _) => Some(*s),
                         _ => None,
                     };
-                    let has_into = source_sym
-                        .map(|s| {
-                            self.res
-                                .impl_methods
-                                .contains_key(&(s, "into".to_string()))
-                        })
-                        .unwrap_or(false);
-                    if let (true, Some(s)) = (has_into, source_sym) {
-                        self.try_conversions.insert(span, s);
+                    let target = ret_args[1].clone();
+                    let candidates: Vec<(crate::ast::Type, SymbolId)> =
+                        source_sym
+                            .and_then(|s| self.res.into_impls.get(&s).cloned())
+                            .unwrap_or_default();
+                    let mut chosen_fn: Option<SymbolId> = None;
+                    for (target_ast, fn_sym) in candidates {
+                        let resolved = self.resolve_type(&target_ast);
+                        if resolved.compatible(&target) {
+                            chosen_fn = Some(fn_sym);
+                            break;
+                        }
+                    }
+                    if let Some(fn_sym) = chosen_fn {
+                        self.try_conversions.insert(span, fn_sym);
                     } else {
                         self.error(
                             span,

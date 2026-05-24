@@ -162,6 +162,18 @@ pub struct Resolutions {
     /// emits a HirFn per entry; the monomorphizer specializes per
     /// Self at each call site.
     pub trait_defaults: HashMap<(SymbolId, String), SymbolId>,
+    /// Session 072: `into_impls[source_struct_sym]` lists every
+    /// `impl Into<Target> for SourceStruct` block as
+    /// `(target_ast_type, into_fn_sym)`. The target is kept as an
+    /// AST `Type` (not a `Ty`) because the checker resolves AST
+    /// types — it walks this list, resolves each target, and
+    /// matches against the surrounding fn's err type to pick the
+    /// right `into` method when the source struct has more than
+    /// one Into impl. Pre-072 the `into` method was looked up via
+    /// `impl_methods[(source, "into")]`, which silently
+    /// overwrote with the last impl declared. This field fixes
+    /// that.
+    pub into_impls: HashMap<SymbolId, Vec<(crate::ast::Type, SymbolId)>>,
     /// Session 071: synthesized self-type-param sym for each
     /// default fn. The default fn's `self: Self` resolves through
     /// `generic_bounds[this_sym] = [trait_sym]`, so `self.next()`
@@ -261,6 +273,7 @@ pub struct Resolver {
     generic_bound_args: HashMap<(SymbolId, SymbolId), Vec<Span>>,
     trait_defaults: HashMap<(SymbolId, String), SymbolId>,
     default_self_syms: HashMap<SymbolId, SymbolId>,
+    into_impls: HashMap<SymbolId, Vec<(crate::ast::Type, SymbolId)>>,
     impl_to_struct_generic: HashMap<SymbolId, SymbolId>,
     /// Names of the modules currently being declared / resolved,
     /// outermost first. Empty means the root module. Item lookups
@@ -329,6 +342,7 @@ impl Resolver {
             generic_bound_args: HashMap::new(),
             trait_defaults: HashMap::new(),
             default_self_syms: HashMap::new(),
+            into_impls: HashMap::new(),
             impl_to_struct_generic: HashMap::new(),
             current_path: Vec::new(),
             item_vis: HashMap::new(),
@@ -380,6 +394,7 @@ impl Resolver {
                 generic_bound_args: self.generic_bound_args,
                 trait_defaults: self.trait_defaults,
                 default_self_syms: self.default_self_syms,
+                into_impls: self.into_impls,
                 impl_to_struct_generic: self.impl_to_struct_generic,
             },
             self.errors,
@@ -593,9 +608,32 @@ impl Resolver {
         } else {
             format!("{}__", self.current_path.join("__"))
         };
+        // Session 072: when this impl is for `Into<T>`, the same
+        // struct may have multiple Into impls (one per target T).
+        // Tolerate the duplicate-method-name in impl_methods for
+        // that case — into_impls (populated below) is the
+        // authoritative per-target lookup, and check_try reads it
+        // by target instead of relying on impl_methods.
+        let is_into_impl = i
+            .trait_path
+            .as_ref()
+            .and_then(|tp| self.path_to_sym.get(&tp.span))
+            .map(|&ts| self.symbols[ts.0 as usize].name == "Into")
+            .unwrap_or(false);
         for method in &i.methods {
-            let mangled =
-                format!("{}{}__{}", mod_prefix, struct_name, method.name.name);
+            // Session 072: Into impls disambiguate by appending
+            // the impl's span-start so two `impl Into<X> for S`
+            // blocks don't collide at the Cranelift symbol level.
+            // Non-Into impls keep the clean mangling for codegen
+            // readability.
+            let mangled = if is_into_impl {
+                format!(
+                    "{}{}__{}__{}",
+                    mod_prefix, struct_name, method.name.name, i.span.start
+                )
+            } else {
+                format!("{}{}__{}", mod_prefix, struct_name, method.name.name)
+            };
             let id = SymbolId(self.symbols.len() as u32);
             self.symbols.push(Symbol {
                 name: mangled,
@@ -604,7 +642,7 @@ impl Resolver {
             });
             self.decl_to_sym.insert(method.name.span, id);
             let key = (struct_sym, method.name.name.clone());
-            if self.impl_methods.contains_key(&key) {
+            if self.impl_methods.contains_key(&key) && !is_into_impl {
                 self.error(
                     format!(
                         "method `{}` already defined on `{}`",
@@ -614,6 +652,36 @@ impl Resolver {
                 );
             }
             self.impl_methods.insert(key, id);
+        }
+        // Session 072: record per-impl Into target so the checker
+        // can disambiguate multiple Into impls on the same source
+        // struct. The trait-path's first generic arg is the
+        // target type; the method's sym is impl_methods[(struct,
+        // "into")] (set just above in the methods loop, possibly
+        // overwritten by a later impl — but here we keep ALL
+        // entries via the into_impls vec).
+        if let Some(trait_path) = &i.trait_path {
+            if let Some(&trait_sym) = self.path_to_sym.get(&trait_path.span) {
+                let is_into = self.symbols[trait_sym.0 as usize].name == "Into";
+                if is_into {
+                    if let Some(target_ast) = trait_path.generic_args.first().cloned() {
+                        if let Some(into_method) = i
+                            .methods
+                            .iter()
+                            .find(|m| m.name.name == "into")
+                        {
+                            if let Some(&fn_sym) =
+                                self.decl_to_sym.get(&into_method.name.span)
+                            {
+                                self.into_impls
+                                    .entry(struct_sym)
+                                    .or_default()
+                                    .push((target_ast, fn_sym));
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Session 071: for `impl Trait for Struct` blocks, point
         // any not-overridden trait-default method at the synth
