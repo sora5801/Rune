@@ -1041,6 +1041,120 @@ fn shift_inside_bit_width_accepted() {
 }
 
 #[test]
+fn float_binop_overflow_f32_rejected() {
+    // Session 111: `1e30f32 * 1e30f32 = 1e60` which exceeds
+    // f32::MAX and rolls into infinity. The const-eval check
+    // catches it before runtime.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 1.0e30f32 * 1.0e30f32;
+            x as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
+fn float_binop_overflow_f64_rejected() {
+    // f64::MAX ≈ 1.8e308; multiplying two 1e200's rolls into
+    // f64::INFINITY.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f64 = 1.0e200 * 1.0e200;
+            x as i64
+        }
+        "#,
+        "is out of range for `f64`",
+    );
+}
+
+#[test]
+fn float_binop_through_let_binding_rejected() {
+    // Cross-let const-eval for floats: `a * a` where `a = 1e30f32`
+    // const-evals via the const_float_values map.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: f32 = 1.0e30f32;
+            let b: f32 = a * a;
+            b as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
+fn float_binop_in_range_accepted() {
+    // Sanity: arithmetic that stays in range compiles.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: f32 = 1.0e10f32;
+            let b: f32 = a * a;
+            b as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn float_div_by_zero_produces_inf_no_error() {
+    // IEEE-754: `1.0 / 0.0 = +inf`, not an error. We don't
+    // diagnose float div-by-zero — it's a legitimate IEEE
+    // operation. (Contrast with session 107's int div-by-zero,
+    // which is a hardware trap.) BUT: if the user assigns
+    // the result to a typed binding the inf-result trips the
+    // range check.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f64 = 1.0 / 0.0;
+            x as i64
+        }
+        "#,
+        "is out of range for `f64`",
+    );
+}
+
+#[test]
+fn float_compound_binop_through_chain() {
+    // Chain `a + a + a` where each operand is 1e308f64. First
+    // `a + a = 2e308` already exceeds f64::MAX, but actually
+    // `1e308 + 1e308 = 2e308` which is still > f64::MAX (1.8e308)
+    // → rolls into f64::INFINITY at the outer binop.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: f64 = 1.0e308;
+            let b: f64 = a + a;
+            b as i64
+        }
+        "#,
+        "is out of range for `f64`",
+    );
+}
+
+#[test]
+fn float_negation_through_binding() {
+    // -a where `a = 1e30f32` is fine (negation doesn't change
+    // magnitude). But `-a * a = -1e60` also rolls to infinity.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: f32 = 1.0e30f32;
+            let b: f32 = -a * a;
+            b as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

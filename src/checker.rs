@@ -171,6 +171,12 @@ pub struct Checker<'r> {
     /// not tracked: a subsequent `=` would invalidate the
     /// recorded value and we don't track invalidations.
     const_values: HashMap<SymbolId, i64>,
+    /// Session 111: float counterpart to `const_values`. Same
+    /// shape, same gating (immutable Ident bindings whose init
+    /// const-evals). Stores f64 (the lexer's parse target);
+    /// f32 bindings store their f64 form and the range check
+    /// fires if a subsequent binop would round it to infinity.
+    const_float_values: HashMap<SymbolId, f64>,
 }
 
 impl<'r> Checker<'r> {
@@ -195,6 +201,7 @@ impl<'r> Checker<'r> {
             current_self: None,
             current_self_param: None,
             const_values: HashMap::new(),
+            const_float_values: HashMap::new(),
         }
     }
 
@@ -1192,6 +1199,16 @@ impl<'r> Checker<'r> {
                     if let Some(v) = self.const_eval_int(init) {
                         if let Some(&sym) = self.res.decl_to_sym.get(&name.span) {
                             self.const_values.insert(sym, v);
+                        }
+                    }
+                }
+                // Session 111: same shape for float bindings —
+                // record into const_float_values for downstream
+                // binop overflow checks.
+                if !*pat_mut && matches!(final_ty, Ty::Float(_)) {
+                    if let Some(v) = self.const_eval_float(init) {
+                        if let Some(&sym) = self.res.decl_to_sym.get(&name.span) {
+                            self.const_float_values.insert(sym, v);
                         }
                     }
                 }
@@ -2362,6 +2379,30 @@ impl<'r> Checker<'r> {
                 }
             }
         }
+        // Session 111: float compound overflow check. If both
+        // operands const-eval to floats and the binop result type
+        // is Float, evaluate via IEEE-754 arithmetic. The check
+        // fires when the result rolls into ±inf (i.e., a finite
+        // operation that overflowed f32 / f64). NaN from 0/0 is
+        // also caught — there's no legitimate source-level way to
+        // get NaN as a literal, so a NaN const-eval result is a
+        // user error worth flagging.
+        if let Ty::Float(result_ft) = &t {
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                if let (Some(a), Some(b)) =
+                    (self.const_eval_float(lhs), self.const_eval_float(rhs))
+                {
+                    let v = match op {
+                        BinOp::Add => a + b,
+                        BinOp::Sub => a - b,
+                        BinOp::Mul => a * b,
+                        BinOp::Div => a / b,
+                        _ => unreachable!(),
+                    };
+                    self.check_float_value_in_range(v, *result_ft, false, span);
+                }
+            }
+        }
         self.binop_result_ty(op, &t, span)
     }
 
@@ -2906,6 +2947,42 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Session 111: float counterpart to `const_eval_int`. Walks
+    /// float literals, unary neg, Path lookups (via
+    /// `const_float_values`), and the four float-arithmetic
+    /// binops (Add / Sub / Mul / Div). Returns the f64 result —
+    /// IEEE-754 semantics mean overflow rolls into ±inf and 0/0
+    /// rolls into NaN; the caller checks `is_finite()` for the
+    /// overflow diagnostic. Modulo and bitwise ops aren't valid
+    /// on floats; they fall through to None.
+    fn const_eval_float(&self, e: &Expr) -> Option<f64> {
+        match e {
+            Expr::Lit { lit: Lit::Float(v, _), .. } => Some(*v),
+            Expr::Path(p) => self
+                .res
+                .path_to_sym
+                .get(&p.span)
+                .and_then(|sym| self.const_float_values.get(sym).copied()),
+            Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => {
+                let v = self.const_eval_float(expr)?;
+                Some(-v)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let a = self.const_eval_float(lhs)?;
+                let b = self.const_eval_float(rhs)?;
+                use crate::ast::BinOp::*;
+                match op {
+                    Add => Some(a + b),
+                    Sub => Some(a - b),
+                    Mul => Some(a * b),
+                    Div => Some(a / b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Session 099: range check the raw `(v, ty)` pair regardless
     /// of whether the type came from a source-level suffix or from
     /// hint flow. The suffix-only `check_numeric_lit_in_range` is
@@ -3399,6 +3476,24 @@ impl<'r> Checker<'r> {
                     // — runtime would wrap. Don't error here in
                     // v0.x (out of scope of "compile-time range");
                     // could be tightened in a future session.
+                }
+            }
+        }
+        // Session 111: float compound overflow check (same shape
+        // as finish_binary's).
+        if let Ty::Float(result_ft) = &t {
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                if let (Some(a), Some(b)) =
+                    (self.const_eval_float(lhs), self.const_eval_float(rhs))
+                {
+                    let v = match op {
+                        BinOp::Add => a + b,
+                        BinOp::Sub => a - b,
+                        BinOp::Mul => a * b,
+                        BinOp::Div => a / b,
+                        _ => unreachable!(),
+                    };
+                    self.check_float_value_in_range(v, *result_ft, false, span);
                 }
             }
         }

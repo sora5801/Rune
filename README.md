@@ -327,7 +327,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Float const-eval through binops (parallel to session 106 for floats)
+1. Const-eval through compound assignment (`+= *=`)
 2. Subnormal-as-zero diagnostic (`1e-50f32` silently rounds today)
 3. Self-hosted bootstrap (long-term)
 
