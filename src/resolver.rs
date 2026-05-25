@@ -905,6 +905,19 @@ impl Resolver {
                 }),
             );
         }
+        // Session 123: i64::from_str — parse a decimal str into an
+        // i64. Returns 0 on empty / non-digit / out-of-range input.
+        // The bootstrap lexer pre-validates lexemes so the failure
+        // case isn't exercised in well-formed programs.
+        self.intern(
+            "i64::from_str".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "i64_from_str",
+                params: vec![Ty::Str],
+                ret: Ty::Int(IntTy::I64),
+            }),
+        );
         self.intern(
             "vec_new".to_string(),
             zero,

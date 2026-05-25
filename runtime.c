@@ -226,6 +226,30 @@ struct rune_string* rune_string_from(const struct rune_str* s) {
     return out;
 }
 
+// Session 123: i64::from_str — inverse of i64::to_str. Parses
+// the str's bytes as a base-10 decimal integer with optional
+// leading `-` or `+`. On any error (empty input, non-digit
+// characters, out-of-range value) returns 0. Callers that need
+// to distinguish "parsed zero" from "parse error" should pre-
+// validate the input (`s.byte_at(0) >= 48u8` etc.) before
+// calling, or wait for an Option<i64>-returning variant.
+//
+// The copy-to-stack-buffer pattern matches the path_to_cstr
+// helper from session 118 — Rune `str` isn't NUL-terminated,
+// so strtoll needs us to copy + terminate before parsing.
+int64_t rune_i64_from_str(const struct rune_str* s) {
+    if (s->len <= 0) return 0;
+    char buf[32];
+    size_t n = (size_t)s->len > 31 ? 31 : (size_t)s->len;
+    memcpy(buf, s->ptr, n);
+    buf[n] = '\0';
+    char* end = (char*)0;
+    long long v = strtoll(buf, &end, 10);
+    // No digits consumed → invalid.
+    if (end == buf) return 0;
+    return (int64_t)v;
+}
+
 // Session 122: integer formatting. i64::to_str renders the value
 // as decimal (with leading `-` for negatives) into a fresh +1
 // rune_str. snprintf produces the digits into a stack buffer

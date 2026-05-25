@@ -120,6 +120,94 @@ fn compound_assignment() {
     );
 }
 
+// ---- session 123: i64::from_str ----
+
+#[test]
+fn i64_from_str_positive() {
+    // "42" parses to 42.
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"42\") }"),
+        42
+    );
+}
+
+#[test]
+fn i64_from_str_negative() {
+    // Leading "-" is honored.
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"-17\") }"),
+        -17
+    );
+}
+
+#[test]
+fn i64_from_str_zero() {
+    // "0" parses to 0 (distinct from the "invalid" case which
+    // also returns 0 — the user is expected to pre-validate when
+    // it matters).
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"0\") }"),
+        0
+    );
+}
+
+#[test]
+fn i64_from_str_large() {
+    // Multi-digit roundtrips correctly.
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"9999999\") }"),
+        9999999
+    );
+}
+
+#[test]
+fn i64_from_str_empty_returns_zero() {
+    // Empty string → 0 (parse failure convention).
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"\") }"),
+        0
+    );
+}
+
+#[test]
+fn i64_from_str_non_digit_returns_zero() {
+    // Garbage input → 0. Lexer pre-validates before calling.
+    assert_eq!(
+        run_main("fn main() -> i64 { i64::from_str(\"abc\") }"),
+        0
+    );
+}
+
+#[test]
+fn i64_from_str_roundtrip_via_to_str() {
+    // n → to_str → from_str → n. Tests session 122 + 123 together.
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = 12345;
+            let s: str = n.to_str();
+            i64::from_str(s)
+        }
+    "#;
+    assert_eq!(run_main(src), 12345);
+}
+
+#[test]
+fn i64_from_str_after_split() {
+    // Realistic lexer pattern: split a "key=42" line on "=",
+    // parse the right side. Tests session 119's .split combined
+    // with session 123's parsing.
+    let src = r#"
+        fn main() -> i64 {
+            let line: str = "answer=42";
+            let parts: Vec<str> = line.split("=");
+            if parts.len() < 2 { return -1; }
+            let value_str: str = parts.get(1);
+            i64::from_str(value_str)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
 // ---- session 122: String::from + i64::to_str ----
 
 #[test]

@@ -329,18 +329,19 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 Phase 1 — capability buildout (next ~20 sessions):
 
-1. `i64::from_str(s: str)` for parsing integer literals (lexer-side)
-2. Module system at file granularity
-3. `Box<T>` (or implicit boxing of recursive enum variants)
-4. Pattern guards + `let ... else`
-5. `std::env::var(name)` for environment variables
-6. `.chars()` for UTF-8 iteration (future, when source needs it)
+1. Module system at file granularity
+2. `Box<T>` (or implicit boxing of recursive enum variants)
+3. Pattern guards + `let ... else`
+4. `std::env::var(name)` for environment variables
+5. `.chars()` for UTF-8 iteration (future, when source needs it)
+6. `i64::parse(s) -> Option<i64>` for type-safe parse failure
 
 Already shipped from Phase 1: file I/O (session 118), string
 methods `.byte_at` / `.find` / `.split` + `Vec<str>` (session 119),
 command-line args via `std::env::args()` (session 120), mutable
 `String` type with push_str / push_byte / to_str (session 121),
-`String::from(s)` + `i64::to_str()` (session 122).
+`String::from(s)` + `i64::to_str()` (session 122),
+`i64::from_str(s)` (session 123).
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

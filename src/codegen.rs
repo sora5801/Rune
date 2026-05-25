@@ -186,6 +186,7 @@ unsafe extern "C" {
     fn rune_release_string(s: *mut u8);
     fn rune_string_from(s: *const u8) -> *mut u8;
     fn rune_i64_to_str(v: i64) -> *mut u8;
+    fn rune_i64_from_str(s: *const u8) -> i64;
     fn rune_vec_new() -> *mut u8;
     fn rune_vec_push(v: *mut u8, x: i64);
     fn rune_vec_get(v: *const u8, i: i64) -> i64;
@@ -1247,6 +1248,7 @@ impl Codegen<JITModule> {
         builder.symbol("rune_release_string", rune_release_string as *const u8);
         builder.symbol("rune_string_from", rune_string_from as *const u8);
         builder.symbol("rune_i64_to_str", rune_i64_to_str as *const u8);
+        builder.symbol("rune_i64_from_str", rune_i64_from_str as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
         builder.symbol("rune_vec_push", rune_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_vec_get as *const u8);
@@ -3285,7 +3287,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // args (just read the descriptor) — a non-Local arg means
         // the caller produced a fresh +1 that no binding will
         // reclaim.
-        if matches!(name, "print_str" | "read_file" | "write_file") {
+        if matches!(name, "print_str" | "read_file" | "write_file" | "string_from" | "i64_from_str") {
             for (a, &v) in args.iter().zip(&arg_vals) {
                 if is_arc_type(&a.ty, self.struct_arc_fields, self.enum_has_payload)
                     && !matches!(a.kind, HirExprKind::Local(_))
@@ -4587,6 +4589,14 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64)); // fresh +1 rune_str
             ("rune_i64_to_str", sig)
+        }
+        // Session 123: parse a decimal str into i64; returns 0 on
+        // empty / invalid / out-of-range input.
+        "i64_from_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *const rune_str
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_i64_from_str", sig)
         }
         // (idx, len) -> never. Used by the inline bounds-check pattern.
         "panic_bounds" => {
