@@ -87,6 +87,83 @@ int8_t rune_str_contains(const struct rune_str* s, const struct rune_str* needle
     return 0;
 }
 
+// Session 119: byte-level string accessors + split. byte_at
+// returns the byte at index i, or 0 if out-of-range (mirroring
+// rune_vec_get's policy of "no panic, surface zero"). find
+// returns the byte offset of needle's first occurrence in s, or
+// -1 if not present (the int64_t sentinel; v0.x doesn't return
+// Option<i64> from builtins).
+
+uint8_t rune_str_byte_at(const struct rune_str* s, int64_t i) {
+    if (i < 0 || i >= s->len) return 0;
+    return (uint8_t)s->ptr[i];
+}
+
+int64_t rune_str_find(const struct rune_str* s, const struct rune_str* needle) {
+    if (needle->len == 0) return 0;
+    if (needle->len > s->len) return -1;
+    int64_t last = s->len - needle->len;
+    for (int64_t i = 0; i <= last; i++) {
+        if (memcmp(s->ptr + i, needle->ptr, (size_t)needle->len) == 0) return i;
+    }
+    return -1;
+}
+
+// Forward decls — split builds a Vec<rune_str*> using the existing
+// vec runtime.
+struct rune_vec;
+struct rune_vec* rune_vec_new(void);
+void rune_vec_push(struct rune_vec* v, int64_t x);
+
+// Helper for split: allocate a fresh rune_str holding the byte
+// range [a, b) from src. Empty range allowed (ptr=NULL, len=0).
+static struct rune_str* str_slice_owned(const char* src_ptr, int64_t a, int64_t b) {
+    struct rune_str* r = (struct rune_str*)malloc(sizeof(struct rune_str));
+    r->rc = 1;
+    int64_t n = b - a;
+    if (n <= 0) {
+        r->ptr = (const char*)0;
+        r->len = 0;
+        return r;
+    }
+    char* bytes = (char*)malloc((size_t)n);
+    memcpy(bytes, src_ptr + a, (size_t)n);
+    r->ptr = bytes;
+    r->len = n;
+    return r;
+}
+
+struct rune_vec* rune_str_split(const struct rune_str* s, const struct rune_str* sep) {
+    struct rune_vec* v = rune_vec_new();
+    // Empty separator → return [whole_str] (no-split convention).
+    // Avoids the alternative of "split into individual chars" which
+    // requires UTF-8 decoding and isn't this session's scope.
+    if (sep->len == 0) {
+        struct rune_str* whole = str_slice_owned(s->ptr, 0, s->len);
+        rune_vec_push(v, (int64_t)whole);
+        return v;
+    }
+    int64_t start = 0;
+    int64_t i = 0;
+    int64_t last = s->len - sep->len;
+    while (i <= last) {
+        if (memcmp(s->ptr + i, sep->ptr, (size_t)sep->len) == 0) {
+            struct rune_str* piece = str_slice_owned(s->ptr, start, i);
+            rune_vec_push(v, (int64_t)piece);
+            i += sep->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    // Final piece (may be empty if separator is at the end — keeps
+    // semantics consistent with Rust's split which yields a trailing
+    // empty str for "a,b,".split(",") = ["a", "b", ""]).
+    struct rune_str* tail = str_slice_owned(s->ptr, start, s->len);
+    rune_vec_push(v, (int64_t)tail);
+    return v;
+}
+
 // Session 118: file I/O builtins. Both functions take rune_str
 // descriptors and return rune_str (read) / int8_t (write). The
 // path is read as a NUL-terminated C string — Rune `str` isn't

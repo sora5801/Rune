@@ -120,6 +120,110 @@ fn compound_assignment() {
     );
 }
 
+// ---- session 119: string methods ----
+
+#[test]
+fn str_byte_at_returns_ascii() {
+    // "hello".byte_at(0) = 'h' = 104.
+    assert_eq!(
+        run_main("fn main() -> i64 { let b: u8 = \"hello\".byte_at(0); b as i64 }"),
+        104
+    );
+}
+
+#[test]
+fn str_byte_at_out_of_range_returns_zero() {
+    // Negative or past-end index returns 0 (no panic).
+    assert_eq!(
+        run_main("fn main() -> i64 { let b: u8 = \"hi\".byte_at(5); b as i64 }"),
+        0
+    );
+}
+
+#[test]
+fn str_find_returns_offset() {
+    // "hello world".find("world") = 6.
+    assert_eq!(
+        run_main("fn main() -> i64 { \"hello world\".find(\"world\") }"),
+        6
+    );
+}
+
+#[test]
+fn str_find_returns_neg_one_when_absent() {
+    assert_eq!(
+        run_main("fn main() -> i64 { \"hello\".find(\"xyz\") }"),
+        -1
+    );
+}
+
+#[test]
+fn str_find_empty_needle_returns_zero() {
+    // Empty needle conventionally matches at position 0.
+    assert_eq!(
+        run_main("fn main() -> i64 { \"hello\".find(\"\") }"),
+        0
+    );
+}
+
+#[test]
+fn str_split_basic() {
+    // "a,b,c".split(",") = ["a", "b", "c"] — length 3.
+    assert_eq!(
+        run_main("fn main() -> i64 { \"a,b,c\".split(\",\").len() }"),
+        3
+    );
+}
+
+#[test]
+fn str_split_with_trailing_separator() {
+    // "a,b,".split(",") = ["a", "b", ""] — length 3 (trailing empty).
+    assert_eq!(
+        run_main("fn main() -> i64 { \"a,b,\".split(\",\").len() }"),
+        3
+    );
+}
+
+#[test]
+fn str_split_no_separator_match() {
+    // No matches → vec of length 1 holding the original.
+    assert_eq!(
+        run_main("fn main() -> i64 { \"hello\".split(\"xyz\").len() }"),
+        1
+    );
+}
+
+#[test]
+fn str_split_then_index_recovers_pieces() {
+    // Round-trip: split "foo:bar:baz" by ":", index piece 1, verify
+    // it equals "bar" via starts_with + len check.
+    let src = r#"
+        fn main() -> i64 {
+            let pieces: Vec<str> = "foo:bar:baz".split(":");
+            let p1: str = pieces.get(1);
+            if p1 == "bar" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn str_split_iterate_for_loop() {
+    // for-in over Vec<str>.iter() yields each piece. Sum the byte
+    // counts (4 + 4 + 4 = 12 for "1234,5678,9012").
+    let src = r#"
+        fn main() -> i64 {
+            let pieces: Vec<str> = "1234,5678,9012".split(",");
+            let mut total: i64 = 0;
+            for p in pieces.iter() {
+                total = total + p.len();
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
 // ---- session 118: file I/O builtins ----
 
 #[test]

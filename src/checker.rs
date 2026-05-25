@@ -6627,6 +6627,12 @@ fn vec_element_supported(ty: &Ty) -> bool {
             | Ty::Float(_)
             | Ty::Bool
             | Ty::Char
+            // Session 119: str is now valid as a Vec element.
+            // Stored as a pointer to a rune_str descriptor (same
+            // 8-byte slot as other ARC types). Per-elem release
+            // through emit_release_field handles `Ty::Str` already
+            // via arc_helper_name's release_str arm.
+            | Ty::Str
             | Ty::Struct(_, _)
             | Ty::Enum(_, _)
             | Ty::Vec(_)
@@ -6666,6 +6672,24 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
         | (Ty::Str, "contains") => Some(MethodSig {
             params: vec![Ty::Str],
             ret: Ty::Bool,
+        }),
+        // Session 119: byte-level accessor.
+        (Ty::Str, "byte_at") => Some(MethodSig {
+            params: vec![Ty::Int(IntTy::I64)],
+            ret: Ty::Int(IntTy::U8),
+        }),
+        // Session 119: byte-offset search. Returns -1 when needle
+        // isn't found (sentinel — v0.x doesn't use Option from
+        // builtin methods).
+        (Ty::Str, "find") => Some(MethodSig {
+            params: vec![Ty::Str],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        // Session 119: split by separator. Returns Vec<str> (fresh
+        // +1 owned by caller). Empty separator yields [whole_str].
+        (Ty::Str, "split") => Some(MethodSig {
+            params: vec![Ty::Str],
+            ret: Ty::Vec(Box::new(Ty::Str)),
         }),
         (Ty::Array(_, _), "len") => Some(MethodSig {
             params: vec![],

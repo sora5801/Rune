@@ -2323,11 +2323,12 @@ fn generic_vec_requires_type_arg() {
 }
 
 #[test]
-fn generic_vec_str_element_rejected() {
-    // `str` is a 16-byte descriptor — it can't be a Vec element.
-    check_has_error(
-        "fn main() -> i64 { let v: Vec<str> = vec_new(); 0 }",
-        "not supported",
+fn generic_vec_str_element_accepted() {
+    // Session 119: str is now valid as a Vec element. Stored as
+    // an 8-byte pointer to a rune_str descriptor, same as other
+    // ARC types. Replaces the prior "rejected" test.
+    check_ok(
+        "fn main() -> i64 { let v: Vec<str> = vec_new(); v.len() }",
     );
 }
 

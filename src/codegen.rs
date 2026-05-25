@@ -170,6 +170,9 @@ unsafe extern "C" {
     fn rune_str_starts_with(s: *const u8, prefix: *const u8) -> i8;
     fn rune_str_ends_with(s: *const u8, suffix: *const u8) -> i8;
     fn rune_str_contains(s: *const u8, needle: *const u8) -> i8;
+    fn rune_str_byte_at(s: *const u8, i: i64) -> u8;
+    fn rune_str_find(s: *const u8, needle: *const u8) -> i64;
+    fn rune_str_split(s: *const u8, sep: *const u8) -> *mut u8;
     fn rune_read_file(path: *const u8) -> *mut u8;
     fn rune_write_file(path: *const u8, contents: *const u8) -> i8;
     fn rune_vec_new() -> *mut u8;
@@ -1217,6 +1220,9 @@ impl Codegen<JITModule> {
         builder.symbol("rune_str_starts_with", rune_str_starts_with as *const u8);
         builder.symbol("rune_str_ends_with", rune_str_ends_with as *const u8);
         builder.symbol("rune_str_contains", rune_str_contains as *const u8);
+        builder.symbol("rune_str_byte_at", rune_str_byte_at as *const u8);
+        builder.symbol("rune_str_find", rune_str_find as *const u8);
+        builder.symbol("rune_str_split", rune_str_split as *const u8);
         builder.symbol("rune_read_file", rune_read_file as *const u8);
         builder.symbol("rune_write_file", rune_write_file as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
@@ -2832,6 +2838,37 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
+            // Session 119: byte-level and search accessors.
+            (Ty::Str, "byte_at") => {
+                let func_id = self.ensure_runtime_func("str_byte_at")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
+                let byte = self.builder.inst_results(inst)[0];
+                // Runtime returns i8 (cranelift type for u8) — widen
+                // to I64 for ergonomic chaining in Rune. The cranelift
+                // signature uses I8; method return type is u8 (I8).
+                // Return as-is; caller's u8 binding gets the right type.
+                Ok(Some(byte))
+            }
+            (Ty::Str, "find") => {
+                let func_id = self.ensure_runtime_func("str_find")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
+                Ok(Some(self.builder.inst_results(inst)[0]))
+            }
+            (Ty::Str, "split") => {
+                let func_id = self.ensure_runtime_func("str_split")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[recv_val, arg_vals[0]]);
+                // Fresh +1 Vec<str> owned by the caller; no retain.
+                Ok(Some(self.builder.inst_results(inst)[0]))
+            }
             (Ty::HashMap(_, v_ty), m)
                 if matches!(m, "insert" | "get" | "contains_key" | "len" | "remove") =>
             {
@@ -4363,6 +4400,28 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I8));
             ("rune_str_contains", sig)
+        }
+        // Session 119: byte access + search.
+        "str_byte_at" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // s
+            sig.params.push(AbiParam::new(types::I64)); // i
+            sig.returns.push(AbiParam::new(types::I8)); // u8
+            ("rune_str_byte_at", sig)
+        }
+        "str_find" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // s
+            sig.params.push(AbiParam::new(types::I64)); // needle
+            sig.returns.push(AbiParam::new(types::I64)); // offset or -1
+            ("rune_str_find", sig)
+        }
+        "str_split" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // s
+            sig.params.push(AbiParam::new(types::I64)); // sep
+            sig.returns.push(AbiParam::new(types::I64)); // *mut Vec<str> (fresh +1)
+            ("rune_str_split", sig)
         }
         // (idx, len) -> never. Used by the inline bounds-check pattern.
         "panic_bounds" => {
