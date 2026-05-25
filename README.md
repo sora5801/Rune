@@ -329,7 +329,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. Intrinsic `Numeric` impls for primitive types — lifts the
    `impl on i64/i32/f64/...` resolver restriction
-2. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+2. Numeric literal suffixes — `10i32`, `3.14f32`
 3. Cartesian-product exhaustiveness for tuple patterns
 4. Self-hosted bootstrap (long-term)
 

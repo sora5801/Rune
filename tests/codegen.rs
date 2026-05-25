@@ -1614,6 +1614,109 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn into_disambiguation_let_binding() {
+    // Session 086: when a source struct has multiple Into<T>
+    // impls, `let x: AppErr = src.into();` picks Into<AppErr>
+    // based on the let's annotation.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        struct DbErr { code: i64 }
+
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: self.code + 100 } }
+        }
+        impl std::Into<DbErr> for IoErr {
+            fn into(self: IoErr) -> DbErr { DbErr { code: self.code + 200 } }
+        }
+
+        fn main() -> i64 {
+            let e: IoErr = IoErr { code: 5 };
+            let a: AppErr = e.into();
+            a.code
+        }
+    "#;
+    // 5 + 100 (the AppErr branch)
+    assert_eq!(run_main(src), 105);
+}
+
+#[test]
+fn into_disambiguation_picks_other_target() {
+    // Same impls, hint picks the other branch.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        struct DbErr { code: i64 }
+
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: self.code + 100 } }
+        }
+        impl std::Into<DbErr> for IoErr {
+            fn into(self: IoErr) -> DbErr { DbErr { code: self.code + 200 } }
+        }
+
+        fn main() -> i64 {
+            let e: IoErr = IoErr { code: 5 };
+            let d: DbErr = e.into();
+            d.code
+        }
+    "#;
+    // 5 + 200 (the DbErr branch)
+    assert_eq!(run_main(src), 205);
+}
+
+#[test]
+fn into_disambiguation_fn_arg() {
+    // Hint flows from the called fn's param type.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        struct DbErr { code: i64 }
+
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: self.code + 100 } }
+        }
+        impl std::Into<DbErr> for IoErr {
+            fn into(self: IoErr) -> DbErr { DbErr { code: self.code + 200 } }
+        }
+        fn use_db(d: DbErr) -> i64 { d.code }
+
+        fn main() -> i64 {
+            let e: IoErr = IoErr { code: 7 };
+            use_db(e.into())
+        }
+    "#;
+    // 7 + 200 = 207
+    assert_eq!(run_main(src), 207);
+}
+
+#[test]
+fn into_disambiguation_struct_field() {
+    // Hint flows from the struct field's declared type.
+    let src = r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        struct DbErr { code: i64 }
+
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: self.code + 100 } }
+        }
+        impl std::Into<DbErr> for IoErr {
+            fn into(self: IoErr) -> DbErr { DbErr { code: self.code + 200 } }
+        }
+        struct Holder { err: AppErr }
+
+        fn main() -> i64 {
+            let e: IoErr = IoErr { code: 3 };
+            let h: Holder = Holder { err: e.into() };
+            h.err.code
+        }
+    "#;
+    // 3 + 100 = 103 (AppErr branch)
+    assert_eq!(run_main(src), 103);
+}
+
+#[test]
 fn for_tuple_pattern_over_entries() {
     // Session 085: `for (k, v) in m.entries()` works directly,
     // no `let (k, v) = kv` workaround. The lowerer threads

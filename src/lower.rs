@@ -771,8 +771,21 @@ impl<'a> Lowerer<'a> {
             }
             ast::Expr::Break(_) => HirExprKind::Break,
             ast::Expr::Continue(_) => HirExprKind::Continue,
-            ast::Expr::MethodCall { receiver, method, args, .. } => {
+            ast::Expr::MethodCall { receiver, method, args, span } => {
                 let receiver_hir = self.lower_expr(receiver);
+                // Session 086: when `.into()` was disambiguated by
+                // the checker's surrounding-type hint, dispatch
+                // directly to the chosen fn. Otherwise fall through
+                // to the normal impl_methods lookup (which is fine
+                // when there's only one Into impl on the source).
+                if method.name == "into" && args.is_empty() {
+                    if let Some(&fn_sym) = self.check.into_conversions.get(span) {
+                        return HirExprKind::Call {
+                            callee: fn_sym,
+                            args: vec![receiver_hir],
+                        };
+                    }
+                }
                 // A method call on a `dyn Trait` receiver dispatches
                 // dynamically through the boxed method table.
                 if let Ty::Dyn(trait_sym, _) = &receiver_hir.ty {

@@ -72,6 +72,14 @@ pub struct CheckResults {
     /// `Into<A>` AND `Into<B>` — pick whichever target matches
     /// the surrounding fn's err type.
     pub try_conversions: HashMap<Span, SymbolId>,
+    /// Session 086: at bare `.into()` method-call sites, when the
+    /// surrounding context provides an expected type (let-binding,
+    /// fn-arg, struct-field), the checker picks the matching
+    /// `Into<Target>` impl and records its fn sym here. The
+    /// lowerer reads this table and emits a direct `Call` to the
+    /// chosen sym, bypassing the impl_methods lookup that
+    /// last-wins'd on multiple Into impls.
+    pub into_conversions: HashMap<Span, SymbolId>,
     pub errors: Vec<TypeError>,
 }
 
@@ -122,6 +130,8 @@ pub struct Checker<'r> {
     /// `impl_methods[(sym, "into")]` and emit a call wrapping
     /// the err binding before the `Err` reconstruction.
     try_conversions: HashMap<Span, SymbolId>,
+    /// Session 086: see CheckResults::into_conversions.
+    into_conversions: HashMap<Span, SymbolId>,
     errors: Vec<TypeError>,
     current_return: Ty,
     /// The trait or impl whose signatures / bodies are currently
@@ -165,6 +175,7 @@ impl<'r> Checker<'r> {
             closure_param_tys: HashMap::new(),
             closure_ret_tys: HashMap::new(),
             try_conversions: HashMap::new(),
+            into_conversions: HashMap::new(),
             closure_infer_pool: std::cell::RefCell::new(HashMap::new()),
             next_fresh_sym: std::cell::Cell::new(u32::MAX),
             errors: Vec::new(),
@@ -203,6 +214,7 @@ impl<'r> Checker<'r> {
             closure_param_tys: self.closure_param_tys,
             closure_ret_tys: self.closure_ret_tys,
             try_conversions: self.try_conversions,
+            into_conversions: self.into_conversions,
             errors: self.errors,
         }
     }
@@ -1985,7 +1997,48 @@ impl<'r> Checker<'r> {
             self.expr_types.insert(*span, ty.clone());
             return ty;
         }
+        // Session 086: `.into()` at a hinted position picks the
+        // matching Into impl when the source struct implements
+        // multiple. Mirrors session 072's `?`-site disambiguation.
+        if let (Expr::MethodCall { receiver, method, args, span }, Some(exp)) = (e, expected) {
+            if method.name == "into" && args.is_empty() {
+                if let Some(ty) = self.try_into_disambiguation(receiver, *span, exp) {
+                    self.expr_types.insert(*span, ty.clone());
+                    return ty;
+                }
+            }
+        }
         self.check_expr(e)
+    }
+
+    /// Session 086: when `.into()` is called at a hinted position
+    /// (let-binding, fn-arg, struct-field), walk the receiver's
+    /// registered Into impls and pick whichever target matches the
+    /// expected type. Records the chosen fn sym in
+    /// `into_conversions` so the lowerer can emit a direct Call.
+    /// Returns `None` when no Into impls match (the caller falls
+    /// through to the default bottom-up check, which may surface
+    /// a clearer error).
+    fn try_into_disambiguation(
+        &mut self,
+        receiver: &Expr,
+        span: Span,
+        expected: &Ty,
+    ) -> Option<Ty> {
+        let recv_ty = self.check_expr(receiver);
+        let source_sym = match &recv_ty {
+            Ty::Struct(s, _) | Ty::Enum(s, _) => *s,
+            _ => return None,
+        };
+        let candidates = self.res.into_impls.get(&source_sym).cloned()?;
+        for (target_ast, fn_sym) in candidates {
+            let resolved = self.resolve_type(&target_ast);
+            if resolved.compatible(expected) {
+                self.into_conversions.insert(span, fn_sym);
+                return Some(resolved);
+            }
+        }
+        None
     }
 
     /// Type-check a closure literal `|x, y| body`. The contextual
@@ -3513,15 +3566,17 @@ impl<'r> Checker<'r> {
             std::collections::HashMap::new();
         let mut value_tys: Vec<(usize, Option<Ty>)> = Vec::with_capacity(fields.len());
         for (idx, init) in fields.iter().enumerate() {
-            if matches!(init.value, Expr::Closure { .. }) {
-                // Pass-1 deferral — pass 2 re-checks with the hint.
+            // Defer closures and `.into()` method calls until pass 2.
+            // Closures need the field type as a hint to bind unannotated
+            // params; .into() needs the field type to disambiguate
+            // among multiple Into impls (session 086).
+            let is_into_method = matches!(
+                &init.value,
+                Expr::MethodCall { method, args, .. }
+                    if method.name == "into" && args.is_empty()
+            );
+            if matches!(init.value, Expr::Closure { .. }) || is_into_method {
                 value_tys.push((idx, None));
-                if let Some(decl_field) = layout.field(&init.name.name) {
-                    // We still know the declared field type at
-                    // pass 1 (it may carry TypeVars). No subst
-                    // contribution from a deferred closure.
-                    let _ = decl_field;
-                }
                 if !provided.insert(init.name.name.clone()) {
                     self.error(
                         init.name.span,
