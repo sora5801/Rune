@@ -892,6 +892,19 @@ impl Resolver {
                 }),
             );
         }
+        // Session 122: String::from(s: str) — convenience constructor
+        // that wraps `String::new().push_str(s)` into one call.
+        for path in ["String::from", "std::String::from"] {
+            self.intern(
+                path.to_string(),
+                zero,
+                SymbolKind::BuiltinFn(BuiltinFn {
+                    name: "string_from",
+                    params: vec![Ty::Str],
+                    ret: Ty::String,
+                }),
+            );
+        }
         self.intern(
             "vec_new".to_string(),
             zero,

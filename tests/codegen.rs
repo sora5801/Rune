@@ -120,6 +120,114 @@ fn compound_assignment() {
     );
 }
 
+// ---- session 122: String::from + i64::to_str ----
+
+#[test]
+fn string_from_literal() {
+    // String::from("hello") pre-populates a String with the str's
+    // bytes — equivalent to new + push_str in one call.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::from("hello");
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn string_from_then_push_str_appends() {
+    // Combining the convenience constructor with mutation.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::from("hello");
+            s.push_str(", world");
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn string_from_empty_str() {
+    // Empty input produces empty String (len 0).
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::from("");
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn i64_to_str_positive() {
+    // 12345.to_str() → "12345" (5 bytes).
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = 12345;
+            let s: str = n.to_str();
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn i64_to_str_negative_has_minus_sign() {
+    // -42.to_str() → "-42" (3 bytes: 1 sign + 2 digits).
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = -42;
+            let s: str = n.to_str();
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn i64_to_str_zero_is_one_byte() {
+    // 0.to_str() → "0" (1 byte).
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = 0;
+            let s: str = n.to_str();
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn i64_to_str_content_matches_via_equality() {
+    // Round-trip via str equality with a literal.
+    let src = r#"
+        fn main() -> i64 {
+            let n: i64 = 123;
+            let s: str = n.to_str();
+            if s == "123" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn i64_to_str_into_string_builder() {
+    // Realistic codegen pattern: build "x = 42" in a String
+    // via to_str + push_str.
+    let src = r#"
+        fn main() -> i64 {
+            let buf: String = String::from("x = ");
+            let n: i64 = 42;
+            buf.push_str(n.to_str());
+            buf.len()
+        }
+    "#;
+    // "x = " (4) + "42" (2) = 6
+    assert_eq!(run_main(src), 6);
+}
+
 // ---- session 121: mutable String type ----
 
 #[test]

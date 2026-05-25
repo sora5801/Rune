@@ -184,6 +184,8 @@ unsafe extern "C" {
     fn rune_string_to_str(s: *const u8) -> *mut u8;
     fn rune_retain_string(s: *mut u8);
     fn rune_release_string(s: *mut u8);
+    fn rune_string_from(s: *const u8) -> *mut u8;
+    fn rune_i64_to_str(v: i64) -> *mut u8;
     fn rune_vec_new() -> *mut u8;
     fn rune_vec_push(v: *mut u8, x: i64);
     fn rune_vec_get(v: *const u8, i: i64) -> i64;
@@ -1243,6 +1245,8 @@ impl Codegen<JITModule> {
         builder.symbol("rune_string_to_str", rune_string_to_str as *const u8);
         builder.symbol("rune_retain_string", rune_retain_string as *const u8);
         builder.symbol("rune_release_string", rune_release_string as *const u8);
+        builder.symbol("rune_string_from", rune_string_from as *const u8);
+        builder.symbol("rune_i64_to_str", rune_i64_to_str as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
         builder.symbol("rune_vec_push", rune_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_vec_get as *const u8);
@@ -2909,6 +2913,15 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // Fresh +1 Vec<str> owned by the caller; no retain.
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
+            // Session 122: i64::to_str() — render as decimal.
+            (Ty::Int(IntTy::I64), "to_str") => {
+                let func_id = self.ensure_runtime_func("i64_to_str")?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let inst = self.builder.ins().call(local_func, &[recv_val]);
+                Ok(Some(self.builder.inst_results(inst)[0]))
+            }
             // Session 121: String mutating + conversion methods.
             (Ty::String, m)
                 if matches!(m, "push_str" | "push_byte" | "len" | "to_str") =>
@@ -4561,6 +4574,19 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
             ("rune_release_string", sig)
+        }
+        // Session 122: String::from(s) + i64::to_str().
+        "string_from" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // *const rune_str
+            sig.returns.push(AbiParam::new(types::I64)); // *mut rune_string (fresh +1)
+            ("rune_string_from", sig)
+        }
+        "i64_to_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64)); // fresh +1 rune_str
+            ("rune_i64_to_str", sig)
         }
         // (idx, len) -> never. Used by the inline bounds-check pattern.
         "panic_bounds" => {

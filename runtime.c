@@ -213,6 +213,42 @@ void rune_release_string(struct rune_string* s) {
     }
 }
 
+// Session 122: String::from(s: str) — construct a fresh mutable
+// String pre-populated with `s`'s bytes. Equivalent to
+// `String::new().push_str(s)` but in one allocation.
+struct rune_string* rune_string_from(const struct rune_str* s) {
+    struct rune_string* out = rune_string_new();
+    if (s->len > 0) {
+        rune_string_reserve(out, s->len);
+        memcpy(out->ptr, s->ptr, (size_t)s->len);
+        out->len = s->len;
+    }
+    return out;
+}
+
+// Session 122: integer formatting. i64::to_str renders the value
+// as decimal (with leading `-` for negatives) into a fresh +1
+// rune_str. snprintf produces the digits into a stack buffer
+// large enough for any i64 (20 digits + sign + NUL = 22 bytes);
+// the rune_str descriptor stores only the digits (no NUL).
+struct rune_str* rune_i64_to_str(int64_t v) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
+    if (n < 0) n = 0;
+    struct rune_str* r = (struct rune_str*)malloc(sizeof(struct rune_str));
+    r->rc = 1;
+    if (n == 0) {
+        r->ptr = (const char*)0;
+        r->len = 0;
+        return r;
+    }
+    char* bytes = (char*)malloc((size_t)n);
+    memcpy(bytes, buf, (size_t)n);
+    r->ptr = bytes;
+    r->len = (int64_t)n;
+    return r;
+}
+
 // Session 120: command-line args. The AOT C main wrapper calls
 // rune_argv_init at process start with the OS-provided argc/argv;
 // std::env::args() then returns a fresh Vec<str> per call that

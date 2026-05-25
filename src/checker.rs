@@ -6691,6 +6691,13 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
             params: vec![Ty::Str],
             ret: Ty::Vec(Box::new(Ty::Str)),
         }),
+        // Session 122: i64::to_str — render as decimal string.
+        // Other int widths can `(x as i64).to_str()` until a
+        // future session adds per-width variants.
+        (Ty::Int(IntTy::I64), "to_str") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Str,
+        }),
         // Session 121: mutable String methods.
         (Ty::String, "push_str") => Some(MethodSig {
             params: vec![Ty::Str],
