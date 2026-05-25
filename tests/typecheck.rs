@@ -1155,6 +1155,110 @@ fn float_negation_through_binding() {
 }
 
 #[test]
+fn compound_assign_div_by_zero_rejected() {
+    // Session 112: `a /= 0` errors at typecheck like `100 / 0`
+    // does. The LHS is mutable so we don't track its value, but
+    // the divisor const-evals to 0 — same check as session 107's.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i64 = 100;
+            a /= 0;
+            a
+        }
+        "#,
+        "division by zero",
+    );
+}
+
+#[test]
+fn compound_assign_mod_by_zero_rejected() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i64 = 100;
+            a %= 0;
+            a
+        }
+        "#,
+        "remainder by zero",
+    );
+}
+
+#[test]
+fn compound_assign_div_by_zero_through_binding_rejected() {
+    // Cross-let const-eval flows in: `z` recorded as 0, `a /= z`
+    // catches the divide-by-zero through the binding.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i64 = 100;
+            let z: i64 = 0;
+            a /= z;
+            a
+        }
+        "#,
+        "division by zero",
+    );
+}
+
+#[test]
+fn compound_assign_rhs_overflow_caught_via_inner_binop() {
+    // `a += (100u8 + 200u8)` errors at the inner binop (session
+    // 102's check), confirming that the compound-RHS overflow
+    // case was already covered before session 112 — no separate
+    // logic needed.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: u8 = 5u8;
+            a += 100u8 + 200u8;
+            a as i64
+        }
+        "#,
+        "literal `300` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn compound_assign_in_range_accepted() {
+    // Positive control: legitimate compound assigns compile.
+    // (v0.x only has += -= *= /= %=; no shift or bit-op
+    // compounds in the parser.)
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut a: i32 = 100i32;
+            a += 50i32;
+            a -= 25i32;
+            a *= 2i32;
+            a /= 5i32;
+            a %= 7i32;
+            a as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn compound_assign_float_div_by_zero_no_check() {
+    // Float compound div doesn't get a div-by-zero diagnostic —
+    // floats produce IEEE inf/NaN, not a trap. Matches session
+    // 111's policy for binop floats. The result lands in `a`
+    // which is mutable (we don't track its value), so no
+    // downstream range check either.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut a: f64 = 1.0;
+            a /= 0.0;
+            a as i64
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

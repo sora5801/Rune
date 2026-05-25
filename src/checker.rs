@@ -3631,6 +3631,29 @@ impl<'r> Checker<'r> {
                     ),
                 );
             }
+            // Session 112: integer-side const-eval diagnostics
+            // for compound assigns. The LHS is mutable so we can't
+            // track its value — but the RHS is just an expression
+            // that may const-eval, and the checks that depend only
+            // on the RHS still apply. Currently only div / mod
+            // matter; the parser has no `<<=` / `>>=` / bit-op
+            // compounds, so the shift-out-of-range check that
+            // sessions 110 cover for plain binops has no compound-
+            // assignment surface today. If those operators land in
+            // the parser later, the same gate from finish_binary
+            // applies here verbatim.
+            if matches!(lt, Ty::Int(_)) {
+                if matches!(op, BinOp::Div | BinOp::Mod) {
+                    if self.const_eval_int(rhs) == Some(0) {
+                        let opname = if matches!(op, BinOp::Mod) {
+                            "remainder"
+                        } else {
+                            "division"
+                        };
+                        self.error(span, format!("{} by zero", opname));
+                    }
+                }
+            }
         }
         Ty::Unit
     }
