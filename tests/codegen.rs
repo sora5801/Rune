@@ -1614,6 +1614,91 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn tuple_exhaustive_bool_x_int() {
+    // Session 089: `(true, x) | (false, _)` over (bool, i64) is
+    // exhaustive — true closes via the first arm (any tail), false
+    // closes via the second.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (bool, i64) = (true, 5);
+            match pair {
+                (true, x) => x,
+                (false, _) => 99,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn tuple_exhaustive_full_bool_x_bool() {
+    // All four (bool, bool) combinations covered.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (true, false);
+            match pair {
+                (true, true) => 1,
+                (true, false) => 2,
+                (false, true) => 3,
+                (false, false) => 4,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn tuple_exhaustive_with_wildcard_tail() {
+    // `(true, _)` + the three remaining (false, *) cases.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (false, true);
+            match pair {
+                (true, _) => 1,
+                (false, true) => 2,
+                (false, false) => 3,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn tuple_exhaustive_enum_x_bool() {
+    // (enum, bool) — every variant × bool combination covered
+    // either specifically or via a wildcard tail.
+    let src = r#"
+        enum Color { Red, Green, Blue }
+
+        fn main() -> i64 {
+            let p: (Color, bool) = (Color::Green, true);
+            match p {
+                (Color::Red, _) => 1,
+                (Color::Green, true) => 2,
+                (Color::Green, false) => 3,
+                (Color::Blue, _) => 4,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn tuple_exhaustive_via_wildcard_arm() {
+    // A bare `_` arm closes regardless of per-position holes.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (false, false);
+            match pair {
+                (true, true) => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
 fn numeric_literal_suffix_i32() {
     // Session 088: `10i32` lexes as a typed integer, no
     // surrounding cast needed.

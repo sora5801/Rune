@@ -1181,6 +1181,17 @@ impl<'r> Checker<'r> {
         let mut covered_ints: HashSet<i64> = HashSet::new();
         let mut covered_strs: HashSet<String> = HashSet::new();
 
+        // Session 089: tuple scrutinees get a cartesian-product
+        // exhaustiveness check via matrix specialization (Maranget's
+        // usefulness algorithm scoped to tuple shapes). The flat
+        // per-position coverage approach below would under-report
+        // — `match (b1, b2) { (true, _) => _, (false, true) => _ }`
+        // misses `(false, false)` but each individual position
+        // looks "covered."
+        if let Ty::Tuple(elem_tys) = scrutinee_ty {
+            self.check_tuple_match_exhaustiveness(elem_tys, arms, match_span);
+            return;
+        }
         for arm in arms {
             // If a catch-all already fired, every subsequent arm is dead.
             if catchall_seen.is_some() {
@@ -1266,6 +1277,71 @@ impl<'r> Checker<'r> {
                 );
             }
         }
+    }
+
+    /// Session 089: cartesian-product exhaustiveness for tuple
+    /// scrutinees. Each arm gets normalized to one or more rows of
+    /// sub-patterns (or-patterns expand row-wise; the bare
+    /// wildcard / ident arm matches anything and becomes a row of
+    /// N wildcards). The matrix is then specialized column-by-
+    /// column: for each "constructor" of the head column's type
+    /// (true / false on bool, each variant on enum), keep only
+    /// rows whose head pattern matches that constructor and recurse
+    /// on the tail. For infinite-domain head types (i64, str,
+    /// struct, ...) the only way to close is a wildcard in the head
+    /// — specialize by stripping the head and keeping only
+    /// wildcard-headed rows.
+    fn check_tuple_match_exhaustiveness(
+        &mut self,
+        elem_tys: &[Ty],
+        arms: &[MatchArm],
+        match_span: Span,
+    ) {
+        // First pass: detect duplicate top-level catch-alls / dead
+        // arms. The matrix algorithm itself doesn't surface
+        // unreachable arms, so we keep the linear pre-pass for that.
+        let mut catchall_seen = false;
+        for arm in arms {
+            if catchall_seen {
+                self.error(
+                    arm.pat.span(),
+                    "unreachable match arm — an earlier arm covers everything",
+                );
+                continue;
+            }
+            if arm.guard.is_some() {
+                continue;
+            }
+            if pattern_is_catchall_for_tuple(&arm.pat) {
+                catchall_seen = true;
+            }
+        }
+        if catchall_seen {
+            return;
+        }
+        // Build the matrix: one row per (un-guarded) arm's
+        // sub-pattern vector. Or-patterns at the top level expand
+        // row-wise. Bare wildcard / ident arms become a row of N
+        // wildcards. Anything else is treated as a degenerate row
+        // (a row that can't close the tuple coverage on its own
+        // — flagged later).
+        let mut matrix: Vec<Vec<Pattern>> = Vec::new();
+        for arm in arms {
+            if arm.guard.is_some() {
+                continue;
+            }
+            add_arm_rows(&arm.pat, elem_tys.len(), &mut matrix);
+        }
+        if tuple_matrix_is_exhaustive(self, elem_tys, &matrix) {
+            return;
+        }
+        self.error(
+            match_span,
+            format!(
+                "non-exhaustive `match` on `{}`: add a `_` arm or cover the missing combination",
+                Ty::Tuple(elem_tys.to_vec()).display()
+            ),
+        );
     }
 
     /// Recursive helper for exhaustiveness. Walks a single arm's pattern
@@ -4859,6 +4935,187 @@ fn is_dyn_assoc(ty: &Ty) -> bool {
         return matches!(**base, Ty::Dyn(_, _));
     }
     false
+}
+
+/// Session 089: a pattern is a "catch-all" for a tuple scrutinee
+/// iff it's a bare wildcard or ident, OR a tuple pattern whose
+/// every sub-pattern is itself a catch-all (recursively).
+fn pattern_is_catchall_for_tuple(p: &Pattern) -> bool {
+    match p {
+        Pattern::Wildcard(_) | Pattern::Ident { .. } => true,
+        Pattern::Tuple { patterns, .. } => {
+            patterns.iter().all(pattern_is_catchall_for_tuple)
+        }
+        Pattern::Or { patterns, .. } => {
+            // An or-pattern is a catch-all only if at least one
+            // alternative is. Conservative.
+            patterns.iter().any(pattern_is_catchall_for_tuple)
+        }
+        _ => false,
+    }
+}
+
+/// Session 089: append rows to the matrix for `arm_pat` of a tuple
+/// scrutinee with `arity` positions. Or-patterns at the top level
+/// expand to multiple rows. Bare wildcard / ident matches anything
+/// and becomes a row of `arity` wildcards.
+fn add_arm_rows(arm_pat: &Pattern, arity: usize, out: &mut Vec<Vec<Pattern>>) {
+    let synthetic_wild = || Pattern::Wildcard(Span { start: 0, end: 0 });
+    match arm_pat {
+        Pattern::Tuple { patterns, .. } if patterns.len() == arity => {
+            out.push(patterns.clone());
+        }
+        Pattern::Wildcard(_) | Pattern::Ident { .. } => {
+            out.push((0..arity).map(|_| synthetic_wild()).collect());
+        }
+        Pattern::Or { patterns, .. } => {
+            for alt in patterns {
+                add_arm_rows(alt, arity, out);
+            }
+        }
+        // Anything else is shape-incompatible with a tuple
+        // scrutinee — the type-pattern check already errored. Skip
+        // (don't contribute to coverage).
+        _ => {}
+    }
+}
+
+/// Session 089: matrix specialization on the first column. Returns
+/// true iff `matrix` covers every value of `Ty::Tuple(elem_tys)`.
+///
+/// Algorithm (Maranget):
+/// 1. Base case: 0 columns left. Exhaustive iff at least one row
+///    survived (an empty row matches anything-of-empty-tuple).
+/// 2. For the head column's type, enumerate "constructors":
+///    - Bool: {true, false}
+///    - Enum (with known variants): every discriminant
+///    - Other (i64, str, struct, ...): infinite — closes only
+///      via a wildcard-headed row (the "default" specialization).
+/// 3. For each constructor c, specialize: keep only rows whose head
+///    matches c (a wildcard / ident always matches; a specific
+///    pattern matches iff it constructs c). Recurse on the tail.
+/// 4. The matrix is exhaustive iff every constructor's
+///    specialized matrix is exhaustive AND, for infinite types,
+///    the default matrix is also exhaustive.
+fn tuple_matrix_is_exhaustive<'r>(
+    checker: &Checker<'r>,
+    elem_tys: &[Ty],
+    matrix: &[Vec<Pattern>],
+) -> bool {
+    if elem_tys.is_empty() {
+        // 0 columns: exhaustive iff any row survives.
+        return !matrix.is_empty();
+    }
+    let head_ty = &elem_tys[0];
+    let tail_tys: Vec<Ty> = elem_tys[1..].to_vec();
+    match head_ty {
+        Ty::Bool => {
+            for value in [true, false] {
+                let specialized = specialize_bool(matrix, value);
+                if !tuple_matrix_is_exhaustive(checker, &tail_tys, &specialized) {
+                    return false;
+                }
+            }
+            true
+        }
+        Ty::Enum(sym, _) => {
+            let Some(variants) = checker.res.enum_variants.get(sym) else {
+                return false;
+            };
+            // Collect discriminants of every variant.
+            let discs: Vec<u32> = variants
+                .iter()
+                .filter_map(|(_, sid)| match checker.res.symbol(*sid).kind {
+                    SymbolKind::EnumVariant { discriminant, .. } => Some(discriminant),
+                    _ => None,
+                })
+                .collect();
+            for d in discs {
+                let specialized = specialize_enum_disc(checker, matrix, d);
+                if !tuple_matrix_is_exhaustive(checker, &tail_tys, &specialized) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => {
+            // Infinite / unenumerable: only the wildcard-headed
+            // rows can close. Default-specialize and recurse.
+            let specialized = specialize_default(matrix);
+            tuple_matrix_is_exhaustive(checker, &tail_tys, &specialized)
+        }
+    }
+}
+
+fn specialize_bool(matrix: &[Vec<Pattern>], value: bool) -> Vec<Vec<Pattern>> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        let head = &row[0];
+        let keep = match head {
+            Pattern::Wildcard(_) | Pattern::Ident { .. } => true,
+            Pattern::Literal { lit: Lit::Bool(b), .. } => *b == value,
+            // Or-patterns at sub-position are still possible in
+            // principle; not generated by the checker for tuple
+            // sub-patterns in v0.x (lower errors on or-in-tuple).
+            // Defensive: if any alternative matches, keep.
+            _ => false,
+        };
+        if keep {
+            out.push(row[1..].to_vec());
+        }
+    }
+    out
+}
+
+fn specialize_enum_disc<'r>(
+    checker: &Checker<'r>,
+    matrix: &[Vec<Pattern>],
+    disc: u32,
+) -> Vec<Vec<Pattern>> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        let head = &row[0];
+        let keep = match head {
+            Pattern::Wildcard(_) | Pattern::Ident { .. } => true,
+            Pattern::Path { path, .. }
+            | Pattern::TupleVariant { path, .. }
+            | Pattern::NamedVariant { path, .. } => {
+                if let Some(&sym_id) = checker.res.path_to_sym.get(&path.span) {
+                    matches!(
+                        checker.res.symbol(sym_id).kind,
+                        SymbolKind::EnumVariant { discriminant, .. }
+                            if discriminant == disc
+                    )
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if keep {
+            out.push(row[1..].to_vec());
+        }
+    }
+    out
+}
+
+fn specialize_default(matrix: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+    let mut out = Vec::new();
+    for row in matrix {
+        if row.is_empty() {
+            continue;
+        }
+        if matches!(&row[0], Pattern::Wildcard(_) | Pattern::Ident { .. }) {
+            out.push(row[1..].to_vec());
+        }
+    }
+    out
 }
 
 /// Substitute type parameters in `ty`. Recurses through `Array`,
