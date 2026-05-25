@@ -515,6 +515,66 @@ fn suffix_overflow_in_range_accepted() {
 }
 
 #[test]
+fn hinted_literal_overflow_u8_rejected() {
+    // Session 099: a bare literal hinted to u8 by a let-binding
+    // annotation gets range-checked against u8's [0, 255].
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 1000;
+            a as i64
+        }
+        "#,
+        "literal `1000` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn hinted_literal_overflow_i8_negated_rejected() {
+    // `-200` doesn't fit i8's [-128, 127]; the negated-range
+    // check rejects.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i8 = -200;
+            a as i64
+        }
+        "#,
+        "literal `-200` is out of range for `i8`",
+    );
+}
+
+#[test]
+fn hinted_literal_in_range_accepted() {
+    // Sanity: in-range values still compile.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 200;
+            let b: i8 = -100;
+            let c: i32 = 1_000_000;
+            (a as i64) + (b as i64) + (c as i64)
+        }
+        "#,
+    );
+}
+
+#[test]
+fn suffix_literal_overflow_still_rejected() {
+    // Existing session 092 check stays in place: `1000u8` errors
+    // even without a let annotation.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a = 1000u8;
+            a as i64
+        }
+        "#,
+        "literal `1000` is out of range for `u8`",
+    );
+}
+
+#[test]
 fn duplicate_into_impl_rejected() {
     // Session 090: two `impl Into<AppErr> for IoErr` blocks
     // collide on target and must error at type-check. The

@@ -2107,6 +2107,15 @@ impl<'r> Checker<'r> {
         // literal has no source-level type and the hint pins it.
         if let (Expr::Lit { lit, span }, Some(exp)) = (e, expected) {
             if let Some(ty) = self.numeric_lit_hint(lit, exp) {
+                // Session 099: a hinted literal is in source the
+                // same as a suffixed one once typed — `let a: u8 =
+                // 1000;` is just `1000u8` in disguise. Range-check
+                // the magnitude against the hinted type's bounds
+                // before stamping the type so the codegen pipeline
+                // doesn't silently truncate.
+                if let (Lit::Int(v, None), Ty::Int(it)) = (lit, &ty) {
+                    self.check_int_value_in_range(*v, *it, false, *span);
+                }
                 self.expr_types.insert(*span, ty.clone());
                 return ty;
             }
@@ -2121,6 +2130,12 @@ impl<'r> Checker<'r> {
         {
             if let Expr::Lit { lit, span: lit_span } = expr.as_ref() {
                 if let Some(ty) = self.numeric_lit_hint(lit, exp) {
+                    // Session 099: negated hinted literal — range
+                    // check using the same negated bounds as the
+                    // suffix-with-negation path.
+                    if let (Lit::Int(v, None), Ty::Int(it)) = (lit, &ty) {
+                        self.check_int_value_in_range(*v, *it, true, *lit_span);
+                    }
                     self.expr_types.insert(*lit_span, ty.clone());
                     self.expr_types.insert(*span, ty.clone());
                     return ty;
@@ -2481,23 +2496,19 @@ impl<'r> Checker<'r> {
     /// before negation is one larger than the positive range).
     /// Unsigned types reject any negation. Bare integers (no
     /// suffix) and float literals skip the check.
-    fn check_numeric_lit_in_range(&mut self, lit: &Lit, span: Span, negated: bool) {
-        let (v, ty) = match lit {
-            Lit::Int(v, Some(ty)) => (*v, *ty),
-            _ => return,
-        };
-        // The lexer parses digit magnitudes into `i64`. Negative
-        // values from source negation are applied at the AST level
-        // (Unary::Neg), so `v` is always non-negative here.
+    /// Session 099: range check the raw `(v, ty)` pair regardless
+    /// of whether the type came from a source-level suffix or from
+    /// hint flow. The suffix-only `check_numeric_lit_in_range` is
+    /// a thin wrapper around this for the historical session-092
+    /// call sites.
+    fn check_int_value_in_range(&mut self, v: i64, ty: crate::ty::IntTy, negated: bool, span: Span) {
         let in_range = if negated {
             use crate::ty::IntTy::*;
             match ty {
                 I8 => v <= 128,
                 I16 => v <= 32_768,
                 I32 => v <= 2_147_483_648,
-                I64 | ISize => true, // -i64::MIN doesn't fit i64,
-                                     // but the lexer rejected the
-                                     // magnitude already.
+                I64 | ISize => true,
                 U8 | U16 | U32 | U64 | USize => false,
             }
         } else {
@@ -2518,14 +2529,24 @@ impl<'r> Checker<'r> {
             self.error(
                 span,
                 format!(
-                    "literal `{}{}{}` is out of range for `{}`",
+                    "literal `{}{}` is out of range for `{}`",
                     sign,
                     v,
-                    ty.name(),
                     ty.name(),
                 ),
             );
         }
+    }
+
+    fn check_numeric_lit_in_range(&mut self, lit: &Lit, span: Span, negated: bool) {
+        // Suffix-bearing literals only — bare literals get their
+        // type from hint flow, which uses `check_int_value_in_range`
+        // directly via the hint paths (session 099).
+        let (v, ty) = match lit {
+            Lit::Int(v, Some(ty)) => (*v, *ty),
+            _ => return,
+        };
+        self.check_int_value_in_range(v, ty, negated, span);
     }
 
     /// Session 093: format a `Ty` for error messages, consulting

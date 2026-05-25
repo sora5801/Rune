@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Const-eval overflow checks — reject `100u8 + 200u8`
+1. Compound const-eval overflow — reject `100u8 + 200u8`
 2. Chained binop hint propagation — `1 + 2 + a: i32` works without parens
-3. Pre-1.0 audit — retrospective doc covering deferred items + 1.0 scope
+3. Floating-point Vec elements — unblock `Vec<f64>` / `Vec<f32>`
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
