@@ -4991,6 +4991,69 @@ fn match_enum_with_guard() {
     assert_eq!(run_main(src), 4); // 5 + 0 + -1
 }
 
+#[test]
+fn match_guard_bootstrap_keyword_classification() {
+    // Session 126: the keyword-recognition pattern a bootstrap
+    // lexer/parser would use. Guard arms inspect a payload-bound
+    // str to dispatch on specific keywords; an unguarded catch-
+    // all handles the general identifier case.
+    let src = r#"
+        enum Token {
+            Ident(str),
+            Number(i64),
+            Punct(str),
+        }
+        fn classify(t: Token) -> i64 {
+            match t {
+                Token::Ident(name) if name == "fn" => 1,
+                Token::Ident(name) if name == "let" => 2,
+                Token::Ident(name) if name == "if" => 3,
+                Token::Ident(_) => 100,
+                Token::Number(n) if n < 0 => -1,
+                Token::Number(_) => 200,
+                Token::Punct(_) => 300,
+            }
+        }
+        fn main() -> i64 {
+            classify(Token::Ident("fn"))
+            + classify(Token::Ident("let"))
+            + classify(Token::Ident("foo"))
+            + classify(Token::Number(-5))
+            + classify(Token::Number(42))
+        }
+    "#;
+    // 1 + 2 + 100 + -1 + 200 = 302
+    assert_eq!(run_main(src), 302);
+}
+
+#[test]
+fn match_guard_with_recursive_enum() {
+    // Combines session 125's recursive enums with guards. The
+    // guard inspects a sub-eval before deciding what to do —
+    // useful for bootstrap-style optimization passes.
+    let src = r#"
+        enum Expr {
+            Num(i64),
+            Sum { lhs: Expr, rhs: Expr },
+        }
+        fn eval(e: Expr) -> i64 {
+            match e {
+                Expr::Num(v) => v,
+                Expr::Sum { lhs, rhs } if eval(lhs) == 0 => eval(rhs),
+                Expr::Sum { lhs, rhs } => eval(lhs) + eval(rhs),
+            }
+        }
+        fn main() -> i64 {
+            let t: Expr = Expr::Sum {
+                lhs: Expr::Num(0),
+                rhs: Expr::Sum { lhs: Expr::Num(3), rhs: Expr::Num(4) },
+            };
+            eval(t)
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
 // ---- or-patterns ----
 
 #[test]
