@@ -6302,6 +6302,8 @@ pub enum Token {
     Fn, Let, If, Else, While, For, Return, Match,
     Struct, Enum, Trait, Impl, Pub, Mod, Use, Mut, As, In,
     True, False, Break, Continue,
+    Str(str),
+    Char(u8),
     Eof,
     Error(str),
 }
@@ -6317,6 +6319,16 @@ fn is_alnum(b: u8) -> bool { is_alpha(b) || is_digit(b) }
 
 fn peek_byte(src: str, j: i64, n: i64) -> u8 {
     if j < n { src.byte_at(j) } else { 0u8 }
+}
+
+fn decode_escape(e: u8) -> u8 {
+    if e == 110u8 { return 10u8; }
+    if e == 116u8 { return 9u8; }
+    if e == 114u8 { return 13u8; }
+    if e == 92u8  { return 92u8; }
+    if e == 34u8  { return 34u8; }
+    if e == 39u8  { return 39u8; }
+    0u8
 }
 
 pub fn keyword_of(name: str) -> Token {
@@ -6364,6 +6376,75 @@ pub fn tokenize(src: str) -> Vec<Token> {
             while j < n && is_alnum(src.byte_at(j)) { j = j + 1; }
             tokens.push(keyword_of(src[i..j]));
             i = j;
+            continue;
+        }
+        if b == 34u8 {
+            let buf: String = String::new();
+            let mut j: i64 = i + 1;
+            let mut closed: bool = false;
+            let mut had_error: bool = false;
+            while j < n {
+                let c: u8 = src.byte_at(j);
+                if c == 34u8 { closed = true; j = j + 1; break; }
+                if c == 92u8 {
+                    if j + 1 >= n { break; }
+                    let e: u8 = src.byte_at(j + 1);
+                    let decoded: u8 = decode_escape(e);
+                    if decoded == 0u8 {
+                        tokens.push(Token::Error(src[i..j+2]));
+                        j = j + 2;
+                        had_error = true;
+                        closed = true;
+                        break;
+                    }
+                    buf.push_byte(decoded);
+                    j = j + 2;
+                    continue;
+                }
+                buf.push_byte(c);
+                j = j + 1;
+            }
+            if !closed {
+                tokens.push(Token::Error(src[i..n]));
+                i = n;
+                continue;
+            }
+            if !had_error {
+                tokens.push(Token::Str(buf.to_str()));
+            }
+            i = j;
+            continue;
+        }
+        if b == 39u8 {
+            if i + 2 >= n {
+                tokens.push(Token::Error(src[i..n]));
+                i = n;
+                continue;
+            }
+            let c: u8 = src.byte_at(i + 1);
+            let ch_byte: u8 = if c == 92u8 {
+                if i + 3 >= n {
+                    tokens.push(Token::Error(src[i..n]));
+                    i = n;
+                    continue;
+                }
+                let e: u8 = src.byte_at(i + 2);
+                let d: u8 = decode_escape(e);
+                if d == 0u8 {
+                    tokens.push(Token::Error(src[i..i+4]));
+                    i = i + 4;
+                    continue;
+                }
+                d
+            } else { c };
+            let close_pos: i64 = if c == 92u8 { i + 3 } else { i + 2 };
+            if close_pos >= n || src.byte_at(close_pos) != 39u8 {
+                tokens.push(Token::Error(src[i..n]));
+                i = n;
+                continue;
+            }
+            tokens.push(Token::Char(ch_byte));
+            i = close_pos + 1;
             continue;
         }
         let next: u8 = peek_byte(src, i + 1, n);
@@ -6664,6 +6745,142 @@ fn rune_lexer_single_char_op_after_lookahead_fails() {
     assert_eq!(
         run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
         1
+    );
+}
+
+#[test]
+fn rune_lexer_string_literal_basic() {
+    // "hello" lexes as one Str token + Eof.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("\"hello\"");
+            // Str("hello") + Eof = 2
+            if toks.len() != 2 { return 0; }
+            match toks.get(0) {
+                lexer::Token::Str(s) => if s == "hello" { 1 } else { 0 },
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_string_literal_with_escapes() {
+    // "a\nb" decodes to a + newline + b (3 bytes).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("\"a\\nb\"");
+            match toks.get(0) {
+                lexer::Token::Str(s) => s.len(),
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        3
+    );
+}
+
+#[test]
+fn rune_lexer_string_literal_escaped_quote() {
+    // "a\"b" — embedded escaped quote, content is 3 bytes.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("\"a\\\"b\"");
+            match toks.get(0) {
+                lexer::Token::Str(s) => s.len(),
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        3
+    );
+}
+
+#[test]
+fn rune_lexer_string_literal_unterminated_is_error() {
+    // "hello (no closing quote) → Error token.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("\"hello");
+            match toks.get(0) {
+                lexer::Token::Error(_) => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_char_literal_basic() {
+    // 'a' lexes as Char(97).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("'a'");
+            match toks.get(0) {
+                lexer::Token::Char(b) => b as i64,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        97
+    );
+}
+
+#[test]
+fn rune_lexer_char_literal_escape() {
+    // '\n' lexes as Char(10).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("'\\n'");
+            match toks.get(0) {
+                lexer::Token::Char(b) => b as i64,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        10
+    );
+}
+
+#[test]
+fn rune_lexer_str_and_char_in_statement() {
+    // The exact main.rn shape: let s = "hi\n"; let c = 'a';
+    // Tokens: Let Ident("s") Eq Str("hi\n") Semi Let Ident("c")
+    //         Eq Char('a') Semi Eof = 11.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize(
+                "let s = \"hi\\n\"; let c = 'a';"
+            );
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        11
     );
 }
 

@@ -350,7 +350,10 @@ shipped, `let-else` expressible via match.
   `&&`, `||`, `::`, `->`, `=>`) + 22 keyword tokens (`fn`,
   `let`, `if`, `else`, `match`, `pub`, ...). The lexer now
   tokenizes `pub fn double(x: i64) -> i64 { x * 2 }` correctly.
-- **Next**: string/char literals, float literals, comments +
+- **Session 130**: String and char literals with escape
+  sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`). Lexer is
+  ~70% complete by surface area.
+- **Next**: float literals + numeric suffixes, comments +
   source spans, then the parser.
 
 See `examples/bootstrap/lexer.rn`. Per session 117's plan:
