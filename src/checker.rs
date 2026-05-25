@@ -1930,7 +1930,15 @@ impl<'r> Checker<'r> {
 
     fn check_expr_inner(&mut self, e: &Expr) -> Ty {
         match e {
-            Expr::Lit { lit, .. } => self.lit_type(lit),
+            Expr::Lit { lit, span } => {
+                // Session 092: a suffixed numeric literal that
+                // doesn't fit its declared type is rejected
+                // here, before downstream codegen would silently
+                // truncate (`1000u8` was previously emitting an
+                // i8(232) without diagnostic).
+                self.check_numeric_lit_in_range(lit, *span, false);
+                self.lit_type(lit)
+            }
             Expr::Path(p) => self.path_value_type(p),
             Expr::Unary { op, expr, span } => self.check_unary(*op, expr, *span),
             Expr::Binary { op, lhs, rhs, span } => self.check_binary(*op, lhs, rhs, *span),
@@ -2436,6 +2444,60 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Session 092: reject suffixed numeric literals whose value
+    /// doesn't fit the suffix's type. When `negated`, the magnitude
+    /// is checked against the signed type's *negative* range (i8
+    /// accepts `-128` but not `128`, so the digit magnitude allowed
+    /// before negation is one larger than the positive range).
+    /// Unsigned types reject any negation. Bare integers (no
+    /// suffix) and float literals skip the check.
+    fn check_numeric_lit_in_range(&mut self, lit: &Lit, span: Span, negated: bool) {
+        let (v, ty) = match lit {
+            Lit::Int(v, Some(ty)) => (*v, *ty),
+            _ => return,
+        };
+        // The lexer parses digit magnitudes into `i64`. Negative
+        // values from source negation are applied at the AST level
+        // (Unary::Neg), so `v` is always non-negative here.
+        let in_range = if negated {
+            use crate::ty::IntTy::*;
+            match ty {
+                I8 => v <= 128,
+                I16 => v <= 32_768,
+                I32 => v <= 2_147_483_648,
+                I64 | ISize => true, // -i64::MIN doesn't fit i64,
+                                     // but the lexer rejected the
+                                     // magnitude already.
+                U8 | U16 | U32 | U64 | USize => false,
+            }
+        } else {
+            use crate::ty::IntTy::*;
+            match ty {
+                I8 => v <= 127,
+                I16 => v <= 32_767,
+                I32 => v <= 2_147_483_647,
+                I64 | ISize => true,
+                U8 => v >= 0 && v <= 255,
+                U16 => v >= 0 && v <= 65_535,
+                U32 => v >= 0 && v <= 4_294_967_295,
+                U64 | USize => v >= 0,
+            }
+        };
+        if !in_range {
+            let sign = if negated { "-" } else { "" };
+            self.error(
+                span,
+                format!(
+                    "literal `{}{}{}` is out of range for `{}`",
+                    sign,
+                    v,
+                    ty.name(),
+                    ty.name(),
+                ),
+            );
+        }
+    }
+
     fn lit_type(&self, lit: &Lit) -> Ty {
         match lit {
             // Session 088: an explicit suffix (`10i32`, `42u64`)
@@ -2499,6 +2561,31 @@ impl<'r> Checker<'r> {
     }
 
     fn check_unary(&mut self, op: UnOp, expr: &Expr, span: Span) -> Ty {
+        // Session 092: a suffixed literal whose magnitude only
+        // fits its type under negation (`-128i8` is in range,
+        // `128i8` overflows) — check the inner Lit against the
+        // negated bounds before recursing. We have to do this
+        // BEFORE check_expr on the inner lit, because the inner
+        // call would otherwise apply the positive-range check
+        // and reject `-128i8` even though it's valid.
+        if matches!(op, UnOp::Neg) {
+            if let Expr::Lit { lit, span: lit_span } = expr {
+                if matches!(lit, Lit::Int(_, _) | Lit::Float(_, _)) {
+                    self.check_numeric_lit_in_range(lit, *lit_span, true);
+                    // Record the inner Lit's span in expr_types so
+                    // the lowerer reads the suffix-typed Ty rather
+                    // than defaulting to i64 (codegen would
+                    // otherwise panic on `-128i8` with a "declared
+                    // i8, got i64" mismatch).
+                    let ty = self.lit_type(lit);
+                    self.expr_types.insert(*lit_span, ty.clone());
+                    return ty;
+                }
+                // Non-numeric literal (`-true`, `-"hi"`): fall
+                // through to the normal check_expr + numeric guard
+                // below so the usual "cannot negate" error fires.
+            }
+        }
         let t = self.check_expr(expr);
         if t.is_error() {
             return Ty::Error;

@@ -338,6 +338,58 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
+fn suffix_overflow_u8_rejected() {
+    // Session 092: `1000u8` doesn't fit u8 (max 255); rejected
+    // at type-check.
+    check_has_error(
+        "fn main() -> i64 { let x: u8 = 1000u8; x as i64 }",
+        "out of range for `u8`",
+    );
+}
+
+#[test]
+fn suffix_overflow_i8_positive_rejected() {
+    // `200i8` overflows i8 (max 127).
+    check_has_error(
+        "fn main() -> i64 { let x: i8 = 200i8; x as i64 }",
+        "out of range for `i8`",
+    );
+}
+
+#[test]
+fn suffix_overflow_negative_signed_min_accepted() {
+    // `-128i8` IS valid (i8 range is -128..=127). Make sure the
+    // negated-range check accepts the lower bound.
+    check_ok("fn main() -> i64 { let x: i8 = -128i8; x as i64 }");
+}
+
+#[test]
+fn suffix_overflow_negative_one_past_min_rejected() {
+    // `-129i8` is one past i8::MIN; rejected.
+    check_has_error(
+        "fn main() -> i64 { let x: i8 = -129i8; x as i64 }",
+        "out of range for `i8`",
+    );
+}
+
+#[test]
+fn suffix_overflow_negative_unsigned_rejected() {
+    // Negation of unsigned-suffixed literal is invalid regardless
+    // of magnitude.
+    check_has_error(
+        "fn main() -> i64 { let x: u8 = -5u8; x as i64 }",
+        "out of range for `u8`",
+    );
+}
+
+#[test]
+fn suffix_overflow_in_range_accepted() {
+    // 255 fits u8 exactly; 127 fits i8 exactly.
+    check_ok("fn main() -> i64 { let x: u8 = 255u8; x as i64 }");
+    check_ok("fn main() -> i64 { let x: i8 = 127i8; x as i64 }");
+}
+
+#[test]
 fn duplicate_into_impl_rejected() {
     // Session 090: two `impl Into<AppErr> for IoErr` blocks
     // collide on target and must error at type-check. The

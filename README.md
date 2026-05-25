@@ -328,8 +328,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 ## Roadmap
 
 1. Binary-op hint flow — `a: i32; a + 1` lets `1` adopt i32 from the LHS
-2. Suffix overflow checks — reject `1000u8`
-3. Per-arm unreachability inside tuple matches
+2. Per-arm unreachability inside tuple matches
+3. Polished diagnostics — friendly struct/enum names everywhere
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
