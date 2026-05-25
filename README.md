@@ -327,22 +327,24 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-Phase 1 — capability buildout (next ~10 sessions):
+**Phase 1 complete.** All Tier A/B/C blockers from the
+session-117 bootstrap roadmap are resolved. Remaining items
+are useful enhancements but no longer block the bootstrap:
 
-1. `let ... else` (likely already expressible — investigate first)
-2. `std::env::var(name)` for environment variables
-3. `i64::parse(s) -> Option<i64>` for type-safe parse failure
-4. `.chars()` for UTF-8 iteration (future, when source needs it)
+- `std::env::var(name)` for environment variables
+- `i64::parse(s) -> Option<i64>` for type-safe parse failure
+- `.chars()` for UTF-8 iteration
+- Dedicated `let-else` keyword (sugar; today the match form works)
 
-Already shipped from Phase 1: file I/O (session 118), string
-methods `.byte_at` / `.find` / `.split` + `Vec<str>` (session 119),
-command-line args via `std::env::args()` (session 120), mutable
-`String` type with push_str / push_byte / to_str (session 121),
-`String::from(s)` + `i64::to_str()` (session 122),
-`i64::from_str(s)` (session 123), end-to-end module coverage
-+ multi-file example (session 124), recursive types confirmed
-working without `Box<T>` (session 125), pattern guards confirmed
-shipped (session 126 — Tier C blocker removed).
+Phase 1 highlights (sessions 118-127): file I/O, string methods +
+`Vec<str>`, command-line args, mutable `String` + builders,
+`i64::to_str` + `i64::from_str`, end-to-end module coverage,
+recursive types (no `Box<T>` needed), pattern guards confirmed
+shipped, `let-else` expressible via match.
+
+**Phase 2 — Rune-in-Rune interpreter** (next ~30 sessions per
+session 117). Write the lexer, parser, resolver, type-checker,
+and tree-walking evaluator in Rune itself.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

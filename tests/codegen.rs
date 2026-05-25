@@ -6283,6 +6283,58 @@ fn generic_vec_struct_loop_reclaims() {
     assert_eq!(run_main(src), 100000);
 }
 
+// ---- session 127: let-else via match (no syntax sugar needed) ----
+
+#[test]
+fn let_else_pattern_via_match_on_option() {
+    // Session 127: Rune doesn't have dedicated `let-else` syntax,
+    // but the same semantic — bind from a pattern OR diverge —
+    // is expressible via match with a `return`/`break`/`continue`
+    // arm. This is the bootstrap-friendly shape: same shape Rust's
+    // let-else compiles to, just spelled out.
+    let src = r#"
+        fn double_or_default(o: std::Option<i64>) -> i64 {
+            let v: i64 = match o {
+                std::Option::Some(x) => x,
+                std::Option::None => return -1,
+            };
+            v * 2
+        }
+        fn main() -> i64 {
+            let a: i64 = double_or_default(std::Option::Some(21));
+            let b: i64 = double_or_default(std::Option::None);
+            a + b  // 42 + -1 = 41
+        }
+    "#;
+    assert_eq!(run_main(src), 41);
+}
+
+#[test]
+fn let_else_via_match_with_continue() {
+    // The else-arm can be any diverging expression. `continue`
+    // works for loop-internal "skip this iteration" semantics.
+    let src = r#"
+        fn first_nonzero(v: Vec<i64>) -> i64 {
+            let mut result: i64 = -1;
+            for x in v.iter() {
+                let val: i64 = match x {
+                    0 => continue,
+                    n => n,
+                };
+                result = val;
+                break;
+            }
+            result
+        }
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(0); v.push(0); v.push(42); v.push(99);
+            first_nonzero(v)
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
 // ---- session 125: recursive types (no Box<T> needed) ----
 
 #[test]
