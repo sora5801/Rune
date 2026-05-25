@@ -159,6 +159,18 @@ pub struct Checker<'r> {
     /// u32::MAX and decrements so it never collides with the
     /// resolver's symbol table (which grows from 0 up).
     next_fresh_sym: std::cell::Cell<u32>,
+    /// Session 106: cross-let const-eval. Maps immutable let
+    /// bindings whose init const-evals to an integer to that
+    /// value. `const_eval_int` consults this for `Expr::Path`
+    /// nodes, so `let a = 100u8; let b = 200u8; a + b` can
+    /// detect the runtime overflow at typecheck. Keyed by
+    /// `SymbolId` (the binding's resolver sym), so shadowing
+    /// (`let a = 5; let a = 10;`) works without scope tracking
+    /// — the second binding gets a fresh sym, the first's
+    /// entry is just dead. Mutable bindings (`let mut`) are
+    /// not tracked: a subsequent `=` would invalidate the
+    /// recorded value and we don't track invalidations.
+    const_values: HashMap<SymbolId, i64>,
 }
 
 impl<'r> Checker<'r> {
@@ -182,6 +194,7 @@ impl<'r> Checker<'r> {
             current_return: Ty::Unit,
             current_self: None,
             current_self_param: None,
+            const_values: HashMap::new(),
         }
     }
 
@@ -1167,6 +1180,23 @@ impl<'r> Checker<'r> {
             }
         };
         self.bind_pattern(&l.pat, &final_ty);
+        // Session 106: record the const-evaluated init value for
+        // cross-let const-eval. Only immutable Ident bindings of
+        // integer type qualify — mutables can be reassigned, and
+        // non-integer types don't flow through const_eval_int.
+        if !l.mutable {
+            if let (Pattern::Ident { name, mutable: pat_mut, .. }, Some(init)) =
+                (&l.pat, &l.init)
+            {
+                if !*pat_mut && matches!(final_ty, Ty::Int(_)) {
+                    if let Some(v) = self.const_eval_int(init) {
+                        if let Some(&sym) = self.res.decl_to_sym.get(&name.span) {
+                            self.const_values.insert(sym, v);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Checks that a match expression's arms cover the scrutinee's
@@ -2246,7 +2276,24 @@ impl<'r> Checker<'r> {
                         _ => None,
                     };
                     if let Some(v) = result {
-                        self.check_int_value_in_range(v, *result_ty, false, span);
+                        // `check_int_value_in_range` was designed for
+                        // source literals (magnitude + sign flag). A
+                        // compound binop result is signed: translate
+                        // to (magnitude, negated) before checking.
+                        // i64::MIN can't be negated so we silently
+                        // skip — it fits no signed type narrower than
+                        // i64, and i64 always fits.
+                        if v < 0 {
+                            if let Some(neg) = v.checked_neg() {
+                                self.check_int_value_in_range(
+                                    neg, *result_ty, true, span,
+                                );
+                            }
+                        } else {
+                            self.check_int_value_in_range(
+                                v, *result_ty, false, span,
+                            );
+                        }
                     }
                 }
             }
@@ -2728,6 +2775,18 @@ impl<'r> Checker<'r> {
     fn const_eval_int(&self, e: &Expr) -> Option<i64> {
         match e {
             Expr::Lit { lit: Lit::Int(v, _), .. } => Some(*v),
+            // Session 106: a Path that resolves to an immutable
+            // let-binding whose init const-evaled to an integer
+            // (recorded in `const_values` by `check_let`). This
+            // lets `let a = 100u8; let b = 200u8; a + b` catch
+            // the overflow at typecheck. Mutable bindings aren't
+            // recorded, so a `let mut` path returns None and the
+            // binop falls back to runtime semantics.
+            Expr::Path(p) => self
+                .res
+                .path_to_sym
+                .get(&p.span)
+                .and_then(|sym| self.const_values.get(sym).copied()),
             Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => {
                 let v = self.const_eval_int(expr)?;
                 v.checked_neg()
@@ -3135,7 +3194,24 @@ impl<'r> Checker<'r> {
                         _ => None,
                     };
                     if let Some(v) = result {
-                        self.check_int_value_in_range(v, *result_ty, false, span);
+                        // `check_int_value_in_range` was designed for
+                        // source literals (magnitude + sign flag). A
+                        // compound binop result is signed: translate
+                        // to (magnitude, negated) before checking.
+                        // i64::MIN can't be negated so we silently
+                        // skip — it fits no signed type narrower than
+                        // i64, and i64 always fits.
+                        if v < 0 {
+                            if let Some(neg) = v.checked_neg() {
+                                self.check_int_value_in_range(
+                                    neg, *result_ty, true, span,
+                                );
+                            }
+                        } else {
+                            self.check_int_value_in_range(
+                                v, *result_ty, false, span,
+                            );
+                        }
                     }
                     // If checked_* returned None, i64 overflowed
                     // — runtime would wrap. Don't error here in

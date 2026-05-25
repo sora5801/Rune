@@ -573,12 +573,12 @@ fn const_eval_in_range_accepted() {
 }
 
 #[test]
-fn const_eval_skipped_for_non_const_operand() {
-    // When one operand isn't a literal-expression, the
-    // const-eval check doesn't fire. Runtime overflow still
-    // happens; this confirms the check is a compile-time
-    // gate, not a runtime one (and not a false positive).
-    check_ok(
+fn cross_let_const_eval_overflow_rejected() {
+    // Session 106: const values flow through immutable let
+    // bindings. `let a = 100u8; let b = 200u8; a + b` now
+    // const-evals to 300 and gets caught by session 102's
+    // range check — previously was a runtime wrap.
+    check_has_error(
         r#"
         fn main() -> i64 {
             let a: u8 = 100u8;
@@ -587,6 +587,75 @@ fn const_eval_skipped_for_non_const_operand() {
             c as i64
         }
         "#,
+        "literal `300` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn cross_let_const_eval_in_range_accepted() {
+    // The complementary path: bindings whose sum fits the
+    // type compile cleanly.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 50u8;
+            let b: u8 = 100u8;
+            let c: u8 = a + b;
+            c as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn cross_let_const_eval_skipped_for_mutable_binding() {
+    // Mutable bindings don't get tracked — a `let mut a` could
+    // be reassigned, invalidating any recorded value. The check
+    // doesn't fire, so this compiles even though 100 + 200 = 300
+    // would overflow u8 at runtime.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut a: u8 = 100u8;
+            let b: u8 = 200u8;
+            let c: u8 = a + b;
+            c as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn cross_let_const_eval_chains_through_binding() {
+    // The recorded value is the const-eval'd result of the
+    // init, so a chain `let a = 1; let b = a + 2; let c = b * 3`
+    // pins c to 9 — and `let d: u8 = c + 250u8` overflows.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 5u8;
+            let b: u8 = a + 1u8;
+            let c: u8 = b + 250u8;
+            c as i64
+        }
+        "#,
+        "literal `256` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn cross_let_const_eval_negation_through_binding() {
+    // Negation flows through too: `-a` where `a` is const-tracked
+    // const-evals to `-value`.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i8 = 100i8;
+            let b: i8 = -a - 100i8;
+            b as i64
+        }
+        "#,
+        "literal `-200` is out of range for `i8`",
     );
 }
 

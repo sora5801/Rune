@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Cross-let const-eval — propagate const values through let bindings
-2. Division-by-zero const-eval diagnostic
-3. Floating-point literal range checks (`3.4e40f32` rounds to infinity today)
+1. Division-by-zero const-eval diagnostic
+2. Floating-point literal range checks (`3.4e40f32` rounds to infinity today)
+3. `as`-cast through const-tracked bindings
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
