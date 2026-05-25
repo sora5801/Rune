@@ -691,6 +691,94 @@ fn iterator_chain_all_unannotated() {
 }
 
 #[test]
+fn numeric_trait_user_struct() {
+    // Session 084: a user struct implements `Numeric` and can be
+    // passed to a `<T: Numeric>` generic fn that dispatches through
+    // the bound's `add` / `lt` methods.
+    let src = r#"
+        struct Money { cents: i64 }
+        impl std::Numeric for Money {
+            fn add(self: Money, other: Money) -> Money {
+                Money { cents: self.cents + other.cents }
+            }
+            fn lt(self: Money, other: Money) -> bool {
+                self.cents < other.cents
+            }
+        }
+        fn smaller<T: std::Numeric>(a: T, b: T) -> T {
+            if a.lt(b) { a } else { b }
+        }
+        fn main() -> i64 {
+            let a: Money = Money { cents: 500 };
+            let b: Money = Money { cents: 300 };
+            let m: Money = smaller(a, b);
+            m.cents
+        }
+    "#;
+    assert_eq!(run_main(src), 300);
+}
+
+#[test]
+fn numeric_trait_combined_add_and_lt() {
+    // Combine .add and .lt across multiple Money values.
+    let src = r#"
+        struct Money { cents: i64 }
+        impl std::Numeric for Money {
+            fn add(self: Money, other: Money) -> Money {
+                Money { cents: self.cents + other.cents }
+            }
+            fn lt(self: Money, other: Money) -> bool {
+                self.cents < other.cents
+            }
+        }
+        fn sum_two<T: std::Numeric>(a: T, b: T) -> T {
+            a.add(b)
+        }
+        fn main() -> i64 {
+            let a: Money = Money { cents: 25 };
+            let b: Money = Money { cents: 75 };
+            let c: Money = sum_two(a, b);
+            c.cents
+        }
+    "#;
+    assert_eq!(run_main(src), 100);
+}
+
+#[test]
+fn iterator_min_polymorphic_return_type() {
+    // Session 084: .min returns Option<Self::Item> now. For
+    // i64-iterators that's Option<i64>, same as before — but the
+    // body is no longer hardcoded to i64. The match arm types
+    // confirm the Self::Item-polymorphic return.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(50); v.push(10); v.push(30);
+            match v.iter().min() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn iterator_max_polymorphic_return_type() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(50); v.push(10); v.push(30);
+            match v.iter().max() {
+                std::Option::Some(x) => x,
+                std::Option::None => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 50);
+}
+
+#[test]
 fn match_tuple_pattern_basic() {
     // Session 082: tuple patterns in match arms.
     let src = r#"

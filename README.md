@@ -327,8 +327,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
-   `.fold(init, +)` beyond i64
+1. Intrinsic `Numeric` impls for primitive types — lifts the
+   `impl on i64/i32/f64/...` resolver restriction
 2. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
 3. Cartesian-product exhaustiveness for tuple patterns
 4. For-loop tuple patterns — `for (k, v) in m.entries()`
