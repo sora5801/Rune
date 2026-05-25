@@ -327,13 +327,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-Phase 1 — capability buildout (next ~20 sessions):
+Phase 1 — capability buildout (next ~15 sessions):
 
-1. `Box<T>` (or implicit boxing of recursive enum variants)
-2. Pattern guards + `let ... else`
-3. `std::env::var(name)` for environment variables
-4. `.chars()` for UTF-8 iteration (future, when source needs it)
-5. `i64::parse(s) -> Option<i64>` for type-safe parse failure
+1. Pattern guards + `let ... else`
+2. `std::env::var(name)` for environment variables
+3. `.chars()` for UTF-8 iteration (future, when source needs it)
+4. `i64::parse(s) -> Option<i64>` for type-safe parse failure
 
 Already shipped from Phase 1: file I/O (session 118), string
 methods `.byte_at` / `.find` / `.split` + `Vec<str>` (session 119),
@@ -341,7 +340,8 @@ command-line args via `std::env::args()` (session 120), mutable
 `String` type with push_str / push_byte / to_str (session 121),
 `String::from(s)` + `i64::to_str()` (session 122),
 `i64::from_str(s)` (session 123), end-to-end module coverage
-+ multi-file example (session 124).
++ multi-file example (session 124), recursive types confirmed
+working without `Box<T>` (session 125 — Tier C blocker removed).
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

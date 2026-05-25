@@ -6220,6 +6220,120 @@ fn generic_vec_struct_loop_reclaims() {
     assert_eq!(run_main(src), 100000);
 }
 
+// ---- session 125: recursive types (no Box<T> needed) ----
+
+#[test]
+fn recursive_enum_self_referencing_variant() {
+    // Session 125: enum variants can carry the enum type itself.
+    // Each enum value is an 8-byte pointer in v0.x, so self-recursion
+    // doesn't blow up the layout. Box<T> isn't needed for this case.
+    let src = r#"
+        enum Expr {
+            Num(i64),
+            Pair { lhs: Expr, rhs: Expr },
+        }
+        fn main() -> i64 {
+            let e: Expr = Expr::Pair {
+                lhs: Expr::Num(10),
+                rhs: Expr::Num(20),
+            };
+            match e {
+                Expr::Num(v) => v,
+                Expr::Pair { lhs, rhs } => 99,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
+fn recursive_enum_eval_mini_ast() {
+    // The mini-AST + recursive evaluator pattern a bootstrap
+    // would use. (2+3) * (4+5) = 45.
+    let src = r#"
+        enum Expr {
+            Num(i64),
+            Add { lhs: Expr, rhs: Expr },
+            Mul { lhs: Expr, rhs: Expr },
+        }
+        fn eval(e: Expr) -> i64 {
+            match e {
+                Expr::Num(v) => v,
+                Expr::Add { lhs, rhs } => eval(lhs) + eval(rhs),
+                Expr::Mul { lhs, rhs } => eval(lhs) * eval(rhs),
+            }
+        }
+        fn main() -> i64 {
+            let lhs: Expr = Expr::Add { lhs: Expr::Num(2), rhs: Expr::Num(3) };
+            let rhs: Expr = Expr::Add { lhs: Expr::Num(4), rhs: Expr::Num(5) };
+            eval(Expr::Mul { lhs: lhs, rhs: rhs })
+        }
+    "#;
+    assert_eq!(run_main(src), 45);
+}
+
+#[test]
+fn recursive_struct_with_option_linked_list() {
+    // Linked-list shape: struct with `next: Option<Self>` field.
+    // Same reason as the enum case — struct values are heap-allocated
+    // pointers in v0.x, so self-recursion through Option works.
+    let src = r#"
+        struct Node {
+            value: i64,
+            next: std::Option<Node>,
+        }
+        fn sum(head: std::Option<Node>) -> i64 {
+            match head {
+                std::Option::None => 0,
+                std::Option::Some(n) => n.value + sum(n.next),
+            }
+        }
+        fn main() -> i64 {
+            let lst: std::Option<Node> = std::Option::Some(Node {
+                value: 1,
+                next: std::Option::Some(Node {
+                    value: 2,
+                    next: std::Option::Some(Node {
+                        value: 3,
+                        next: std::Option::None,
+                    }),
+                }),
+            });
+            sum(lst)
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn deeply_nested_recursive_enum() {
+    // Stress test: build a left-leaning tree (1 + (2 + (3 + (4 + 5))))
+    // = 15 via 5 nested constructors. Validates that the heap
+    // allocator + ARC handle deeply nested recursive values.
+    let src = r#"
+        enum Sum {
+            Num(i64),
+            Plus { a: Sum, b: Sum },
+        }
+        fn eval(s: Sum) -> i64 {
+            match s {
+                Sum::Num(v) => v,
+                Sum::Plus { a, b } => eval(a) + eval(b),
+            }
+        }
+        fn main() -> i64 {
+            let inner: Sum = Sum::Plus {
+                a: Sum::Num(4),
+                b: Sum::Num(5),
+            };
+            let mid: Sum = Sum::Plus { a: Sum::Num(3), b: inner };
+            let outer: Sum = Sum::Plus { a: Sum::Num(2), b: mid };
+            eval(Sum::Plus { a: Sum::Num(1), b: outer })
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
 // ---- file-based modules ----
 
 #[test]
