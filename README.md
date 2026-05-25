@@ -327,10 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. `as`-cast through const-tracked bindings
-2. Shift-out-of-range diagnostic (`x << 64` at typecheck)
-3. Float const-eval through binops (parallel to session 106 for floats)
-4. Self-hosted bootstrap (long-term)
+1. Shift-out-of-range diagnostic (`x << 64` at typecheck)
+2. Float const-eval through binops (parallel to session 106 for floats)
+3. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

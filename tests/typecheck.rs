@@ -851,6 +851,107 @@ fn f64_normal_accepted() {
 }
 
 #[test]
+fn as_cast_propagates_const_value_overflow() {
+    // Session 109: `as`-cast through a const-tracked binding.
+    // `a as u8` const-evals to (300 & 0xff = 44); a subsequent
+    // `+ 250u8` const-evals to 294 which overflows u8.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = 300;
+            let b: u8 = a as u8;
+            let c: u8 = b + 250u8;
+            c as i64
+        }
+        "#,
+        "literal `294` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn as_cast_truncates_no_diagnostic_at_cast_site() {
+    // The cast itself is the user's choice — no diagnostic at
+    // the cast. `300 as u8` (which truncates to 44) compiles.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = 300;
+            let b: u8 = a as u8;
+            b as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn as_cast_signed_to_unsigned_preserves_bit_pattern() {
+    // `(-1 as u8)` records 255; `+ 1u8` overflows to 256.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = -1;
+            let b: u8 = a as u8;
+            let c: u8 = b + 1u8;
+            c as i64
+        }
+        "#,
+        "literal `256` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn as_cast_signed_to_signed_preserves_sign() {
+    // `-100 as i8` = -100 (fits i8); subsequent `- 50i8`
+    // const-evals to -150 which is out of i8's [-128, 127].
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = -100;
+            let b: i8 = a as i8;
+            let c: i8 = b - 50i8;
+            c as i64
+        }
+        "#,
+        "literal `-150` is out of range for `i8`",
+    );
+}
+
+#[test]
+fn as_cast_widens_without_loss() {
+    // Widening cast (i8 → i64) preserves the value exactly.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i8 = 100i8;
+            let b: i64 = a as i64;
+            let c: u8 = (b as u8) + 200u8;
+            c as i64
+        }
+        "#,
+        "literal `300` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn as_cast_chain_through_bindings() {
+    // i64 → i32 → u8 with const-tracking through each cast.
+    // 300 stays 300 in i32, then 300 & 0xff = 44 in u8,
+    // then + 250 = 294 overflows.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = 300;
+            let b: i32 = a as i32;
+            let c: u8 = b as u8;
+            let d: u8 = c + 250u8;
+            d as i64
+        }
+        "#,
+        "literal `294` is out of range for `u8`",
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

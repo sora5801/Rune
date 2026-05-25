@@ -2813,6 +2813,23 @@ impl<'r> Checker<'r> {
                 .path_to_sym
                 .get(&p.span)
                 .and_then(|sym| self.const_values.get(sym).copied()),
+            // Session 109: `as`-cast through a const-tracked
+            // value. Mirrors the runtime semantics of integer
+            // narrowing: truncate to the target type's bit width,
+            // sign-extending signed targets. The cast's result
+            // type is looked up in `expr_types` (populated by
+            // `check_cast` before const_eval_int runs). Float
+            // casts return None (const_eval_int is int-only).
+            // We deliberately do NOT diagnose at the cast site —
+            // the user explicitly wrote `as` for truncation; the
+            // tracking is only for downstream range checks.
+            Expr::Cast { expr, span, .. } => {
+                let v = self.const_eval_int(expr)?;
+                match self.expr_types.get(span)? {
+                    Ty::Int(it) => Some(cast_int_value(v, *it)),
+                    _ => None,
+                }
+            }
             Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => {
                 let v = self.const_eval_int(expr)?;
                 v.checked_neg()
@@ -6251,6 +6268,33 @@ fn enum_generic_args(
 
 fn is_printable(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Str)
+}
+
+/// Session 109: const-eval `v as <to>` for integer targets.
+/// Matches the runtime / Rust `as` semantic: truncate to the
+/// target's bit width, then re-extend back to i64 (sign-
+/// extending signed targets, zero-extending unsigned). For
+/// 64-bit targets the bit pattern is preserved. Stored values
+/// match `check_int_value_in_range`'s expected encoding —
+/// `i8::MIN` is stored as -128, `u8::MAX` as 255, `i64::MIN` as
+/// itself, `u64::MAX` as -1 (bit-pattern shared with i64).
+fn cast_int_value(v: i64, to: crate::ty::IntTy) -> i64 {
+    use crate::ty::IntTy::*;
+    match to {
+        I8 => v as i8 as i64,
+        I16 => v as i16 as i64,
+        I32 => v as i32 as i64,
+        I64 | ISize => v,
+        U8 => (v as u8) as i64,
+        U16 => (v as u16) as i64,
+        U32 => (v as u32) as i64,
+        // U64 / USize: preserve bit pattern via u64 → i64 reinterp.
+        // For values > i64::MAX as u64 the i64 form is negative;
+        // downstream range checks against `v >= 0` may spuriously
+        // reject, but no source-level idiom in v0.x produces them
+        // except chained `-1 as u64` which is the user's choice.
+        U64 | USize => (v as u64) as i64,
+    }
 }
 
 /// Whether `T` is a valid `Vec<T>` element type in v0.x. Vec stores
