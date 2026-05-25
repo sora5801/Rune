@@ -2256,7 +2256,18 @@ impl<'r> Checker<'r> {
         }
         self.try_pin_infer_typevar(&lt, &rt);
         self.try_pin_infer_typevar(&rt, &lt);
-        if !lt.compatible(&rt) {
+        // Session 116: shifts allow any integer type as the amount.
+        // `let n: i64 = 4; a: i32 << n` works without explicit cast.
+        // Both sides must still be integers; only the equality check
+        // is dropped. The result type comes from LHS (the value
+        // being shifted), so `(i32) << (i64)` produces i32.
+        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+        let compat_ok = if is_shift {
+            lt.is_integer() && rt.is_integer()
+        } else {
+            lt.compatible(&rt)
+        };
+        if !compat_ok {
             self.error(
                 span,
                 format!(
@@ -3369,7 +3380,18 @@ impl<'r> Checker<'r> {
         // up after the body check finishes.
         self.try_pin_infer_typevar(&lt, &rt);
         self.try_pin_infer_typevar(&rt, &lt);
-        if !lt.compatible(&rt) {
+        // Session 116: shifts allow any integer type as the amount.
+        // `let n: i64 = 4; a: i32 << n` works without explicit cast.
+        // Both sides must still be integers; only the equality check
+        // is dropped. The result type comes from LHS (the value
+        // being shifted), so `(i32) << (i64)` produces i32.
+        let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+        let compat_ok = if is_shift {
+            lt.is_integer() && rt.is_integer()
+        } else {
+            lt.compatible(&rt)
+        };
+        if !compat_ok {
             self.error(
                 span,
                 format!(
@@ -3630,7 +3652,16 @@ impl<'r> Checker<'r> {
         let rt = self.check_expr_with_hint(rhs, Some(&lt));
         self.check_assign_target(lhs, span);
         if !lt.is_error() && !rt.is_error() {
-            if !lt.compatible(&rt) {
+            // Session 116: shifts allow any integer rhs (the amount).
+            // Mirrors the binop relaxation; both sides must still be
+            // integers, but their types needn't match.
+            let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
+            let compat_ok = if is_shift {
+                lt.is_integer() && rt.is_integer()
+            } else {
+                lt.compatible(&rt)
+            };
+            if !compat_ok {
                 self.error(
                     span,
                     format!(

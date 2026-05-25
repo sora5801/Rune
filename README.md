@@ -327,8 +327,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Shift-amount-type relaxation (allow `let n: i64 = 4; a <<= n` for any `a:int`)
-2. Self-hosted bootstrap (long-term)
+1. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

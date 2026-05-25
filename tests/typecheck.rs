@@ -1429,6 +1429,39 @@ fn bit_ops_compound_assign_accepted() {
 }
 
 #[test]
+fn shift_amount_any_int_type_accepted() {
+    // Session 116: any integer type works as a shift count, no
+    // explicit cast required. Compiles even with mixed widths.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: i32 = 1i32;
+            let n: i64 = 4;
+            let r: i32 = a << n;
+            r as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn shift_amount_float_still_rejected() {
+    // The relaxation is for *integer* types only — floats are
+    // still rejected. Both sides still need to be integers.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i32 = 1i32;
+            let n: f64 = 4.0;
+            let r: i32 = a << n;
+            r as i64
+        }
+        "#,
+        "mismatched types",
+    );
+}
+
+#[test]
 fn bit_ops_compound_assign_on_float_rejected() {
     // `&= |= ^=` on floats should error — bitwise ops require
     // integer operands. The existing `requires numeric operands`

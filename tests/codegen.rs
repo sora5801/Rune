@@ -163,6 +163,55 @@ fn compound_bit_xor_assign() {
 }
 
 #[test]
+fn shift_mixed_width_amount() {
+    // Session 116: shift count can be any integer type. `let n: i64
+    // = 4; (a: i32) << n` works without an `as i32` cast — Cranelift's
+    // ishl needs same-width operands, codegen narrows n to i32.
+    assert_eq!(
+        run_main(
+            "fn main() -> i64 { \
+                let a: i32 = 1i32; \
+                let n: i64 = 4; \
+                let r: i32 = a << n; \
+                r as i64 \
+            }"
+        ),
+        16
+    );
+}
+
+#[test]
+fn shift_compound_mixed_width() {
+    // Same for compound `<<=`. The same codegen path handles both.
+    assert_eq!(
+        run_main(
+            "fn main() -> i64 { \
+                let mut a: i32 = 1i32; \
+                let n: i64 = 4; \
+                a <<= n; \
+                a as i64 \
+            }"
+        ),
+        16
+    );
+}
+
+#[test]
+fn shift_narrow_amount_widens() {
+    // Reverse case: lhs wider than rhs. i64 << u8 widens the u8.
+    assert_eq!(
+        run_main(
+            "fn main() -> i64 { \
+                let a: i64 = 1; \
+                let n: u8 = 3u8; \
+                a << n \
+            }"
+        ),
+        8
+    );
+}
+
+#[test]
 fn compound_bit_ops_chained() {
     // All three in sequence — verify the parser handles
     // back-to-back compound bit ops alongside shifts.

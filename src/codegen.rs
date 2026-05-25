@@ -2448,9 +2448,31 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirBinOp::BitAnd => self.builder.ins().band(l, r),
             HirBinOp::BitOr => self.builder.ins().bor(l, r),
             HirBinOp::BitXor => self.builder.ins().bxor(l, r),
-            HirBinOp::Shl => self.builder.ins().ishl(l, r),
-            HirBinOp::Shr => {
-                if signed { self.builder.ins().sshr(l, r) } else { self.builder.ins().ushr(l, r) }
+            HirBinOp::Shl | HirBinOp::Shr => {
+                // Session 116: shift amount may be any int type — the
+                // checker accepts mismatched widths. Cranelift's
+                // ishl/sshr/ushr require operands to have the same
+                // type, so narrow / widen `r` to match `l`'s width
+                // before emitting. Shift count is truncated mod
+                // bit-width at hardware level anyway, so ireduce
+                // is safe; widen with uextend (count is non-negative
+                // by checker's session 110/114 guard).
+                let l_ty = self.builder.func.dfg.value_type(l);
+                let r_ty = self.builder.func.dfg.value_type(r);
+                let r = if l_ty == r_ty {
+                    r
+                } else if l_ty.bits() < r_ty.bits() {
+                    self.builder.ins().ireduce(l_ty, r)
+                } else {
+                    self.builder.ins().uextend(l_ty, r)
+                };
+                match op {
+                    HirBinOp::Shl => self.builder.ins().ishl(l, r),
+                    HirBinOp::Shr => {
+                        if signed { self.builder.ins().sshr(l, r) } else { self.builder.ins().ushr(l, r) }
+                    }
+                    _ => unreachable!(),
+                }
             }
         };
         Ok(v)
