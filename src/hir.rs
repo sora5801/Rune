@@ -94,6 +94,13 @@ pub struct HirModule {
     /// impl-block's `Ty::TypeVar(T)`, which becomes `i64` only
     /// after substituting `T → first struct arg`.
     pub struct_generics: HashMap<SymbolId, Vec<SymbolId>>,
+    /// Session 087: map each primitive `Ty` to its `BuiltinType`
+    /// anchor sym. Primitives with `impl Trait for <prim>` blocks
+    /// register methods in `impl_methods` keyed by the anchor;
+    /// monomorphize's `resolve_method_calls` reads this map to
+    /// route `5.add(3)` (a MethodCall on Ty::Int(I64)) through
+    /// the same lookup as struct receivers.
+    pub primitive_anchors: HashMap<Ty, SymbolId>,
 }
 
 #[derive(Debug, Clone)]

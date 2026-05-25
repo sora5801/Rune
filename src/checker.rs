@@ -3237,9 +3237,17 @@ impl<'r> Checker<'r> {
         method_name: &str,
         args: &[Expr],
     ) -> Option<Vec<Ty>> {
-        let Ty::Struct(sym_id, _) = recv_ty else { return None };
+        // Session 087: primitive receivers dispatch the same way
+        // as structs — look up via the BuiltinType anchor sym.
+        let sym_id = match recv_ty {
+            Ty::Struct(s, _) => *s,
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str => {
+                self.res.primitive_anchor(recv_ty)?
+            }
+            _ => return None,
+        };
         let &method_sym =
-            self.res.impl_methods.get(&(*sym_id, method_name.to_string()))?;
+            self.res.impl_methods.get(&(sym_id, method_name.to_string()))?;
         let method_span = self.res.symbol(method_sym).span;
         let fn_ty = self.fn_signatures.get(&method_span)?.clone();
         let Ty::Fn { params, .. } = fn_ty else { return None };
@@ -3386,8 +3394,18 @@ impl<'r> Checker<'r> {
         name: &str,
         arg_tys: &[Ty],
     ) -> Option<MethodSig> {
-        let Ty::Struct(sym_id, _) = recv else { return None };
-        let &method_sym = self.res.impl_methods.get(&(*sym_id, name.to_string()))?;
+        // Session 087: also dispatch through impl_methods for
+        // primitive receivers — `5.add(3)` looks up the
+        // `BuiltinType(Ty::Int(I64))` anchor sym and reads the
+        // impl method from the same table struct receivers use.
+        let sym_id = match recv {
+            Ty::Struct(s, _) => *s,
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str => {
+                self.res.primitive_anchor(recv)?
+            }
+            _ => return None,
+        };
+        let &method_sym = self.res.impl_methods.get(&(sym_id, name.to_string()))?;
         let method_span = self.res.symbol(method_sym).span;
         let fn_ty = self.fn_signatures.get(&method_span)?;
         let Ty::Fn { params, ret } = fn_ty else { return None };

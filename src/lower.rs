@@ -207,6 +207,25 @@ impl<'a> Lowerer<'a> {
             trait_methods_flat,
             impl_assoc_bindings_ty: self.check.impl_assoc_bindings_ty.clone(),
             struct_generics: self.res.struct_generics.clone(),
+            primitive_anchors: {
+                // Session 087: walk symbols once and collect every
+                // primitive BuiltinType anchor so monomorphize can
+                // map a primitive Ty back to its sym for impl_methods
+                // lookup. Cheap (~15 entries).
+                let mut anchors: std::collections::HashMap<Ty, SymbolId> =
+                    std::collections::HashMap::new();
+                for (i, sym) in self.res.symbols.iter().enumerate() {
+                    if let crate::resolver::SymbolKind::BuiltinType(ty) = &sym.kind {
+                        if matches!(
+                            ty,
+                            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str
+                        ) {
+                            anchors.insert(ty.clone(), SymbolId(i as u32));
+                        }
+                    }
+                }
+                anchors
+            },
         }
     }
 
@@ -822,8 +841,18 @@ impl<'a> Lowerer<'a> {
                 // User-defined methods on structs (via `impl`) are lowered
                 // to a regular Call with the receiver as the first
                 // argument. Builtin methods go through HirExprKind::MethodCall.
-                if let Ty::Struct(struct_sym, _) = &receiver_hir.ty {
-                    let key = (*struct_sym, method.name.clone());
+                // Session 087: same dispatch for primitive receivers — the
+                // impl_methods table is keyed by the primitive's
+                // `BuiltinType` anchor sym.
+                let dispatch_sym = match &receiver_hir.ty {
+                    Ty::Struct(s, _) => Some(*s),
+                    Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str => {
+                        self.res.primitive_anchor(&receiver_hir.ty)
+                    }
+                    _ => None,
+                };
+                if let Some(struct_sym) = dispatch_sym {
+                    let key = (struct_sym, method.name.clone());
                     if let Some(&method_sym) = self.res.impl_methods.get(&key) {
                         let mut call_args = Vec::with_capacity(args.len() + 1);
                         call_args.push(receiver_hir);

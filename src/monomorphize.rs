@@ -172,7 +172,11 @@ impl MonoState {
             let before = self.cache.len();
             self.specialize_pending();
             for f in &mut self.concrete {
-                resolve_method_calls(&mut f.body, &module.impl_methods);
+                resolve_method_calls(
+                    &mut f.body,
+                    &module.impl_methods,
+                    &module.primitive_anchors,
+                );
             }
             self.specialize_pending();
             if self.cache.len() == before {
@@ -903,15 +907,18 @@ fn rewrite_calls_in_expr(
 fn resolve_method_calls(
     b: &mut HirBlock,
     impl_methods: &HashMap<(SymbolId, String), SymbolId>,
+    primitive_anchors: &HashMap<Ty, SymbolId>,
 ) {
     for s in &mut b.stmts {
         match s {
             HirStmt::Let(l) => {
                 if let Some(init) = &mut l.init {
-                    resolve_method_calls_in_expr(init, impl_methods);
+                    resolve_method_calls_in_expr(init, impl_methods, primitive_anchors);
                 }
             }
-            HirStmt::Expr(e, _) => resolve_method_calls_in_expr(e, impl_methods),
+            HirStmt::Expr(e, _) => {
+                resolve_method_calls_in_expr(e, impl_methods, primitive_anchors)
+            }
         }
     }
 }
@@ -919,114 +926,115 @@ fn resolve_method_calls(
 fn resolve_method_calls_in_expr(
     e: &mut HirExpr,
     impl_methods: &HashMap<(SymbolId, String), SymbolId>,
+    primitive_anchors: &HashMap<Ty, SymbolId>,
 ) {
     use HirExprKind::*;
     // Recurse into children first.
     match &mut e.kind {
         Unary { expr, .. } | Cast { expr } => {
-            resolve_method_calls_in_expr(expr, impl_methods)
+            resolve_method_calls_in_expr(expr, impl_methods, primitive_anchors)
         }
         Binary { lhs, rhs, .. } | Logical { lhs, rhs, .. } => {
-            resolve_method_calls_in_expr(lhs, impl_methods);
-            resolve_method_calls_in_expr(rhs, impl_methods);
+            resolve_method_calls_in_expr(lhs, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(rhs, impl_methods, primitive_anchors);
         }
         Assign { rhs, .. } | AssignOp { rhs, .. } => {
-            resolve_method_calls_in_expr(rhs, impl_methods)
+            resolve_method_calls_in_expr(rhs, impl_methods, primitive_anchors)
         }
         Call { args, .. } | BuiltinCall { args, .. } => {
             for a in args {
-                resolve_method_calls_in_expr(a, impl_methods);
+                resolve_method_calls_in_expr(a, impl_methods, primitive_anchors);
             }
         }
         MethodCall { receiver, args, .. } => {
-            resolve_method_calls_in_expr(receiver, impl_methods);
+            resolve_method_calls_in_expr(receiver, impl_methods, primitive_anchors);
             for a in args {
-                resolve_method_calls_in_expr(a, impl_methods);
+                resolve_method_calls_in_expr(a, impl_methods, primitive_anchors);
             }
         }
         DynBox { value, .. } => {
-            resolve_method_calls_in_expr(value, impl_methods);
+            resolve_method_calls_in_expr(value, impl_methods, primitive_anchors);
         }
         DynCall { receiver, args, .. } => {
-            resolve_method_calls_in_expr(receiver, impl_methods);
+            resolve_method_calls_in_expr(receiver, impl_methods, primitive_anchors);
             for a in args {
-                resolve_method_calls_in_expr(a, impl_methods);
+                resolve_method_calls_in_expr(a, impl_methods, primitive_anchors);
             }
         }
         EnumPayloadCtor { payloads, .. } => {
             for p in payloads {
-                resolve_method_calls_in_expr(p, impl_methods);
+                resolve_method_calls_in_expr(p, impl_methods, primitive_anchors);
             }
         }
         StructLit { fields, .. } => {
             for (_, v) in fields {
-                resolve_method_calls_in_expr(v, impl_methods);
+                resolve_method_calls_in_expr(v, impl_methods, primitive_anchors);
             }
         }
         FieldAccess { receiver, .. } => {
-            resolve_method_calls_in_expr(receiver, impl_methods)
+            resolve_method_calls_in_expr(receiver, impl_methods, primitive_anchors)
         }
         FieldAssign { receiver, rhs, .. } => {
-            resolve_method_calls_in_expr(receiver, impl_methods);
-            resolve_method_calls_in_expr(rhs, impl_methods);
+            resolve_method_calls_in_expr(receiver, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(rhs, impl_methods, primitive_anchors);
         }
         Array { elems, .. } => {
             for el in elems {
-                resolve_method_calls_in_expr(el, impl_methods);
+                resolve_method_calls_in_expr(el, impl_methods, primitive_anchors);
             }
         }
         Index { array, index, .. } => {
-            resolve_method_calls_in_expr(array, impl_methods);
-            resolve_method_calls_in_expr(index, impl_methods);
+            resolve_method_calls_in_expr(array, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(index, impl_methods, primitive_anchors);
         }
         StrByteIndex { str_val, index } => {
-            resolve_method_calls_in_expr(str_val, impl_methods);
-            resolve_method_calls_in_expr(index, impl_methods);
+            resolve_method_calls_in_expr(str_val, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(index, impl_methods, primitive_anchors);
         }
         StrSlice { str_val, start, end, .. } => {
-            resolve_method_calls_in_expr(str_val, impl_methods);
-            resolve_method_calls_in_expr(start, impl_methods);
-            resolve_method_calls_in_expr(end, impl_methods);
+            resolve_method_calls_in_expr(str_val, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(start, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(end, impl_methods, primitive_anchors);
         }
-        Block(b) => resolve_method_calls(b, impl_methods),
+        Block(b) => resolve_method_calls(b, impl_methods, primitive_anchors),
         If { cond, then_b, else_b } => {
-            resolve_method_calls_in_expr(cond, impl_methods);
-            resolve_method_calls(then_b, impl_methods);
+            resolve_method_calls_in_expr(cond, impl_methods, primitive_anchors);
+            resolve_method_calls(then_b, impl_methods, primitive_anchors);
             if let Some(e) = else_b {
-                resolve_method_calls_in_expr(e, impl_methods);
+                resolve_method_calls_in_expr(e, impl_methods, primitive_anchors);
             }
         }
         While { cond, body } => {
-            resolve_method_calls_in_expr(cond, impl_methods);
-            resolve_method_calls(body, impl_methods);
+            resolve_method_calls_in_expr(cond, impl_methods, primitive_anchors);
+            resolve_method_calls(body, impl_methods, primitive_anchors);
         }
         For { iter, body, .. } => {
-            resolve_method_calls_in_expr(iter, impl_methods);
-            resolve_method_calls(body, impl_methods);
+            resolve_method_calls_in_expr(iter, impl_methods, primitive_anchors);
+            resolve_method_calls(body, impl_methods, primitive_anchors);
         }
         ForRange { start, end, body, .. } => {
-            resolve_method_calls_in_expr(start, impl_methods);
-            resolve_method_calls_in_expr(end, impl_methods);
-            resolve_method_calls(body, impl_methods);
+            resolve_method_calls_in_expr(start, impl_methods, primitive_anchors);
+            resolve_method_calls_in_expr(end, impl_methods, primitive_anchors);
+            resolve_method_calls(body, impl_methods, primitive_anchors);
         }
         Match { scrutinee, arms } => {
-            resolve_method_calls_in_expr(scrutinee, impl_methods);
+            resolve_method_calls_in_expr(scrutinee, impl_methods, primitive_anchors);
             for arm in arms {
                 if let Some(g) = &mut arm.guard {
-                    resolve_method_calls_in_expr(g, impl_methods);
+                    resolve_method_calls_in_expr(g, impl_methods, primitive_anchors);
                 }
-                resolve_method_calls_in_expr(&mut arm.body, impl_methods);
+                resolve_method_calls_in_expr(&mut arm.body, impl_methods, primitive_anchors);
             }
         }
         Return(v) => {
             if let Some(v) = v {
-                resolve_method_calls_in_expr(v, impl_methods);
+                resolve_method_calls_in_expr(v, impl_methods, primitive_anchors);
             }
         }
         IndirectCall { callee, args } => {
-            resolve_method_calls_in_expr(callee, impl_methods);
+            resolve_method_calls_in_expr(callee, impl_methods, primitive_anchors);
             for a in args {
-                resolve_method_calls_in_expr(a, impl_methods);
+                resolve_method_calls_in_expr(a, impl_methods, primitive_anchors);
             }
         }
         _ => {}
@@ -1059,6 +1067,14 @@ fn resolve_method_calls_in_expr(
         }
         let recv_sym = match &receiver.ty {
             Ty::Struct(s, _) | Ty::Enum(s, _) => Some(*s),
+            // Session 087: primitive receivers route through the
+            // BuiltinType anchor sym registered by lower's
+            // primitive_anchors map. Mono only fires this when the
+            // call's already-resolved receiver Ty is a primitive
+            // (after spec pinned a `<T: Numeric>` to i64, etc.).
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str => {
+                primitive_anchors.get(&receiver.ty).copied()
+            }
             _ => None,
         };
         if let Some(s) = recv_sym {

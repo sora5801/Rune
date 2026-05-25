@@ -1614,6 +1614,62 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn numeric_impl_on_i64_primitive() {
+    // Session 087: `impl Numeric for i64` works, lifting the
+    // "impl only on structs" restriction. The trait dispatches
+    // through the BuiltinType anchor sym via impl_methods.
+    let src = r#"
+        impl std::Numeric for i64 {
+            fn add(self: i64, other: i64) -> i64 { self + other }
+            fn lt(self: i64, other: i64) -> bool { self < other }
+        }
+        fn smaller<T: std::Numeric>(a: T, b: T) -> T {
+            if a.lt(b) { a } else { b }
+        }
+        fn main() -> i64 {
+            let a: i64 = 50;
+            let b: i64 = 30;
+            smaller(a, b)
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn numeric_impl_on_i64_combined() {
+    let src = r#"
+        impl std::Numeric for i64 {
+            fn add(self: i64, other: i64) -> i64 { self + other }
+            fn lt(self: i64, other: i64) -> bool { self < other }
+        }
+        fn sum_two<T: std::Numeric>(a: T, b: T) -> T { a.add(b) }
+        fn main() -> i64 {
+            sum_two(7, 8)
+        }
+    "#;
+    assert_eq!(run_main(src), 15);
+}
+
+#[test]
+fn numeric_primitive_method_direct_call() {
+    // Calling the impl method directly on a primitive receiver,
+    // outside any generic context. `(5).lt(7)` dispatches through
+    // impl_methods on the i64 anchor sym.
+    let src = r#"
+        impl std::Numeric for i64 {
+            fn add(self: i64, other: i64) -> i64 { self + other }
+            fn lt(self: i64, other: i64) -> bool { self < other }
+        }
+        fn main() -> i64 {
+            let a: i64 = 5;
+            let b: i64 = 7;
+            if a.lt(b) { 100 } else { 200 }
+        }
+    "#;
+    assert_eq!(run_main(src), 100);
+}
+
+#[test]
 fn into_disambiguation_let_binding() {
     // Session 086: when a source struct has multiple Into<T>
     // impls, `let x: AppErr = src.into();` picks Into<AppErr>

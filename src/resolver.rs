@@ -213,6 +213,22 @@ impl Resolutions {
     pub fn symbol(&self, id: SymbolId) -> &Symbol {
         &self.symbols[id.0 as usize]
     }
+
+    /// Session 087: map a primitive `Ty` to its `BuiltinType` anchor
+    /// sym. Primitive impls (`impl Numeric for i64 { ... }`) register
+    /// their methods in impl_methods keyed by this anchor, so method
+    /// dispatch on a primitive receiver walks the same table as
+    /// struct dispatch. Returns `None` for non-primitive Tys.
+    pub fn primitive_anchor(&self, ty: &Ty) -> Option<SymbolId> {
+        for (i, sym) in self.symbols.iter().enumerate() {
+            if let SymbolKind::BuiltinType(anchor_ty) = &sym.kind {
+                if anchor_ty == ty {
+                    return Some(SymbolId(i as u32));
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,11 +585,25 @@ impl Resolver {
         let Some(&struct_sym) = self.path_to_sym.get(&i.type_path.span) else {
             return;
         };
-        if !matches!(self.symbols[struct_sym.0 as usize].kind, SymbolKind::Struct) {
+        // Session 087: also accept `impl Trait for <primitive>` —
+        // `impl Numeric for i64 { ... }` is valid. The primitive's
+        // `BuiltinType(Ty)` sym is interned at resolver init and
+        // reused as the impl_methods key, so method dispatch on a
+        // primitive receiver (e.g. `5.add(3)`) walks the same
+        // impl_methods table as struct methods.
+        let kind = &self.symbols[struct_sym.0 as usize].kind;
+        let is_struct = matches!(kind, SymbolKind::Struct);
+        let is_primitive = matches!(
+            kind,
+            SymbolKind::BuiltinType(
+                Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str
+            )
+        );
+        if !is_struct && !is_primitive {
             let name = self.symbols[struct_sym.0 as usize].name.clone();
             self.error(
                 format!(
-                    "`{}` is not a struct; `impl` can only be applied to structs (for now)",
+                    "`{}` is not a struct or primitive type; `impl` can only target these in v0.x",
                     name
                 ),
                 i.type_path.span,

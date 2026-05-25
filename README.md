@@ -327,10 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Intrinsic `Numeric` impls for primitive types — lifts the
-   `impl on i64/i32/f64/...` resolver restriction
-2. Numeric literal suffixes — `10i32`, `3.14f32`
-3. Cartesian-product exhaustiveness for tuple patterns
+1. Numeric literal suffixes — `10i32`, `3.14f32`
+2. Cartesian-product exhaustiveness for tuple patterns
+3. Same-target Into duplicate detection
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
