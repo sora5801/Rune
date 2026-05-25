@@ -1942,17 +1942,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                             self.emit_arc_call("retain", &p_expr.ty, pay)?;
                         }
                     }
-                    let pcty = cranelift_type(&p_expr.ty)?;
-                    let pay_i64 = if pcty == types::I64 {
-                        pay
-                    } else if matches!(
-                        p_expr.ty,
-                        Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::ISize)
-                    ) {
-                        self.builder.ins().sextend(types::I64, pay)
-                    } else {
-                        self.builder.ins().uextend(types::I64, pay)
-                    };
+                    let pay_i64 = widen_to_slot(&mut self.builder, pay, &p_expr.ty)?;
                     let offset = 8 + 8 * i as i32;
                     self.builder
                         .ins()
@@ -2886,27 +2876,20 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         // so the caller owns a +1.
                         self.emit_arc_call("retain", &val_ty, raw)?;
                         Ok(Some(raw))
-                    } else if val_cty != types::I64 {
-                        Ok(Some(self.builder.ins().ireduce(val_cty, raw)))
                     } else {
-                        Ok(Some(raw))
+                        Ok(Some(narrow_from_slot(&mut self.builder, raw, &val_ty)?))
                     }
                 } else if m == "remove" {
                     // The slot transferred its +1 to the caller —
                     // no retain. (The slot itself became a
                     // tombstone, so the release walk skips it.)
-                    if val_cty != types::I64 {
-                        Ok(Some(self.builder.ins().ireduce(val_cty, raw)))
-                    } else {
-                        Ok(Some(raw))
-                    }
+                    Ok(Some(narrow_from_slot(&mut self.builder, raw, &val_ty)?))
                 } else {
                     Ok(Some(raw))
                 }
             }
             (Ty::Vec(elem), m) if matches!(m, "push" | "get" | "len") => {
                 let elem_ty = (**elem).clone();
-                let elem_cty = cranelift_type(&elem_ty)?;
                 let elem_arc = is_arc_type(
                     &elem_ty,
                     self.struct_arc_fields,
@@ -2933,12 +2916,13 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                             self.emit_arc_call("retain", &elem_ty, arg_vals[0])?;
                         }
                     }
-                    // Element slots are 8 bytes — widen a narrow value.
-                    let stored = if elem_cty == types::I64 {
-                        arg_vals[0]
-                    } else {
-                        self.builder.ins().uextend(types::I64, arg_vals[0])
-                    };
+                    // Element slots are 8 bytes — widen / reinterpret
+                    // the typed value (float-bitcast / int-extend per
+                    // shape). Floats ride in the slot as bit-identical
+                    // integers; F32 wastes the upper 4 bytes (uniform
+                    // slot layout > packing two per slot).
+                    let stored =
+                        widen_to_slot(&mut self.builder, arg_vals[0], &elem_ty)?;
                     call_args.push(stored);
                 } else {
                     call_args.extend(&arg_vals);
@@ -2955,10 +2939,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         // owner of an ARC element, so retain it.
                         self.emit_arc_call("retain", &elem_ty, raw)?;
                         Ok(Some(raw))
-                    } else if elem_cty != types::I64 {
-                        Ok(Some(self.builder.ins().ireduce(elem_cty, raw)))
                     } else {
-                        Ok(Some(raw))
+                        Ok(Some(narrow_from_slot(
+                            &mut self.builder,
+                            raw,
+                            &elem_ty,
+                        )?))
                     }
                 } else {
                     Ok(Some(raw))
@@ -3224,7 +3210,6 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         let base = self
             .compile_expr(receiver)?
             .ok_or_else(|| CodegenError("tuple receiver produced no value".into()))?;
-        let elem_cty = cranelift_type(elem_ty)?;
         let raw = self.builder.ins().load(
             types::I64,
             MemFlags::new(),
@@ -3234,11 +3219,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         if is_arc_type(elem_ty, self.struct_arc_fields, self.enum_has_payload) {
             self.emit_arc_call("retain", elem_ty, raw)?;
         }
-        let result = if elem_cty == types::I64 {
-            raw
-        } else {
-            self.builder.ins().ireduce(elem_cty, raw)
-        };
+        let result = narrow_from_slot(&mut self.builder, raw, elem_ty)?;
         Ok(Some(result))
     }
 
@@ -3692,11 +3673,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         8 + 8 * i as i32,
                     );
                     let pcty = cranelift_type(payload_ty)?;
-                    let val = if pcty == types::I64 {
-                        raw
-                    } else {
-                        self.builder.ins().ireduce(pcty, raw)
-                    };
+                    let val = narrow_from_slot(&mut self.builder, raw, payload_ty)?;
                     let var = self.alloc_var();
                     self.builder.declare_var(var, pcty);
                     self.builder.def_var(var, val);
@@ -3763,11 +3740,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                         (i * 8) as i32,
                     );
                     let ecty = cranelift_type(elem_ty)?;
-                    let val = if ecty == types::I64 {
-                        raw
-                    } else {
-                        self.builder.ins().ireduce(ecty, raw)
-                    };
+                    let val = narrow_from_slot(&mut self.builder, raw, elem_ty)?;
                     let sub_match = if i + 1 == elements.len() {
                         on_match
                     } else {
@@ -4089,6 +4062,58 @@ fn int_cranelift_type(it: IntTy) -> Type {
         IntTy::I32 | IntTy::U32 => types::I32,
         IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize => types::I64,
     }
+}
+
+/// Narrow an i64-slot value back to its typed Cranelift form.
+/// Vec / HashMap / Option-payload / Tuple all store elements in
+/// uniform 8-byte slots — reading one back requires (a) ireduce
+/// for narrow ints, (b) bitcast for floats (the 8 bytes ARE the
+/// IEEE-754 bit pattern), or (c) a two-step ireduce-then-bitcast
+/// for f32 (which lives in the slot's lower 4 bytes; upper 4 are
+/// padding).
+fn narrow_from_slot(
+    builder: &mut FunctionBuilder,
+    raw: Value,
+    ty: &Ty,
+) -> Result<Value, CodegenError> {
+    let cty = cranelift_type(ty)?;
+    Ok(if cty == types::I64 {
+        raw
+    } else if cty == types::F64 {
+        builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+    } else if cty == types::F32 {
+        let reduced = builder.ins().ireduce(types::I32, raw);
+        builder.ins().bitcast(types::F32, MemFlags::new(), reduced)
+    } else {
+        builder.ins().ireduce(cty, raw)
+    })
+}
+
+/// Widen a typed value into an i64 slot. The inverse of
+/// `narrow_from_slot`. Floats bitcast through their integer twin;
+/// signed narrow ints sign-extend (preserves negative-as-i64);
+/// everything else zero-extends.
+fn widen_to_slot(
+    builder: &mut FunctionBuilder,
+    val: Value,
+    ty: &Ty,
+) -> Result<Value, CodegenError> {
+    let cty = cranelift_type(ty)?;
+    Ok(if cty == types::I64 {
+        val
+    } else if cty == types::F64 {
+        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+    } else if cty == types::F32 {
+        let as_i32 = builder.ins().bitcast(types::I32, MemFlags::new(), val);
+        builder.ins().uextend(types::I64, as_i32)
+    } else if matches!(
+        ty,
+        Ty::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::ISize)
+    ) {
+        builder.ins().sextend(types::I64, val)
+    } else {
+        builder.ins().uextend(types::I64, val)
+    })
 }
 
 /// Element width in bytes — used for array stride computation.

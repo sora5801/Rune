@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Floating-point Vec elements — unblock `Vec<f64>` / `Vec<f32>`
-2. Cross-let const-eval — propagate const values through let bindings
-3. Division-by-zero const-eval diagnostic
+1. Cross-let const-eval — propagate const values through let bindings
+2. Division-by-zero const-eval diagnostic
+3. Floating-point literal range checks (`3.4e40f32` rounds to infinity today)
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

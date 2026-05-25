@@ -691,9 +691,9 @@ impl<'r> Checker<'r> {
                                     format!(
                                         "`Vec<{}>` is not supported in v0.x — the \
                                          element type must fit an 8-byte slot \
-                                         (integers, bool, char, structs, enums, \
-                                         trait objects, or a nested Vec; not str, \
-                                         floats, or arrays)",
+                                         (integers, floats, bool, char, structs, \
+                                         enums, trait objects, or a nested Vec; \
+                                         not str or arrays)",
                                         self.ty_pretty(&elem)
                                     ),
                                 );
@@ -2165,7 +2165,15 @@ impl<'r> Checker<'r> {
             // already-hinted lt/rt. We delegate to a shared
             // finisher to avoid duplicating the op-specific
             // checks.
-            return self.finish_binary(*op, lhs, rhs, lt, rt, *span);
+            let ty = self.finish_binary(*op, lhs, rhs, lt, rt, *span);
+            // The intercept path bypasses `check_expr`, which is
+            // where expr_types normally gets the binop's span
+            // registered. Without this insert the lowerer reads
+            // Ty::Error for the binop and codegen mis-dispatches
+            // (e.g. `iadd` on f64 operands when the hint was f64
+            // but the binop's own span wasn't typed).
+            self.expr_types.insert(*span, ty.clone());
+            return ty;
         }
         self.check_expr(e)
     }
@@ -6108,6 +6116,7 @@ fn vec_element_supported(ty: &Ty) -> bool {
     matches!(
         ty,
         Ty::Int(_)
+            | Ty::Float(_)
             | Ty::Bool
             | Ty::Char
             | Ty::Struct(_, _)

@@ -60,8 +60,10 @@ because the language stays small.
   Construction, indexing (`.N`), destructuring in `let`, match-arm
   patterns, for-loop patterns.
 - `Vec<T>`: heap-allocated `{ptr, len, cap, rc, weak_count}`.
-  Element type must fit an 8-byte slot — integers, bool, char,
-  structs, enums, dyn, nested Vec. Not str, not floats, not arrays.
+  Element type must fit an 8-byte slot — integers, floats, bool,
+  char, structs, enums, dyn, nested Vec. Not str, not arrays.
+  (Float elements added session 105; f32 wastes the upper 4 bytes
+  for uniform slot layout.)
 - `[T; N]`: heap-allocated arrays. ARC + per-element release.
 - `HashMap<i64, V>` and `HashMap<str, V>`: open-addressing with
   tombstones. Key-kind tag dispatches i64 vs str at runtime.

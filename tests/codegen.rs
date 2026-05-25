@@ -2860,6 +2860,104 @@ fn float_neg() {
     assert_eq!(run_main(src), 1);
 }
 
+#[test]
+fn vec_f64_push_get_round_trip() {
+    // Vec<f64> elements ride in 8-byte slots as bit-identical i64;
+    // push bitcasts f64->i64, get bitcasts i64->f64. Round-tripping
+    // must preserve the value exactly.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<f64> = vec_new();
+            v.push(3.14);
+            v.push(2.71);
+            let a: f64 = v.get(0);
+            let b: f64 = v.get(1);
+            let sum: f64 = a + b;
+            if sum > 5.8 && sum < 5.9 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn vec_f32_push_get_round_trip() {
+    // f32 takes the lower 4 bytes of the 8-byte slot; codegen
+    // bitcasts through i32 then uextends to i64 on push, and
+    // ireduces+bitcasts back on get.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<f32> = vec_new();
+            v.push(1.5f32);
+            v.push(2.5f32);
+            let a: f32 = v.get(0);
+            let b: f32 = v.get(1);
+            let sum: f32 = a + b;
+            if sum > 3.9f32 && sum < 4.1f32 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn vec_f64_iter_chain() {
+    // VecIter<f64>.next() routes through the same vec.get path,
+    // so iterator chains over floats Just Work — closures pin
+    // their param to f64 from F's bound on Map / Filter.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<f64> = vec_new();
+            v.push(1.0);
+            v.push(2.0);
+            v.push(3.0);
+            let total: f64 = v.iter().fold(0.0, |a: f64, x: f64| a + x);
+            if total > 5.9 && total < 6.1 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn vec_f64_for_loop() {
+    // for-in over Vec<f64> goes through the Iterator-protocol
+    // path (next() returns Option<f64>), exercising the same
+    // bitcast path inside the iterator's body.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<f64> = vec_new();
+            v.push(1.5);
+            v.push(2.5);
+            v.push(3.0);
+            let mut total: f64 = 0.0;
+            for x in v.iter() {
+                total = total + x;
+            }
+            if total > 6.9 && total < 7.1 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn vec_f64_via_numeric_generic() {
+    // The whole point of session 104's prelude Numeric impls: with
+    // Vec<f64> unblocked, <T: Numeric> generic code over the element
+    // type works end-to-end. add_all takes any Numeric iterator
+    // element via session 104's f64 impl.
+    let src = r#"
+        fn add_two<T: std::Numeric>(a: T, b: T) -> T {
+            a.add(b)
+        }
+        fn main() -> i64 {
+            let v: Vec<f64> = vec_new();
+            v.push(1.25);
+            v.push(0.75);
+            let r: f64 = add_two(v.get(0), v.get(1));
+            if r > 1.99 && r < 2.01 { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
 // ---- arrays + for loops ----
 
 #[test]
