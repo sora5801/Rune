@@ -1344,14 +1344,14 @@ impl<'a> Lowerer<'a> {
     fn lower_lit(&self, lit: &ast::Lit, e: &ast::Expr) -> HirLit {
         let ty = self.check.expr_types.get(&e.span()).cloned().unwrap_or(Ty::Error);
         match lit {
-            ast::Lit::Int(v) => {
+            ast::Lit::Int(v, _) => {
                 let int_ty = match ty {
                     Ty::Int(it) => it,
                     _ => IntTy::I64,
                 };
                 HirLit::Int(*v, int_ty)
             }
-            ast::Lit::Float(v) => {
+            ast::Lit::Float(v, _) => {
                 let float_ty = match ty {
                     Ty::Float(ft) => ft,
                     _ => crate::ty::FloatTy::F64,
@@ -1731,7 +1731,7 @@ impl<'a> Lowerer<'a> {
                 out.push(HirPattern::Bind(sid));
             }
             ast::Pattern::Literal { lit, .. } => match lit {
-                ast::Lit::Int(v) => out.push(HirPattern::IntLit(*v)),
+                ast::Lit::Int(v, _) => out.push(HirPattern::IntLit(*v)),
                 ast::Lit::Bool(b) => out.push(HirPattern::BoolLit(*b)),
                 ast::Lit::Str(s) => out.push(HirPattern::StrLit(s.clone())),
                 // Char patterns reuse IntLit — the scrutinee's
@@ -2694,7 +2694,7 @@ fn apply_subst(ty: &Ty, subst: &std::collections::HashMap<SymbolId, Ty>) -> Ty {
 
 fn lit_to_int_bound(lit: &ast::Lit) -> Option<i64> {
     match lit {
-        ast::Lit::Int(v) => Some(*v),
+        ast::Lit::Int(v, _) => Some(*v),
         ast::Lit::Char(c) => Some(*c as i64),
         _ => None,
     }

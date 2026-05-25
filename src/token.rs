@@ -29,8 +29,14 @@ impl Token {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
-    Int(i64),
-    Float(f64),
+    /// Integer literal. Optional `IntTy` carries an explicit suffix
+    /// like `10i32` / `42u64`; `None` means the source had no
+    /// suffix (the checker uses a hint or the i64 default). Session
+    /// 088.
+    Int(i64, Option<crate::ty::IntTy>),
+    /// Float literal. Suffix from `3.14f32` etc.; `None` defaults
+    /// to f64.
+    Float(f64, Option<crate::ty::FloatTy>),
     Str(String),
     Char(char),
     Ident(String),
@@ -114,8 +120,8 @@ impl TokenKind {
 impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TokenKind::Int(v) => write!(f, "int({})", v),
-            TokenKind::Float(v) => write!(f, "float({})", v),
+            TokenKind::Int(v, _) => write!(f, "int({})", v),
+            TokenKind::Float(v, _) => write!(f, "float({})", v),
             TokenKind::Str(v) => write!(f, "string({:?})", v),
             TokenKind::Char(v) => write!(f, "char({:?})", v),
             TokenKind::Ident(v) => write!(f, "ident({})", v),

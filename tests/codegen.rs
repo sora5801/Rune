@@ -1614,6 +1614,69 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn numeric_literal_suffix_i32() {
+    // Session 088: `10i32` lexes as a typed integer, no
+    // surrounding cast needed.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 10i32;
+            let b: i32 = 20i32;
+            (a + b) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn numeric_literal_suffix_u32() {
+    let src = r#"
+        fn main() -> i64 {
+            let a: u32 = 100u32;
+            let b: u32 = 30u32;
+            (a - b) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 70);
+}
+
+#[test]
+fn numeric_literal_suffix_f32() {
+    let src = r#"
+        fn main() -> i64 {
+            let pi: f32 = 3.14f32;
+            let two: f32 = 2.0f32;
+            (pi * two) as i64
+        }
+    "#;
+    // 3.14 * 2.0 = 6.28; as i64 truncates to 6.
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn numeric_literal_suffix_default_unchanged() {
+    // Without a suffix, literals still default to i64.
+    let src = r#"
+        fn main() -> i64 {
+            let a = 42;
+            a
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn numeric_literal_suffix_hex_with_u8() {
+    // Suffixes work on radix-prefixed literals too.
+    let src = r#"
+        fn main() -> i64 {
+            let mask: u8 = 0xffu8;
+            mask as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 255);
+}
+
+#[test]
 fn numeric_impl_on_i64_primitive() {
     // Session 087: `impl Numeric for i64` works, lifting the
     // "impl only on structs" restriction. The trait dispatches

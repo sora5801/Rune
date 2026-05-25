@@ -442,8 +442,13 @@ pub struct MatchArm {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
-    Int(i64),
-    Float(f64),
+    /// Integer literal. The second arg is `Some(ty)` when the source
+    /// wrote an explicit suffix (`10i32`, `42u64`); `None` means
+    /// "use the surrounding hint or default to i64". Session 088.
+    Int(i64, Option<crate::ty::IntTy>),
+    /// Float literal. Suffix semantics mirror `Int`: `Some` from
+    /// `3.14f32`; `None` defaults to f64.
+    Float(f64, Option<crate::ty::FloatTy>),
     Str(String),
     Char(char),
     Bool(bool),

@@ -634,7 +634,7 @@ impl Parser {
             self.expect(&TokenKind::Semi, "`;`")?;
             let len_span = self.peek_span();
             let len = match self.peek() {
-                TokenKind::Int(n) if *n >= 0 => *n as usize,
+                TokenKind::Int(n, _) if *n >= 0 => *n as usize,
                 _ => {
                     return Err(ParseError {
                         message: "expected a non-negative array length".into(),
@@ -904,8 +904,8 @@ impl Parser {
                     Ok(Pattern::Ident { name: first, mutable: false, span: s })
                 }
             }
-            TokenKind::Int(_)
-            | TokenKind::Float(_)
+            TokenKind::Int(_, _)
+            | TokenKind::Float(_, _)
             | TokenKind::Str(_)
             | TokenKind::Char(_)
             | TokenKind::True
@@ -941,8 +941,8 @@ impl Parser {
         let (lit, lit_span) = self.parse_literal()?;
         let lit = if negate {
             match lit {
-                Lit::Int(v) => Lit::Int(-v),
-                Lit::Float(v) => Lit::Float(-v),
+                Lit::Int(v, suf) => Lit::Int(-v, suf),
+                Lit::Float(v, suf) => Lit::Float(-v, suf),
                 _ => {
                     return Err(ParseError {
                         message: "unary `-` is only valid on numeric literals in patterns"
@@ -1152,8 +1152,8 @@ impl Parser {
                 | TokenKind::Bang
                 | TokenKind::Tilde
                 | TokenKind::Ident(_)
-                | TokenKind::Int(_)
-                | TokenKind::Float(_)
+                | TokenKind::Int(_, _)
+                | TokenKind::Float(_, _)
                 | TokenKind::Str(_)
                 | TokenKind::Char(_)
                 | TokenKind::True
@@ -1216,7 +1216,7 @@ impl Parser {
                 // a non-negative integer literal. Resolves to
                 // TupleIndex; the lowerer rewrites to FieldAccess
                 // at offset N*8 on the tuple's synth struct.
-                if let TokenKind::Int(n) = self.peek() {
+                if let TokenKind::Int(n, _) = self.peek() {
                     let n_val = *n;
                     let n_span = self.peek_span();
                     self.bump();
@@ -1266,13 +1266,13 @@ impl Parser {
         let span = self.peek_span();
         let kind = self.peek().clone();
         match kind {
-            TokenKind::Int(v) => {
+            TokenKind::Int(v, suf) => {
                 self.bump();
-                Ok(Expr::Lit { lit: Lit::Int(v), span })
+                Ok(Expr::Lit { lit: Lit::Int(v, suf), span })
             }
-            TokenKind::Float(v) => {
+            TokenKind::Float(v, suf) => {
                 self.bump();
-                Ok(Expr::Lit { lit: Lit::Float(v), span })
+                Ok(Expr::Lit { lit: Lit::Float(v, suf), span })
             }
             TokenKind::Str(s) => {
                 self.bump();
@@ -1543,8 +1543,8 @@ impl Parser {
         let span = self.peek_span();
         let kind = self.peek().clone();
         match kind {
-            TokenKind::Int(v) => { self.bump(); Ok((Lit::Int(v), span)) }
-            TokenKind::Float(v) => { self.bump(); Ok((Lit::Float(v), span)) }
+            TokenKind::Int(v, suf) => { self.bump(); Ok((Lit::Int(v, suf), span)) }
+            TokenKind::Float(v, suf) => { self.bump(); Ok((Lit::Float(v, suf), span)) }
             TokenKind::Str(s) => { self.bump(); Ok((Lit::Str(s), span)) }
             TokenKind::Char(c) => { self.bump(); Ok((Lit::Char(c), span)) }
             TokenKind::True => { self.bump(); Ok((Lit::Bool(true), span)) }
@@ -1629,8 +1629,8 @@ fn expr_can_omit_semi(e: &Expr) -> bool {
 fn describe_kind(k: &TokenKind) -> String {
     match k {
         TokenKind::Ident(s) => format!("identifier `{}`", s),
-        TokenKind::Int(v) => format!("integer `{}`", v),
-        TokenKind::Float(v) => format!("float `{}`", v),
+        TokenKind::Int(v, _) => format!("integer `{}`", v),
+        TokenKind::Float(v, _) => format!("float `{}`", v),
         TokenKind::Str(_) => "string literal".into(),
         TokenKind::Char(_) => "char literal".into(),
         TokenKind::Eof => "end of input".into(),

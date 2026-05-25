@@ -51,7 +51,7 @@ fn decimal_integers() {
     use TokenKind::*;
     assert_eq!(
         tokens_of("0 1 42 1_000_000"),
-        vec![Int(0), Int(1), Int(42), Int(1_000_000), Eof]
+        vec![Int(0, None), Int(1, None), Int(42, None), Int(1_000_000, None), Eof]
     );
 }
 
@@ -60,7 +60,7 @@ fn radix_integers() {
     use TokenKind::*;
     assert_eq!(
         tokens_of("0xff 0xFF 0b1010 0o17"),
-        vec![Int(0xff), Int(0xff), Int(0b1010), Int(0o17), Eof]
+        vec![Int(0xff, None), Int(0xff, None), Int(0b1010, None), Int(0o17, None), Eof]
     );
 }
 
@@ -68,9 +68,9 @@ fn radix_integers() {
 fn float_literals() {
     use TokenKind::*;
     let toks = tokens_of("3.14 1e10 2.5e-3");
-    assert!(matches!(toks[0], Float(f) if (f - 3.14).abs() < 1e-9));
-    assert!(matches!(toks[1], Float(f) if (f - 1e10).abs() < 1.0));
-    assert!(matches!(toks[2], Float(f) if (f - 2.5e-3).abs() < 1e-9));
+    assert!(matches!(toks[0], Float(f, _) if (f - 3.14).abs() < 1e-9));
+    assert!(matches!(toks[1], Float(f, _) if (f - 1e10).abs() < 1.0));
+    assert!(matches!(toks[2], Float(f, _) if (f - 2.5e-3).abs() < 1e-9));
     assert_eq!(toks[3], Eof);
 }
 
@@ -79,7 +79,7 @@ fn dot_after_int_is_not_a_float() {
     use TokenKind::*;
     assert_eq!(
         tokens_of("1..10"),
-        vec![Int(1), DotDot, Int(10), Eof]
+        vec![Int(1, None), DotDot, Int(10, None), Eof]
     );
 }
 

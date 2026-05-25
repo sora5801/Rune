@@ -327,7 +327,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Numeric literal suffixes — `10i32`, `3.14f32`
+1. Integer literal hint flow — `let x: i32 = 10;` picks i32 from
+   the annotation instead of defaulting to i64
 2. Cartesian-product exhaustiveness for tuple patterns
 3. Same-target Into duplicate detection
 4. Self-hosted bootstrap (long-term)

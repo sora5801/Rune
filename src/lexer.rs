@@ -256,23 +256,89 @@ impl<'src> Lexer<'src> {
         }
         let raw = &self.source[start..self.pos];
         let cleaned: String = raw.chars().filter(|&c| c != '_').collect();
+        // Session 088: scan a type suffix immediately following the
+        // digits — `10i32`, `42u64`, `3.14f32`. Suffix is one of the
+        // primitive numeric type names; mismatches (`10f32` /
+        // `3.14i64`) error here. `is_float` from the dot/exponent
+        // scan above can be lifted to true if the suffix is a float
+        // suffix on what looked like an integer (`5f64`).
+        let (int_suffix, float_suffix) = self.scan_numeric_suffix(start);
+        if int_suffix.is_some() && is_float {
+            self.error(
+                start,
+                "integer suffix on a float literal".to_string(),
+            );
+        }
+        if let Some(_) = float_suffix {
+            is_float = true;
+        }
         if is_float {
-            match cleaned.parse::<f64>() {
-                Ok(v) => TokenKind::Float(v),
+            let v = match cleaned.parse::<f64>() {
+                Ok(v) => v,
                 Err(_) => {
                     self.error(start, format!("invalid float literal '{}'", raw));
-                    TokenKind::Float(0.0)
+                    0.0
                 }
-            }
+            };
+            TokenKind::Float(v, float_suffix)
         } else {
-            match cleaned.parse::<i64>() {
-                Ok(v) => TokenKind::Int(v),
+            let v = match cleaned.parse::<i64>() {
+                Ok(v) => v,
                 Err(_) => {
                     self.error(start, format!("invalid integer literal '{}'", raw));
-                    TokenKind::Int(0)
+                    0
                 }
+            };
+            TokenKind::Int(v, int_suffix)
+        }
+    }
+
+    /// Session 088: peek for a numeric type suffix immediately after
+    /// the digits. Returns `(Some(int_ty), None)` for an integer
+    /// suffix (`i8`/`i16`/.../`u64`/`isize`/`usize`), `(None,
+    /// Some(float_ty))` for `f32`/`f64`, or `(None, None)` if no
+    /// suffix. Consumes the suffix's characters on a match;
+    /// unrecognized suffix-shaped follow-ons are left in place (the
+    /// number ends, an ident token follows).
+    fn scan_numeric_suffix(
+        &mut self,
+        _start: usize,
+    ) -> (Option<crate::ty::IntTy>, Option<crate::ty::FloatTy>) {
+        let Some(first) = self.peek() else { return (None, None) };
+        if first != 'i' && first != 'u' && first != 'f' {
+            return (None, None);
+        }
+        // Collect the suffix into a small buffer (it's 2-5 chars).
+        let mut buf = String::new();
+        let mut probe = self.pos;
+        while let Some(c) = self.source[probe..].chars().next() {
+            if c.is_ascii_alphanumeric() {
+                buf.push(c);
+                probe += c.len_utf8();
+            } else {
+                break;
             }
         }
+        let (int_ty, float_ty) = match buf.as_str() {
+            "i8" => (Some(crate::ty::IntTy::I8), None),
+            "i16" => (Some(crate::ty::IntTy::I16), None),
+            "i32" => (Some(crate::ty::IntTy::I32), None),
+            "i64" => (Some(crate::ty::IntTy::I64), None),
+            "isize" => (Some(crate::ty::IntTy::ISize), None),
+            "u8" => (Some(crate::ty::IntTy::U8), None),
+            "u16" => (Some(crate::ty::IntTy::U16), None),
+            "u32" => (Some(crate::ty::IntTy::U32), None),
+            "u64" => (Some(crate::ty::IntTy::U64), None),
+            "usize" => (Some(crate::ty::IntTy::USize), None),
+            "f32" => (None, Some(crate::ty::FloatTy::F32)),
+            "f64" => (None, Some(crate::ty::FloatTy::F64)),
+            _ => return (None, None),
+        };
+        // Advance past the suffix.
+        for _ in 0..buf.len() {
+            self.bump();
+        }
+        (int_ty, float_ty)
     }
 
     fn int_with_radix(
@@ -289,16 +355,22 @@ impl<'src> Lexer<'src> {
         let cleaned: String = raw.chars().filter(|&c| c != '_').collect();
         if cleaned.is_empty() {
             self.error(start, "expected digits after numeric base prefix");
-            return TokenKind::Int(0);
+            return TokenKind::Int(0, None);
+        }
+        // Session 088: accept integer suffixes on radix-prefixed
+        // literals too — `0xff_u8` etc.
+        let (int_suffix, float_suffix) = self.scan_numeric_suffix(start);
+        if float_suffix.is_some() {
+            self.error(start, "float suffix on a radix-prefixed integer literal".to_string());
         }
         match i64::from_str_radix(&cleaned, radix) {
-            Ok(v) => TokenKind::Int(v),
+            Ok(v) => TokenKind::Int(v, int_suffix),
             Err(_) => {
                 self.error(
                     start,
                     format!("invalid integer literal '{}'", &self.source[start..self.pos]),
                 );
-                TokenKind::Int(0)
+                TokenKind::Int(0, int_suffix)
             }
         }
     }

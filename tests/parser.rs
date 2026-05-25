@@ -113,7 +113,7 @@ fn arithmetic_precedence() {
     // 1 + 2 * 3  parses as  1 + (2 * 3)
     let e = parse_expr_in_block("1 + 2 * 3");
     let Expr::Binary { op: BinOp::Add, lhs, rhs, .. } = e else { panic!() };
-    assert!(matches!(*lhs, Expr::Lit { lit: Lit::Int(1), .. }));
+    assert!(matches!(*lhs, Expr::Lit { lit: Lit::Int(1, _), .. }));
     assert!(matches!(*rhs, Expr::Binary { op: BinOp::Mul, .. }));
 }
 
@@ -123,7 +123,7 @@ fn left_associativity_minus() {
     let e = parse_expr_in_block("1 - 2 - 3");
     let Expr::Binary { op: BinOp::Sub, lhs, rhs, .. } = e else { panic!() };
     assert!(matches!(*lhs, Expr::Binary { op: BinOp::Sub, .. }));
-    assert!(matches!(*rhs, Expr::Lit { lit: Lit::Int(3), .. }));
+    assert!(matches!(*rhs, Expr::Lit { lit: Lit::Int(3, _), .. }));
 }
 
 #[test]

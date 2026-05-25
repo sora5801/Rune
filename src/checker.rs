@@ -1305,7 +1305,7 @@ impl<'r> Checker<'r> {
                         );
                     }
                 }
-                Lit::Int(v) => {
+                Lit::Int(v, _) => {
                     if !covered_ints.insert(*v) {
                         self.error(
                             *s,
@@ -1517,7 +1517,7 @@ impl<'r> Checker<'r> {
         scrutinee_ty: &Ty,
     ) {
         let (lo_v, hi_v) = match (lo, hi) {
-            (Lit::Int(a), Lit::Int(b)) => {
+            (Lit::Int(a, _), Lit::Int(b, _)) => {
                 if !scrutinee_ty.is_error() && !scrutinee_ty.is_integer() {
                     self.error(
                         span,
@@ -2250,8 +2250,14 @@ impl<'r> Checker<'r> {
 
     fn lit_type(&self, lit: &Lit) -> Ty {
         match lit {
-            Lit::Int(_) => DEFAULT_INT,
-            Lit::Float(_) => DEFAULT_FLOAT,
+            // Session 088: an explicit suffix (`10i32`, `42u64`)
+            // pins the literal's type directly; bare literals
+            // still default to i64 / f64 (and let surrounding
+            // hints / `as` casts widen / narrow if needed).
+            Lit::Int(_, Some(ty)) => Ty::Int(*ty),
+            Lit::Float(_, Some(ty)) => Ty::Float(*ty),
+            Lit::Int(_, None) => DEFAULT_INT,
+            Lit::Float(_, None) => DEFAULT_FLOAT,
             Lit::Str(_) => Ty::Str,
             Lit::Char(_) => Ty::Char,
             Lit::Bool(_) => Ty::Bool,
