@@ -327,7 +327,18 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Self-hosted bootstrap (long-term)
+Phase 1 — capability buildout (next ~20 sessions):
+
+1. File I/O builtins (`read_file` / `write_file`)
+2. String methods (`.split`, `.starts_with`, `.find`, `.byte_at`)
+3. Command-line args (`std::env::args`)
+4. Module system at file granularity
+5. Mutable `String` type + builder methods
+6. `Box<T>` (or implicit boxing of recursive enum variants)
+7. Pattern guards + `let ... else`
+
+Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
+for the full path to self-hosting.
 
 ## Planned syntax
 
