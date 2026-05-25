@@ -329,15 +329,16 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 Phase 1 — capability buildout (next ~20 sessions):
 
-1. Command-line args (`std::env::args`)
+1. Mutable `String` type + builder methods
 2. Module system at file granularity
-3. Mutable `String` type + builder methods
-4. `Box<T>` (or implicit boxing of recursive enum variants)
-5. Pattern guards + `let ... else`
+3. `Box<T>` (or implicit boxing of recursive enum variants)
+4. Pattern guards + `let ... else`
+5. `std::env::var(name)` for environment variables
 6. `.chars()` for UTF-8 iteration (future, when source needs it)
 
 Already shipped from Phase 1: file I/O (session 118), string
-methods `.byte_at` / `.find` / `.split` and `Vec<str>` (session 119),
+methods `.byte_at` / `.find` / `.split` + `Vec<str>` (session 119),
+command-line args via `std::env::args()` (session 120),
 `.starts_with` / `.ends_with` / `.contains` on `str`.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)

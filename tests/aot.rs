@@ -57,6 +57,16 @@ fn build_and_run(src: &str) -> i32 {
     status.code().expect("exe did not exit normally")
 }
 
+/// Session 120: like `build_and_run` but passes extra CLI args.
+fn build_and_run_with_args(src: &str, args: &[&str]) -> i32 {
+    let (obj, exe) = temp_paths();
+    if let Err(e) = build_exe(src, &obj, &exe) {
+        panic!("build failed: {}", e);
+    }
+    let status = Command::new(&exe).args(args).status().expect("run exe");
+    status.code().expect("exe did not exit normally")
+}
+
 #[test]
 fn returns_literal() {
     assert_eq!(build_and_run("fn main() -> i64 { 42 }"), 42);
@@ -652,4 +662,57 @@ fn aot_generic_identity() {
         }
     "#;
     assert_eq!(build_and_run(src), 42);
+}
+
+#[test]
+fn aot_env_args_returns_argv() {
+    // Session 120: the C main wrapper takes (argc, argv) and forwards
+    // them to rune_argv_init before invoking __rune_main. The Rune
+    // side reads them back via std::env::args(). Pass three extra
+    // CLI args; expect argc to be 4 (program name + 3 extras).
+    let src = r#"
+        fn main() -> i64 {
+            let args: Vec<str> = std::env::args();
+            args.len()
+        }
+    "#;
+    assert_eq!(
+        build_and_run_with_args(src, &["one", "two", "three"]),
+        4
+    );
+}
+
+#[test]
+fn aot_env_args_first_is_program_name() {
+    // argv[0] is the executable path. We can't predict the exact
+    // path (it's a temp file with a randomized id) but we CAN
+    // confirm the first arg is non-empty. Return 1 on non-empty,
+    // 0 on empty.
+    let src = r#"
+        fn main() -> i64 {
+            let args: Vec<str> = std::env::args();
+            if args.len() == 0 { 0 } else {
+                let first: str = args.get(0);
+                if first.is_empty() { 0 } else { 1 }
+            }
+        }
+    "#;
+    assert_eq!(build_and_run(src), 1);
+}
+
+#[test]
+fn aot_env_args_content_via_starts_with() {
+    // Pass an arg with a known prefix and confirm we see it back.
+    let src = r#"
+        fn main() -> i64 {
+            let args: Vec<str> = std::env::args();
+            if args.len() < 2 { return 0; }
+            let arg1: str = args.get(1);
+            if arg1.starts_with("rune-marker-") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        build_and_run_with_args(src, &["rune-marker-abc"]),
+        1
+    );
 }

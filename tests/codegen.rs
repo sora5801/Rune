@@ -120,6 +120,39 @@ fn compound_assignment() {
     );
 }
 
+// ---- session 120: command-line args ----
+
+#[test]
+fn env_args_returns_empty_vec_in_jit() {
+    // JIT-mode tests never call rune_argv_init, so g_argc stays 0
+    // and env::args() returns an empty Vec. Verify the call path
+    // is wired correctly and the result is len 0.
+    let src = r#"
+        fn main() -> i64 {
+            let args: Vec<str> = std::env::args();
+            args.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn env_args_iter_safe_on_empty() {
+    // for-in over an empty argv Vec doesn't panic — runs zero
+    // iterations.
+    let src = r#"
+        fn main() -> i64 {
+            let args: Vec<str> = std::env::args();
+            let mut total: i64 = 0;
+            for a in args.iter() {
+                total = total + a.len();
+            }
+            total
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
 // ---- session 119: string methods ----
 
 #[test]

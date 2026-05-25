@@ -861,6 +861,20 @@ impl Resolver {
                 ret: Ty::Bool,
             }),
         );
+        // Session 120: command-line args. `std::env::args()`
+        // returns a fresh Vec<str> with the process's argv.
+        // First element is the program name (argv[0]) per
+        // platform convention. In JIT mode (tests) the runtime's
+        // argv storage is empty, so this returns an empty Vec.
+        self.intern(
+            "std::env::args".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "env_args",
+                params: vec![],
+                ret: Ty::Vec(Box::new(Ty::Str)),
+            }),
+        );
         self.intern(
             "vec_new".to_string(),
             zero,

@@ -133,6 +133,45 @@ static struct rune_str* str_slice_owned(const char* src_ptr, int64_t a, int64_t 
     return r;
 }
 
+// Session 120: command-line args. The AOT C main wrapper calls
+// rune_argv_init at process start with the OS-provided argc/argv;
+// std::env::args() then returns a fresh Vec<str> per call that
+// aliases the OS-owned argv strings via rc=-1 ("literal") rune_str
+// descriptors stored in a static array. JIT-mode tests never call
+// rune_argv_init, so g_argc stays 0 and env_args() returns empty —
+// matches the "no program-level argv available" model.
+static int g_argc = 0;
+static char** g_argv = (char**)0;
+static struct rune_str* g_arg_descriptors = (struct rune_str*)0;
+
+void rune_argv_init(int argc, char** argv) {
+    if (g_arg_descriptors != (struct rune_str*)0) {
+        // Idempotent: second init replaces the previous binding
+        // (test harnesses may call this multiple times).
+        free(g_arg_descriptors);
+        g_arg_descriptors = (struct rune_str*)0;
+    }
+    g_argc = argc;
+    g_argv = argv;
+    if (argc > 0) {
+        g_arg_descriptors = (struct rune_str*)malloc(
+            sizeof(struct rune_str) * (size_t)argc);
+        for (int i = 0; i < argc; i++) {
+            g_arg_descriptors[i].ptr = argv[i];
+            g_arg_descriptors[i].len = (int64_t)strlen(argv[i]);
+            g_arg_descriptors[i].rc = -1;  // literal — release_str is no-op
+        }
+    }
+}
+
+struct rune_vec* rune_env_args(void) {
+    struct rune_vec* v = rune_vec_new();
+    for (int i = 0; i < g_argc; i++) {
+        rune_vec_push(v, (int64_t)&g_arg_descriptors[i]);
+    }
+    return v;
+}
+
 struct rune_vec* rune_str_split(const struct rune_str* s, const struct rune_str* sep) {
     struct rune_vec* v = rune_vec_new();
     // Empty separator → return [whole_str] (no-split convention).

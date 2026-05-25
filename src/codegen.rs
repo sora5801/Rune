@@ -175,6 +175,8 @@ unsafe extern "C" {
     fn rune_str_split(s: *const u8, sep: *const u8) -> *mut u8;
     fn rune_read_file(path: *const u8) -> *mut u8;
     fn rune_write_file(path: *const u8, contents: *const u8) -> i8;
+    fn rune_argv_init(argc: i32, argv: *mut *mut u8);
+    fn rune_env_args() -> *mut u8;
     fn rune_vec_new() -> *mut u8;
     fn rune_vec_push(v: *mut u8, x: i64);
     fn rune_vec_get(v: *const u8, i: i64) -> i64;
@@ -1225,6 +1227,8 @@ impl Codegen<JITModule> {
         builder.symbol("rune_str_split", rune_str_split as *const u8);
         builder.symbol("rune_read_file", rune_read_file as *const u8);
         builder.symbol("rune_write_file", rune_write_file as *const u8);
+        builder.symbol("rune_argv_init", rune_argv_init as *const u8);
+        builder.symbol("rune_env_args", rune_env_args as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
         builder.symbol("rune_vec_push", rune_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_vec_get as *const u8);
@@ -1347,12 +1351,22 @@ impl Codegen<ObjectModule> {
     /// (passed in as `rune_main_id`) and truncates its `i64` return value
     /// to `i32` for the OS exit code.
     pub fn emit_c_main_wrapper(&mut self, rune_main_id: FuncId) -> Result<(), CodegenError> {
+        // Session 120: take (argc, argv) so the OS-provided command-
+        // line args reach std::env::args(). Calls rune_argv_init
+        // before invoking __rune_main; env::args() reads from the
+        // runtime's static argv storage.
         let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // argc
+        sig.params.push(AbiParam::new(types::I64)); // argv (char**)
         sig.returns.push(AbiParam::new(types::I32));
         let func_id = self
             .module
             .declare_function("main", Linkage::Export, &sig)
             .map_err(|e| CodegenError(e.to_string()))?;
+
+        // Declare the argv_init runtime helper so we can call it
+        // from the main wrapper before __rune_main runs.
+        let argv_init_id = declare_builtin(&mut self.module, "argv_init")?;
 
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
@@ -1360,9 +1374,21 @@ impl Codegen<ObjectModule> {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut bctx);
 
         let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
         builder.switch_to_block(block);
         builder.seal_block(block);
 
+        // Pull the two block params for argc / argv.
+        let argc_val = builder.block_params(block)[0];
+        let argv_val = builder.block_params(block)[1];
+
+        // Call rune_argv_init(argc, argv).
+        let argv_init_ref = self
+            .module
+            .declare_func_in_func(argv_init_id, builder.func);
+        builder.ins().call(argv_init_ref, &[argc_val, argv_val]);
+
+        // Then call __rune_main().
         let rune_main_ref = self.module.declare_func_in_func(rune_main_id, builder.func);
         let inst = builder.ins().call(rune_main_ref, &[]);
         let rune_result = builder.inst_results(inst)[0];
@@ -4422,6 +4448,20 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             sig.params.push(AbiParam::new(types::I64)); // sep
             sig.returns.push(AbiParam::new(types::I64)); // *mut Vec<str> (fresh +1)
             ("rune_str_split", sig)
+        }
+        // Session 120: command-line args. argv_init is called by
+        // the AOT C main wrapper at process start; env_args returns
+        // a fresh Vec<str> per call aliasing the OS-owned argv.
+        "argv_init" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // argc
+            sig.params.push(AbiParam::new(types::I64)); // argv: char**
+            ("rune_argv_init", sig)
+        }
+        "env_args" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // *mut Vec<str>
+            ("rune_env_args", sig)
         }
         // (idx, len) -> never. Used by the inline bounds-check pattern.
         "panic_bounds" => {
