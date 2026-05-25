@@ -660,6 +660,97 @@ fn cross_let_const_eval_negation_through_binding() {
 }
 
 #[test]
+fn div_by_zero_literal_rejected() {
+    // Session 107: bare `/ 0` errors at typecheck.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: i64 = 100 / 0;
+            x
+        }
+        "#,
+        "division by zero",
+    );
+}
+
+#[test]
+fn mod_by_zero_literal_rejected() {
+    // `% 0` is parallel — "remainder by zero".
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: i64 = 100 % 0;
+            x
+        }
+        "#,
+        "remainder by zero",
+    );
+}
+
+#[test]
+fn div_by_zero_through_let_binding_rejected() {
+    // Cross-let const-eval (session 106) makes this work: `z`
+    // is tracked as 0, so `100 / z` triggers the divide-by-zero
+    // diagnostic at the binop.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let z: i64 = 0;
+            let x: i64 = 100 / z;
+            x
+        }
+        "#,
+        "division by zero",
+    );
+}
+
+#[test]
+fn div_by_zero_through_compound_const_rejected() {
+    // `5 - 5` const-evals to 0; dividing by it errors.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: i64 = 42 / (5 - 5);
+            x
+        }
+        "#,
+        "division by zero",
+    );
+}
+
+#[test]
+fn div_by_zero_skipped_for_mutable_divisor() {
+    // `let mut z = 0` isn't tracked (session 106's gate), so
+    // `100 / z` doesn't const-eval the divisor — no diagnostic.
+    // The runtime trap on division by zero stays. Verifies the
+    // gate is genuine compile-time, not a runtime check.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut z: i64 = 0;
+            z = 1;
+            let x: i64 = 100 / z;
+            x
+        }
+        "#,
+    );
+}
+
+#[test]
+fn div_by_nonzero_accepted() {
+    // Sanity: dividing by a const-tracked nonzero is fine.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let z: i64 = 4;
+            let x: i64 = 100 / z;
+            x
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

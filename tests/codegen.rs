@@ -2692,10 +2692,15 @@ fn continue_releases_arc_locals() {
 
 #[test]
 fn logical_and_short_circuits() {
-    // 0 / 0 would trap, so verify the rhs is not evaluated when lhs is false
+    // 10 / z would trap when z=0, so verify the rhs isn't evaluated
+    // when lhs is false. `let mut z = 0` (mutable) keeps session 106
+    // / 107 const-eval from seeing the divisor — we want a *runtime*
+    // zero so the short-circuit machinery is what saves the test.
     let src = r#"
         fn main() -> i64 {
-            let safe = false && (10 / 0 > 0);
+            let mut z: i64 = 0;
+            z = 0;
+            let safe = false && (10 / z > 0);
             if safe { 1 } else { 0 }
         }
     "#;
@@ -2706,7 +2711,9 @@ fn logical_and_short_circuits() {
 fn logical_or_short_circuits() {
     let src = r#"
         fn main() -> i64 {
-            let safe = true || (10 / 0 > 0);
+            let mut z: i64 = 0;
+            z = 0;
+            let safe = true || (10 / z > 0);
             if safe { 1 } else { 0 }
         }
     "#;

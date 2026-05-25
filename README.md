@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Division-by-zero const-eval diagnostic
-2. Floating-point literal range checks (`3.4e40f32` rounds to infinity today)
-3. `as`-cast through const-tracked bindings
+1. Floating-point literal range checks (`3.4e40f32` rounds to infinity today)
+2. `as`-cast through const-tracked bindings
+3. Shift-out-of-range diagnostic (`x << 64` at typecheck)
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

@@ -2253,6 +2253,22 @@ impl<'r> Checker<'r> {
         // Const-eval overflow check (session 102) for integer
         // arithmetic / bitwise.
         if let Ty::Int(result_ty) = &t {
+            // Session 107: divide-by-zero diagnostic. Fires whenever
+            // the divisor const-evals to 0, regardless of whether
+            // the dividend does — `100 / x` errors when `x` is a
+            // const-tracked binding holding 0. Separate from the
+            // overflow check below because that one needs *both*
+            // operands to const-eval; this one only needs the rhs.
+            if matches!(op, BinOp::Div | BinOp::Mod) {
+                if self.const_eval_int(rhs) == Some(0) {
+                    let opname = if matches!(op, BinOp::Mod) {
+                        "remainder"
+                    } else {
+                        "division"
+                    };
+                    self.error(span, format!("{} by zero", opname));
+                }
+            }
             if matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
@@ -3171,6 +3187,18 @@ impl<'r> Checker<'r> {
         // 1` where `a` is a let-bound variable doesn't const-eval
         // and falls through to the runtime.
         if let Ty::Int(result_ty) = &t {
+            // Session 107: divide-by-zero diagnostic (same shape
+            // as finish_binary's). Only needs the rhs to const-eval.
+            if matches!(op, BinOp::Div | BinOp::Mod) {
+                if self.const_eval_int(rhs) == Some(0) {
+                    let opname = if matches!(op, BinOp::Mod) {
+                        "remainder"
+                    } else {
+                        "division"
+                    };
+                    self.error(span, format!("{} by zero", opname));
+                }
+            }
             if matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
