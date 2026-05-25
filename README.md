@@ -351,10 +351,11 @@ shipped, `let-else` expressible via match.
   `let`, `if`, `else`, `match`, `pub`, ...). The lexer now
   tokenizes `pub fn double(x: i64) -> i64 { x * 2 }` correctly.
 - **Session 130**: String and char literals with escape
-  sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`). Lexer is
-  ~70% complete by surface area.
-- **Next**: float literals + numeric suffixes, comments +
-  source spans, then the parser.
+  sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`).
+- **Session 131**: Float literals (`3.14`, `1e10`) + numeric
+  suffixes (`42i32`, `3.14f64`). Lexer is ~85% complete by
+  surface area.
+- **Next**: comments + source spans, then the parser.
 
 See `examples/bootstrap/lexer.rn`. Per session 117's plan:
 ~25 more sessions to a working Rune-in-Rune tree-walking

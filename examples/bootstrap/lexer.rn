@@ -17,7 +17,7 @@
 
 pub enum Token {
     Ident(str),
-    Int(i64),
+    Int(i64, str),
 
     // Single-char operators and punctuation.
     LParen, RParen, LBrace, RBrace,
@@ -41,6 +41,16 @@ pub enum Token {
     // single byte for ASCII-range chars.
     Str(str),
     Char(u8),
+
+    // Session 131: float literals. Carries the parsed f64 value;
+    // an optional suffix lexeme (`""` for unsuffixed) signals
+    // `f32` / `f64`. The Int variant gains a parallel suffix slot
+    // for `i8`/`i32`/`u64`/etc. — replacing session 128's plain
+    // `Int(i64)` with `Int(i64, str)`.
+    //
+    // NOTE: session 131 redefines `Int(i64)` to `Int(i64, str)`.
+    // Tests that match `Int(v)` need to become `Int(v, _)`.
+    Float(f64, str),
 
     Eof,
     Error(str),
@@ -77,6 +87,16 @@ fn decode_escape(e: u8) -> u8 {
     if e == 34u8  { return 34u8; }       // \" → "
     if e == 39u8  { return 39u8; }       // \' → '
     0u8                                  // unknown
+}
+
+// Session 131: is the alnum run starting after a digit-run a
+// recognized numeric suffix? Same set Rune's existing lexer
+// accepts (session 088): the 10 sized integer types + isize /
+// usize + the two float widths.
+fn is_numeric_suffix(s: str) -> bool {
+    s == "i8" || s == "i16" || s == "i32" || s == "i64" || s == "isize"
+        || s == "u8" || s == "u16" || s == "u32" || s == "u64" || s == "usize"
+        || s == "f32" || s == "f64"
 }
 
 // ---- keyword recognition ----
@@ -126,13 +146,78 @@ pub fn tokenize(src: str) -> Vec<Token> {
             continue;
         }
 
-        // Integer literal.
+        // Numeric literal — int or float, optionally suffixed.
+        // Session 131: extends session 128's digit-run with:
+        //   - `.` followed by digit → continue into fractional part
+        //   - `e`/`E` followed by optional `+`/`-` and digits → exponent
+        //   - trailing `i8`/`i32`/...`f32`/`f64` suffix scan
         if is_digit(b) {
+            let int_start: i64 = i;
             let mut j: i64 = i;
             while j < n && is_digit(src.byte_at(j)) {
                 j = j + 1;
             }
-            tokens.push(Token::Int(i64::from_str(src[i..j])));
+            let mut is_float: bool = false;
+            // Fractional part: `.` followed by at least one digit.
+            // `1.method()` (dot followed by alpha) stays an int.
+            if j < n && src.byte_at(j) == 46u8 {   // '.'
+                if j + 1 < n && is_digit(src.byte_at(j + 1)) {
+                    is_float = true;
+                    j = j + 1;
+                    while j < n && is_digit(src.byte_at(j)) {
+                        j = j + 1;
+                    }
+                }
+            }
+            // Exponent: `e`/`E`, optional `+`/`-`, then digits.
+            if j < n {
+                let eb: u8 = src.byte_at(j);
+                if eb == 101u8 || eb == 69u8 {   // 'e' or 'E'
+                    let mut k: i64 = j + 1;
+                    if k < n {
+                        let sb: u8 = src.byte_at(k);
+                        if sb == 43u8 || sb == 45u8 {   // '+' or '-'
+                            k = k + 1;
+                        }
+                    }
+                    if k < n && is_digit(src.byte_at(k)) {
+                        is_float = true;
+                        j = k;
+                        while j < n && is_digit(src.byte_at(j)) {
+                            j = j + 1;
+                        }
+                    }
+                }
+            }
+            let num_end: i64 = j;
+            // Suffix: `i8`/`i16`/`i32`/`i64`/`isize`/`u8`/`u16`/
+            // `u32`/`u64`/`usize`/`f32`/`f64`. Scan the alnum run
+            // starting here and accept it as a suffix only if it
+            // matches one of those exact strings.
+            let suf_start: i64 = j;
+            while j < n && is_alnum(src.byte_at(j)) {
+                j = j + 1;
+            }
+            let suffix: str = if suf_start < j { src[suf_start..j] } else { "" };
+            let is_known_suffix: bool = is_numeric_suffix(suffix);
+            if suf_start < j && !is_known_suffix {
+                // Not a known suffix — back off and let the alnum
+                // run be tokenized separately (e.g., `1xyz` produces
+                // Int(1, "") + Ident("xyz") rather than Error).
+                j = suf_start;
+            }
+            // `f32`/`f64` on an integer body forces it to be a float.
+            let suf_forces_float: bool = is_known_suffix
+                && (suffix == "f32" || suffix == "f64");
+            let final_is_float: bool = is_float || suf_forces_float;
+            let suffix_payload: str = if suf_start < j { suffix } else { "" };
+            if final_is_float {
+                let v: f64 = f64::from_str(src[int_start..num_end]);
+                tokens.push(Token::Float(v, suffix_payload));
+            } else {
+                let v: i64 = i64::from_str(src[int_start..num_end]);
+                tokens.push(Token::Int(v, suffix_payload));
+            }
             i = j;
             continue;
         }
@@ -372,7 +457,8 @@ pub fn tokenize(src: str) -> Vec<Token> {
 pub fn kind_of(t: Token) -> str {
     match t {
         Token::Ident(_) => "Ident",
-        Token::Int(_) => "Int",
+        Token::Int(_, _) => "Int",
+        Token::Float(_, _) => "Float",
         Token::LParen => "LParen", Token::RParen => "RParen",
         Token::LBrace => "LBrace", Token::RBrace => "RBrace",
         Token::Plus => "Plus", Token::Minus => "Minus",

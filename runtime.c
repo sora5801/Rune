@@ -226,6 +226,23 @@ struct rune_string* rune_string_from(const struct rune_str* s) {
     return out;
 }
 
+// Session 131: f64::from_str — parse a decimal float string into
+// an f64. Same shape as session 123's i64::from_str. Uses strtod
+// for full IEEE-754 conversion including exponent / sign /
+// hex-float forms. Returns 0.0 on empty input or no digits
+// consumed. Out-of-range inputs return ±HUGE_VAL (∞) per strtod.
+double rune_f64_from_str(const struct rune_str* s) {
+    if (s->len <= 0) return 0.0;
+    char buf[64];
+    size_t n = (size_t)s->len > 63 ? 63 : (size_t)s->len;
+    memcpy(buf, s->ptr, n);
+    buf[n] = '\0';
+    char* end = (char*)0;
+    double v = strtod(buf, &end);
+    if (end == buf) return 0.0;
+    return v;
+}
+
 // Session 123: i64::from_str — inverse of i64::to_str. Parses
 // the str's bytes as a base-10 decimal integer with optional
 // leading `-` or `+`. On any error (empty input, non-digit

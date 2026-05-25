@@ -918,6 +918,17 @@ impl Resolver {
                 ret: Ty::Int(IntTy::I64),
             }),
         );
+        // Session 131: f64::from_str — float counterpart to
+        // i64::from_str. Same shape; uses strtod under the hood.
+        self.intern(
+            "f64::from_str".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "f64_from_str",
+                params: vec![Ty::Str],
+                ret: Ty::Float(FloatTy::F64),
+            }),
+        );
         self.intern(
             "vec_new".to_string(),
             zero,

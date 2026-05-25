@@ -6291,7 +6291,7 @@ fn generic_vec_struct_loop_reclaims() {
 const BOOTSTRAP_LEXER_RN: &str = r#"
 pub enum Token {
     Ident(str),
-    Int(i64),
+    Int(i64, str),
     LParen, RParen, LBrace, RBrace,
     Plus, Minus, Star, Slash, Percent,
     Eq, Semi, Comma, Dot,
@@ -6304,6 +6304,7 @@ pub enum Token {
     True, False, Break, Continue,
     Str(str),
     Char(u8),
+    Float(f64, str),
     Eof,
     Error(str),
 }
@@ -6329,6 +6330,12 @@ fn decode_escape(e: u8) -> u8 {
     if e == 34u8  { return 34u8; }
     if e == 39u8  { return 39u8; }
     0u8
+}
+
+fn is_numeric_suffix(s: str) -> bool {
+    s == "i8" || s == "i16" || s == "i32" || s == "i64" || s == "isize"
+        || s == "u8" || s == "u16" || s == "u32" || s == "u64" || s == "usize"
+        || s == "f32" || s == "f64"
 }
 
 pub fn keyword_of(name: str) -> Token {
@@ -6365,9 +6372,49 @@ pub fn tokenize(src: str) -> Vec<Token> {
         let b: u8 = src.byte_at(i);
         if is_whitespace(b) { i = i + 1; continue; }
         if is_digit(b) {
+            let int_start: i64 = i;
             let mut j: i64 = i;
             while j < n && is_digit(src.byte_at(j)) { j = j + 1; }
-            tokens.push(Token::Int(i64::from_str(src[i..j])));
+            let mut is_float: bool = false;
+            if j < n && src.byte_at(j) == 46u8 {
+                if j + 1 < n && is_digit(src.byte_at(j + 1)) {
+                    is_float = true;
+                    j = j + 1;
+                    while j < n && is_digit(src.byte_at(j)) { j = j + 1; }
+                }
+            }
+            if j < n {
+                let eb: u8 = src.byte_at(j);
+                if eb == 101u8 || eb == 69u8 {
+                    let mut k: i64 = j + 1;
+                    if k < n {
+                        let sb: u8 = src.byte_at(k);
+                        if sb == 43u8 || sb == 45u8 { k = k + 1; }
+                    }
+                    if k < n && is_digit(src.byte_at(k)) {
+                        is_float = true;
+                        j = k;
+                        while j < n && is_digit(src.byte_at(j)) { j = j + 1; }
+                    }
+                }
+            }
+            let num_end: i64 = j;
+            let suf_start: i64 = j;
+            while j < n && is_alnum(src.byte_at(j)) { j = j + 1; }
+            let suffix: str = if suf_start < j { src[suf_start..j] } else { "" };
+            let is_known_suffix: bool = is_numeric_suffix(suffix);
+            if suf_start < j && !is_known_suffix { j = suf_start; }
+            let suf_forces_float: bool = is_known_suffix
+                && (suffix == "f32" || suffix == "f64");
+            let final_is_float: bool = is_float || suf_forces_float;
+            let suffix_payload: str = if suf_start < j { suffix } else { "" };
+            if final_is_float {
+                let v: f64 = f64::from_str(src[int_start..num_end]);
+                tokens.push(Token::Float(v, suffix_payload));
+            } else {
+                let v: i64 = i64::from_str(src[int_start..num_end]);
+                tokens.push(Token::Int(v, suffix_payload));
+            }
             i = j;
             continue;
         }
@@ -6556,7 +6603,7 @@ fn rune_lexer_int_literal_value() {
         fn main() -> i64 {
             let toks: Vec<lexer::Token> = lexer::tokenize("12345");
             match toks.get(0) {
-                lexer::Token::Int(v) => v,
+                lexer::Token::Int(v, _) => v,
                 _ => -1,
             }
         }
@@ -6745,6 +6792,148 @@ fn rune_lexer_single_char_op_after_lookahead_fails() {
     assert_eq!(
         run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
         1
+    );
+}
+
+#[test]
+fn rune_lexer_float_literal_basic() {
+    // "3.14" lexes as one Float token (not Int + Dot + Int).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("3.14");
+            // Float + Eof = 2
+            if toks.len() != 2 { return 0; }
+            match toks.get(0) {
+                lexer::Token::Float(_, _) => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_float_literal_exponent() {
+    // "1e10" → Float with exponent. Value is 1e10 = 10_000_000_000.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("1e10");
+            match toks.get(0) {
+                lexer::Token::Float(v, _) => v as i64,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        10_000_000_000
+    );
+}
+
+#[test]
+fn rune_lexer_int_with_suffix() {
+    // "42i32" → Int(42, "i32"). Payload + suffix both survive.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("42i32");
+            match toks.get(0) {
+                lexer::Token::Int(v, suf) => {
+                    if suf == "i32" { v } else { -1 }
+                }
+                _ => -2,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        42
+    );
+}
+
+#[test]
+fn rune_lexer_float_with_suffix() {
+    // "3.14f64" → Float(3.14, "f64").
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("3.14f64");
+            match toks.get(0) {
+                lexer::Token::Float(_, suf) => {
+                    if suf == "f64" { 1 } else { 0 }
+                }
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_int_with_f32_suffix_becomes_float() {
+    // "42f32" — `f32` suffix on an integer body forces it to be
+    // a Float token. Payload value is 42.0.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("42f32");
+            match toks.get(0) {
+                lexer::Token::Float(v, suf) => {
+                    if suf == "f32" { v as i64 } else { -1 }
+                }
+                _ => -2,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        42
+    );
+}
+
+#[test]
+fn rune_lexer_int_no_suffix_has_empty_suffix() {
+    // Plain "5" → Int(5, "") — empty suffix slot, not the
+    // ident-followed-by-int interpretation.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("5");
+            match toks.get(0) {
+                lexer::Token::Int(v, suf) => {
+                    if suf == "" { v } else { -1 }
+                }
+                _ => -2,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        5
+    );
+}
+
+#[test]
+fn rune_lexer_float_realistic_let_binding() {
+    // "let pi: f64 = 3.14;" → Let Ident Colon Ident Eq Float Semi Eof = 8.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("let pi: f64 = 3.14;");
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        8
     );
 }
 
