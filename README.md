@@ -370,6 +370,8 @@ maps to Cranelift's `OptLevel::Speed`.
 
 ## Documentation
 
+- [V0X-AUDIT.md](V0X-AUDIT.md) — v0.x retrospective: what works,
+  what's deferred, pre-1.0 priorities, path to self-hosted bootstrap
 - [LANGUAGE.md](LANGUAGE.md) — language design decisions (living document)
 - [docs/sessions/](docs/sessions/) — per-session technical deep dives
 
