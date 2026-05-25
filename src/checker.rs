@@ -2715,7 +2715,27 @@ impl<'r> Checker<'r> {
 
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         let lt = self.check_expr(lhs);
-        let rt = self.check_expr(rhs);
+        // Session 095: hint the RHS literal from LHS's concrete
+        // numeric type so `let a: i32 = 5; a + 1` lets `1` adopt
+        // i32. check_expr_with_hint's existing literal-aware
+        // branch fires when the hint is Ty::Int(_) / Ty::Float(_);
+        // for non-numeric LHS the hint is harmless (numeric_lit_hint
+        // returns None on non-numeric expected).
+        let rt = self.check_expr_with_hint(rhs, Some(&lt));
+        // Symmetric case: when LHS is a bare numeric literal (no
+        // suffix) and RHS turned out to be a concrete numeric type
+        // different from LHS's i64/f64 default, re-check LHS with
+        // RHS as the hint. Covers `1 + a: i32` shape. The retry
+        // overwrites the literal's earlier expr_types entry; codegen
+        // reads the updated type.
+        let lt = if !lt.compatible(&rt)
+            && lhs_is_bare_numeric_literal(lhs)
+            && matches!(rt, Ty::Int(_) | Ty::Float(_))
+        {
+            self.check_expr_with_hint(lhs, Some(&rt))
+        } else {
+            lt
+        };
         if lt.is_error() || rt.is_error() {
             return Ty::Error;
         }
@@ -5226,6 +5246,26 @@ fn is_dyn_assoc(ty: &Ty) -> bool {
 /// scrutinee with `arity` positions. Or-patterns at the top level
 /// expand to multiple rows. Bare wildcard / ident matches anything
 /// and becomes a row of `arity` wildcards.
+/// Session 095: helper for binop hint flow — `true` when `e` is
+/// a bare numeric literal (or unary-neg of one) with no source-
+/// level suffix. The symmetric-hint retry only fires for these:
+/// suffix-bearing literals already pinned their type at lex time
+/// and aren't candidates for hinting.
+fn lhs_is_bare_numeric_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Lit { lit: Lit::Int(_, None), .. }
+        | Expr::Lit { lit: Lit::Float(_, None), .. } => true,
+        Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => {
+            matches!(
+                expr.as_ref(),
+                Expr::Lit { lit: Lit::Int(_, None), .. }
+                    | Expr::Lit { lit: Lit::Float(_, None), .. }
+            )
+        }
+        _ => false,
+    }
+}
+
 fn add_arm_rows(arm_pat: &Pattern, arity: usize, out: &mut Vec<Vec<Pattern>>) {
     let synthetic_wild = || Pattern::Wildcard(Span { start: 0, end: 0 });
     match arm_pat {

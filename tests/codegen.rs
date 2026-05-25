@@ -1613,6 +1613,72 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn binop_hint_rhs_literal() {
+    // Session 095: `a: i32 + 1` lets the bare `1` adopt i32
+    // from the LHS's concrete type. Previously errored as
+    // "mismatched types: i32 vs i64".
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 5;
+            (a + 1) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn binop_hint_lhs_literal() {
+    // Symmetric: `1 + a: i32` lets the bare `1` adopt i32
+    // via the literal-LHS retry path.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 5;
+            (1 + a) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn binop_hint_negative_literal() {
+    // Negative bare literal on RHS picks up the LHS hint via
+    // session 091's Unary-Neg-on-Lit branch.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 10;
+            (a + -3) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
+fn binop_hint_float() {
+    // Float operands work too.
+    let src = r#"
+        fn main() -> i64 {
+            let a: f32 = 1.5;
+            (a * 4.0) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn binop_hint_suffix_wins() {
+    // Suffix-bearing literals don't get re-hinted; mismatched
+    // suffix vs LHS-type still errors. This test confirms the
+    // matching-suffix case compiles cleanly.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 5;
+            (a + 7i32) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
 fn integer_literal_hint_let_binding() {
     // Session 091: bare `10` adopts the let's i32 annotation
     // rather than defaulting to i64 (which would error).

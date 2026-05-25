@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Binary-op hint flow — `a: i32; a + 1` lets `1` adopt i32 from the LHS
-2. Const-eval overflow checks — reject `100u8 + 200u8`
-3. Codegen-side diagnostic polish — friendly type names in codegen errors
+1. Const-eval overflow checks — reject `100u8 + 200u8`
+2. Codegen-side diagnostic polish — friendly type names in codegen errors
+3. Method-receiver hint flow — `42.method()` adopts typed receiver from context
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
