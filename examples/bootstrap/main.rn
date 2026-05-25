@@ -1,18 +1,19 @@
-// Demo entry point for the Phase 2 bootstrap lexer.
-// Tokenizes a snippet exercising identifiers, integers, floats,
-// numeric suffixes, operators, keywords, string literals, char
-// literals. Returns the total token count so the caller can
-// confirm end-to-end lex.
+// Demo entry point for the Phase 2 bootstrap lexer (session 132
+// = lexer feature-complete: comments + source spans on every
+// token). Tokenizes a snippet that includes a line comment, a
+// block comment, and the usual mix of literals / keywords.
 //
 // Run: cargo run -- run examples/bootstrap/main.rn
 
 mod lexer;
 
 fn main() -> i64 {
-    let src: str = "let x: f64 = 3.14; let n: i32 = 42i32;";
-    // Tokens: Let Ident("x") Colon Ident("f64") Eq Float(3.14, "")
-    //         Semi Let Ident("n") Colon Ident("i32") Eq
-    //         Int(42, "i32") Semi Eof = 15
-    let toks: Vec<lexer::Token> = lexer::tokenize(src);
+    // Note the embedded line comment and block comment — both
+    // should be skipped by the lexer.
+    let src: str = "// the var\nlet x: f64 = 3.14; /* tail */ let n = 42i32;";
+    // Tokens (comments skipped): Let Ident("x") Colon Ident("f64")
+    //   Eq Float(3.14, "") Semi Let Ident("n") Eq Int(42, "i32")
+    //   Semi Eof = 13
+    let toks: Vec<lexer::Spanned> = lexer::tokenize(src);
     toks.len()
 }

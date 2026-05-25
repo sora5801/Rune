@@ -1,57 +1,39 @@
-// Session 129 — extends the session-128 lexer with multi-char
-// operators (==, !=, <=, >=, &&, ||, ::, ->, =>) and keyword
-// recognition (fn, let, if, else, while, for, return, match,
-// struct, enum, trait, impl, pub, mod, use, mut, as, in, true,
-// false, break, continue).
+// Session 132 — final lexer features: comments (`//` line and
+// `/* ... */` block, with nesting) + source spans on every
+// token. With these in place, the bootstrap lexer is feature-
+// complete enough for the parser to begin.
 //
-// The single-char token set and core tokenize loop carry over
-// from session 128; this session bolts on:
-//   - Lookahead via `peek_byte(src, j, n)` for the `=`/`!`/`<`/
-//     `>`/`&`/`|`/`:`/`-` lead bytes that may form 2-char tokens.
-//   - `keyword_of(name) -> Token` that maps a recognized keyword
-//     lexeme to its Token, falling through to `Token::Ident(name)`
-//     for non-keywords.
-//
-// Still NOT here (future sessions): string/char literals, float
-// literals, numeric suffixes, comments, source spans.
+// Span shape: `Spanned { kind: Token, span: Span }`. The
+// tokenize function returns `Vec<Spanned>`. Each emitted token
+// gets a span recording the source byte range it covers.
+// Comments emit no tokens but still advance the cursor.
+
+pub struct Span {
+    start: i64,
+    end: i64,
+}
+
+pub struct Spanned {
+    kind: Token,
+    span: Span,
+}
 
 pub enum Token {
     Ident(str),
     Int(i64, str),
-
-    // Single-char operators and punctuation.
     LParen, RParen, LBrace, RBrace,
     Plus, Minus, Star, Slash, Percent,
     Eq, Semi, Comma, Dot,
     Lt, Gt, Bang, Amp, Pipe, Colon,
-
-    // Multi-char operators.
     EqEq, BangEq, LtEq, GtEq,
     AmpAmp, PipePipe,
     ColonColon, Arrow, FatArrow,
-
-    // Keywords. The lexer reclassifies a matching Ident lexeme
-    // into one of these via `keyword_of`.
     Fn, Let, If, Else, While, For, Return, Match,
     Struct, Enum, Trait, Impl, Pub, Mod, Use, Mut, As, In,
     True, False, Break, Continue,
-
-    // Session 130: literals. Str carries the decoded contents
-    // (escape sequences already resolved); Char carries the
-    // single byte for ASCII-range chars.
     Str(str),
     Char(u8),
-
-    // Session 131: float literals. Carries the parsed f64 value;
-    // an optional suffix lexeme (`""` for unsuffixed) signals
-    // `f32` / `f64`. The Int variant gains a parallel suffix slot
-    // for `i8`/`i32`/`u64`/etc. — replacing session 128's plain
-    // `Int(i64)` with `Int(i64, str)`.
-    //
-    // NOTE: session 131 redefines `Int(i64)` to `Int(i64, str)`.
-    // Tests that match `Int(v)` need to become `Int(v, _)`.
     Float(f64, str),
-
     Eof,
     Error(str),
 }
@@ -67,45 +49,34 @@ fn is_alpha(b: u8) -> bool {
 }
 fn is_alnum(b: u8) -> bool { is_alpha(b) || is_digit(b) }
 
-// Bounds-safe lookahead. Returns 0 when j is past the end, which
-// is fine because no legitimate operator's continuation byte is 0.
 fn peek_byte(src: str, j: i64, n: i64) -> u8 {
     if j < n { src.byte_at(j) } else { 0u8 }
 }
 
-// Session 130: decode an escape sequence's second byte (the one
-// after `\`) to its literal byte value. Returns 0 for unknown
-// escapes — callers treat 0 as a sentinel meaning "reject." No
-// legitimate escape in this table maps to 0 (\0 / NUL is omitted
-// intentionally, freeing 0 for the sentinel; the bootstrap source
-// doesn't need embedded NULs).
 fn decode_escape(e: u8) -> u8 {
-    if e == 110u8 { return 10u8; }       // \n → LF
-    if e == 116u8 { return 9u8; }        // \t → TAB
-    if e == 114u8 { return 13u8; }       // \r → CR
-    if e == 92u8  { return 92u8; }       // \\ → \
-    if e == 34u8  { return 34u8; }       // \" → "
-    if e == 39u8  { return 39u8; }       // \' → '
-    0u8                                  // unknown
+    if e == 110u8 { return 10u8; }
+    if e == 116u8 { return 9u8; }
+    if e == 114u8 { return 13u8; }
+    if e == 92u8  { return 92u8; }
+    if e == 34u8  { return 34u8; }
+    if e == 39u8  { return 39u8; }
+    0u8
 }
 
-// Session 131: is the alnum run starting after a digit-run a
-// recognized numeric suffix? Same set Rune's existing lexer
-// accepts (session 088): the 10 sized integer types + isize /
-// usize + the two float widths.
 fn is_numeric_suffix(s: str) -> bool {
     s == "i8" || s == "i16" || s == "i32" || s == "i64" || s == "isize"
         || s == "u8" || s == "u16" || s == "u32" || s == "u64" || s == "usize"
         || s == "f32" || s == "f64"
 }
 
-// ---- keyword recognition ----
-//
-// Maps a recognized keyword lexeme to its Token; returns
-// Token::Ident(name) for non-keywords. The order here doesn't
-// matter — match arms are checked sequentially but each compares
-// against a distinct literal. A real lexer would speed this up
-// with a hash, but for v0.x's bootstrap a 22-arm match is fine.
+// Helper: construct a Spanned wrapping `kind` covering bytes
+// [start, end). v0.x doesn't have method syntax for tuple/
+// struct construction; this thin helper keeps the call sites
+// uncluttered.
+fn spanned(kind: Token, start: i64, end: i64) -> Spanned {
+    Spanned { kind: kind, span: Span { start: start, end: end } }
+}
+
 pub fn keyword_of(name: str) -> Token {
     if name == "fn" { return Token::Fn; }
     if name == "let" { return Token::Let; }
@@ -134,8 +105,8 @@ pub fn keyword_of(name: str) -> Token {
 
 // ---- main tokenizer ----
 
-pub fn tokenize(src: str) -> Vec<Token> {
-    let tokens: Vec<Token> = vec_new();
+pub fn tokenize(src: str) -> Vec<Spanned> {
+    let tokens: Vec<Spanned> = vec_new();
     let mut i: i64 = 0;
     let n: i64 = src.len();
     while i < n {
@@ -146,11 +117,58 @@ pub fn tokenize(src: str) -> Vec<Token> {
             continue;
         }
 
+        // Session 132: line comment `// ...` — skip to end of
+        // current line (or EOF). No token emitted.
+        if b == 47u8 && peek_byte(src, i + 1, n) == 47u8 {   // "//"
+            let mut j: i64 = i + 2;
+            while j < n && src.byte_at(j) != 10u8 {
+                j = j + 1;
+            }
+            i = j;   // leave the `\n` for the whitespace skip
+            continue;
+        }
+
+        // Session 132: block comment `/* ... */` — nesting
+        // supported via a depth counter, matching Rust. Each
+        // `/*` increments depth, each `*/` decrements; close
+        // only when depth returns to 0. Unterminated block
+        // comment produces a single Error token covering the
+        // remaining source.
+        if b == 47u8 && peek_byte(src, i + 1, n) == 42u8 {   // "/*"
+            let mut j: i64 = i + 2;
+            let mut depth: i64 = 1;
+            while j < n {
+                if j + 1 < n
+                    && src.byte_at(j) == 47u8
+                    && src.byte_at(j + 1) == 42u8
+                {
+                    depth = depth + 1;
+                    j = j + 2;
+                    continue;
+                }
+                if j + 1 < n
+                    && src.byte_at(j) == 42u8
+                    && src.byte_at(j + 1) == 47u8
+                {
+                    depth = depth - 1;
+                    j = j + 2;
+                    if depth == 0 { break; }
+                    continue;
+                }
+                j = j + 1;
+            }
+            if depth != 0 {
+                tokens.push(spanned(Token::Error(src[i..n]), i, n));
+                i = n;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+
+        let start: i64 = i;
+
         // Numeric literal — int or float, optionally suffixed.
-        // Session 131: extends session 128's digit-run with:
-        //   - `.` followed by digit → continue into fractional part
-        //   - `e`/`E` followed by optional `+`/`-` and digits → exponent
-        //   - trailing `i8`/`i32`/...`f32`/`f64` suffix scan
         if is_digit(b) {
             let int_start: i64 = i;
             let mut j: i64 = i;
@@ -158,9 +176,7 @@ pub fn tokenize(src: str) -> Vec<Token> {
                 j = j + 1;
             }
             let mut is_float: bool = false;
-            // Fractional part: `.` followed by at least one digit.
-            // `1.method()` (dot followed by alpha) stays an int.
-            if j < n && src.byte_at(j) == 46u8 {   // '.'
+            if j < n && src.byte_at(j) == 46u8 {
                 if j + 1 < n && is_digit(src.byte_at(j + 1)) {
                     is_float = true;
                     j = j + 1;
@@ -169,14 +185,13 @@ pub fn tokenize(src: str) -> Vec<Token> {
                     }
                 }
             }
-            // Exponent: `e`/`E`, optional `+`/`-`, then digits.
             if j < n {
                 let eb: u8 = src.byte_at(j);
-                if eb == 101u8 || eb == 69u8 {   // 'e' or 'E'
+                if eb == 101u8 || eb == 69u8 {
                     let mut k: i64 = j + 1;
                     if k < n {
                         let sb: u8 = src.byte_at(k);
-                        if sb == 43u8 || sb == 45u8 {   // '+' or '-'
+                        if sb == 43u8 || sb == 45u8 {
                             k = k + 1;
                         }
                     }
@@ -190,10 +205,6 @@ pub fn tokenize(src: str) -> Vec<Token> {
                 }
             }
             let num_end: i64 = j;
-            // Suffix: `i8`/`i16`/`i32`/`i64`/`isize`/`u8`/`u16`/
-            // `u32`/`u64`/`usize`/`f32`/`f64`. Scan the alnum run
-            // starting here and accept it as a suffix only if it
-            // matches one of those exact strings.
             let suf_start: i64 = j;
             while j < n && is_alnum(src.byte_at(j)) {
                 j = j + 1;
@@ -201,22 +212,18 @@ pub fn tokenize(src: str) -> Vec<Token> {
             let suffix: str = if suf_start < j { src[suf_start..j] } else { "" };
             let is_known_suffix: bool = is_numeric_suffix(suffix);
             if suf_start < j && !is_known_suffix {
-                // Not a known suffix — back off and let the alnum
-                // run be tokenized separately (e.g., `1xyz` produces
-                // Int(1, "") + Ident("xyz") rather than Error).
                 j = suf_start;
             }
-            // `f32`/`f64` on an integer body forces it to be a float.
             let suf_forces_float: bool = is_known_suffix
                 && (suffix == "f32" || suffix == "f64");
             let final_is_float: bool = is_float || suf_forces_float;
             let suffix_payload: str = if suf_start < j { suffix } else { "" };
             if final_is_float {
                 let v: f64 = f64::from_str(src[int_start..num_end]);
-                tokens.push(Token::Float(v, suffix_payload));
+                tokens.push(spanned(Token::Float(v, suffix_payload), start, j));
             } else {
                 let v: i64 = i64::from_str(src[int_start..num_end]);
-                tokens.push(Token::Int(v, suffix_payload));
+                tokens.push(spanned(Token::Int(v, suffix_payload), start, j));
             }
             i = j;
             continue;
@@ -228,31 +235,29 @@ pub fn tokenize(src: str) -> Vec<Token> {
             while j < n && is_alnum(src.byte_at(j)) {
                 j = j + 1;
             }
-            tokens.push(keyword_of(src[i..j]));
+            tokens.push(spanned(keyword_of(src[i..j]), start, j));
             i = j;
             continue;
         }
 
-        // Session 130: string literal `"..."`. Scan bytes until
-        // the closing `"`, decoding `\n`, `\t`, `\\`, `\"`, `\'`
-        // escape sequences along the way. Unterminated strings
-        // (EOF before the close) produce Token::Error.
-        if b == 34u8 {   // '"'
+        // String literal.
+        if b == 34u8 {
             let buf: String = String::new();
             let mut j: i64 = i + 1;
             let mut closed: bool = false;
+            let mut had_error: bool = false;
             while j < n {
                 let c: u8 = src.byte_at(j);
                 if c == 34u8 { closed = true; j = j + 1; break; }
-                if c == 92u8 {   // backslash — escape sequence
+                if c == 92u8 {
                     if j + 1 >= n { break; }
                     let e: u8 = src.byte_at(j + 1);
                     let decoded: u8 = decode_escape(e);
                     if decoded == 0u8 {
-                        // Unknown escape: leave Error and stop.
-                        tokens.push(Token::Error(src[i..j+2]));
+                        tokens.push(spanned(Token::Error(src[i..j+2]), start, j + 2));
                         j = j + 2;
-                        closed = true;   // skip the normal Str push
+                        had_error = true;
+                        closed = true;
                         break;
                     }
                     buf.push_byte(decoded);
@@ -263,47 +268,35 @@ pub fn tokenize(src: str) -> Vec<Token> {
                 j = j + 1;
             }
             if !closed {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
-            // If we already pushed an Error (unknown-escape path),
-            // the buf isn't a complete string — skip the push.
-            // The closed-via-quote path falls through here.
-            let last_was_error: bool = if tokens.len() == 0 { false } else {
-                match tokens.get(tokens.len() - 1) {
-                    Token::Error(_) => true,
-                    _ => false,
-                }
-            };
-            if !last_was_error {
-                tokens.push(Token::Str(buf.to_str()));
+            if !had_error {
+                tokens.push(spanned(Token::Str(buf.to_str()), start, j));
             }
             i = j;
             continue;
         }
 
-        // Session 130: char literal `'x'` or `'\\n'`. One ASCII
-        // byte (or escape sequence) between single quotes. Multi-
-        // byte UTF-8 char or unterminated literal produce Error.
-        if b == 39u8 {   // '\''
+        // Char literal.
+        if b == 39u8 {
             if i + 2 >= n {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
             let c: u8 = src.byte_at(i + 1);
             let ch_byte: u8 = if c == 92u8 {
-                // Escape sequence: two bytes after the open quote.
                 if i + 3 >= n {
-                    tokens.push(Token::Error(src[i..n]));
+                    tokens.push(spanned(Token::Error(src[i..n]), start, n));
                     i = n;
                     continue;
                 }
                 let e: u8 = src.byte_at(i + 2);
                 let d: u8 = decode_escape(e);
                 if d == 0u8 {
-                    tokens.push(Token::Error(src[i..i+4]));
+                    tokens.push(spanned(Token::Error(src[i..i+4]), start, i + 4));
                     i = i + 4;
                     continue;
                 }
@@ -311,125 +304,54 @@ pub fn tokenize(src: str) -> Vec<Token> {
             } else {
                 c
             };
-            // Confirm the closing quote.
             let close_pos: i64 = if c == 92u8 { i + 3 } else { i + 2 };
             if close_pos >= n || src.byte_at(close_pos) != 39u8 {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
-            tokens.push(Token::Char(ch_byte));
+            tokens.push(spanned(Token::Char(ch_byte), start, close_pos + 1));
             i = close_pos + 1;
             continue;
         }
 
-        // Two-char operators. Lookahead at i+1; if it matches a
-        // two-char shape, consume two bytes; otherwise produce
-        // the one-char fallback.
+        // Two-char operators.
         let next: u8 = peek_byte(src, i + 1, n);
-
-        // `==`, `=`, `=>`
-        if b == 61u8 {           // '='
-            if next == 61u8 {    // "=="
-                tokens.push(Token::EqEq);
-                i = i + 2;
-                continue;
-            }
-            if next == 62u8 {    // "=>"
-                tokens.push(Token::FatArrow);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Eq);
-            i = i + 1;
-            continue;
+        if b == 61u8 {
+            if next == 61u8 { tokens.push(spanned(Token::EqEq, start, i + 2)); i = i + 2; continue; }
+            if next == 62u8 { tokens.push(spanned(Token::FatArrow, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Eq, start, i + 1)); i = i + 1; continue;
         }
-
-        // `!=`, `!`
-        if b == 33u8 {           // '!'
-            if next == 61u8 {
-                tokens.push(Token::BangEq);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Bang);
-            i = i + 1;
-            continue;
+        if b == 33u8 {
+            if next == 61u8 { tokens.push(spanned(Token::BangEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Bang, start, i + 1)); i = i + 1; continue;
         }
-
-        // `<=`, `<`
         if b == 60u8 {
-            if next == 61u8 {
-                tokens.push(Token::LtEq);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Lt);
-            i = i + 1;
-            continue;
+            if next == 61u8 { tokens.push(spanned(Token::LtEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Lt, start, i + 1)); i = i + 1; continue;
         }
-
-        // `>=`, `>`
         if b == 62u8 {
-            if next == 61u8 {
-                tokens.push(Token::GtEq);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Gt);
-            i = i + 1;
-            continue;
+            if next == 61u8 { tokens.push(spanned(Token::GtEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Gt, start, i + 1)); i = i + 1; continue;
         }
-
-        // `&&`, `&`
         if b == 38u8 {
-            if next == 38u8 {
-                tokens.push(Token::AmpAmp);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Amp);
-            i = i + 1;
-            continue;
+            if next == 38u8 { tokens.push(spanned(Token::AmpAmp, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Amp, start, i + 1)); i = i + 1; continue;
         }
-
-        // `||`, `|`
         if b == 124u8 {
-            if next == 124u8 {
-                tokens.push(Token::PipePipe);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Pipe);
-            i = i + 1;
-            continue;
+            if next == 124u8 { tokens.push(spanned(Token::PipePipe, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Pipe, start, i + 1)); i = i + 1; continue;
         }
-
-        // `::`, `:`
         if b == 58u8 {
-            if next == 58u8 {
-                tokens.push(Token::ColonColon);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Colon);
-            i = i + 1;
-            continue;
+            if next == 58u8 { tokens.push(spanned(Token::ColonColon, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Colon, start, i + 1)); i = i + 1; continue;
         }
-
-        // `->`, `-`
         if b == 45u8 {
-            if next == 62u8 {
-                tokens.push(Token::Arrow);
-                i = i + 2;
-                continue;
-            }
-            tokens.push(Token::Minus);
-            i = i + 1;
-            continue;
+            if next == 62u8 { tokens.push(spanned(Token::Arrow, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Minus, start, i + 1)); i = i + 1; continue;
         }
 
-        // Plain single-char operators / punctuation.
+        // Plain single-char.
         let t: Token = match b {
             40u8 => Token::LParen,
             41u8 => Token::RParen,
@@ -444,16 +366,13 @@ pub fn tokenize(src: str) -> Vec<Token> {
             46u8 => Token::Dot,
             _ => Token::Error(src[i..i+1]),
         };
-        tokens.push(t);
+        tokens.push(spanned(t, start, i + 1));
         i = i + 1;
     }
-    tokens.push(Token::Eof);
+    tokens.push(spanned(Token::Eof, n, n));
     tokens
 }
 
-// Convenience for tests: a stable string label per token kind.
-// Tests compare against these labels rather than reaching into
-// variant payloads, keeping them robust to enum reordering.
 pub fn kind_of(t: Token) -> str {
     match t {
         Token::Ident(_) => "Ident",

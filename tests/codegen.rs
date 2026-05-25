@@ -6289,6 +6289,9 @@ fn generic_vec_struct_loop_reclaims() {
 /// so each test can be a single-file `run_main_files` call. The
 /// codegen tests cover the same code paths as the AOT example.
 const BOOTSTRAP_LEXER_RN: &str = r#"
+pub struct Span { start: i64, end: i64 }
+pub struct Spanned { kind: Token, span: Span }
+
 pub enum Token {
     Ident(str),
     Int(i64, str),
@@ -6307,6 +6310,10 @@ pub enum Token {
     Float(f64, str),
     Eof,
     Error(str),
+}
+
+fn spanned(kind: Token, start: i64, end: i64) -> Spanned {
+    Spanned { kind: kind, span: Span { start: start, end: end } }
 }
 
 fn is_whitespace(b: u8) -> bool {
@@ -6364,13 +6371,51 @@ pub fn keyword_of(name: str) -> Token {
     Token::Ident(name)
 }
 
-pub fn tokenize(src: str) -> Vec<Token> {
-    let tokens: Vec<Token> = vec_new();
+pub fn tokenize(src: str) -> Vec<Spanned> {
+    let tokens: Vec<Spanned> = vec_new();
     let mut i: i64 = 0;
     let n: i64 = src.len();
     while i < n {
         let b: u8 = src.byte_at(i);
         if is_whitespace(b) { i = i + 1; continue; }
+        if b == 47u8 && peek_byte(src, i + 1, n) == 47u8 {
+            let mut j: i64 = i + 2;
+            while j < n && src.byte_at(j) != 10u8 { j = j + 1; }
+            i = j;
+            continue;
+        }
+        if b == 47u8 && peek_byte(src, i + 1, n) == 42u8 {
+            let mut j: i64 = i + 2;
+            let mut depth: i64 = 1;
+            while j < n {
+                if j + 1 < n
+                    && src.byte_at(j) == 47u8
+                    && src.byte_at(j + 1) == 42u8
+                {
+                    depth = depth + 1;
+                    j = j + 2;
+                    continue;
+                }
+                if j + 1 < n
+                    && src.byte_at(j) == 42u8
+                    && src.byte_at(j + 1) == 47u8
+                {
+                    depth = depth - 1;
+                    j = j + 2;
+                    if depth == 0 { break; }
+                    continue;
+                }
+                j = j + 1;
+            }
+            if depth != 0 {
+                tokens.push(spanned(Token::Error(src[i..n]), i, n));
+                i = n;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        let start: i64 = i;
         if is_digit(b) {
             let int_start: i64 = i;
             let mut j: i64 = i;
@@ -6410,10 +6455,10 @@ pub fn tokenize(src: str) -> Vec<Token> {
             let suffix_payload: str = if suf_start < j { suffix } else { "" };
             if final_is_float {
                 let v: f64 = f64::from_str(src[int_start..num_end]);
-                tokens.push(Token::Float(v, suffix_payload));
+                tokens.push(spanned(Token::Float(v, suffix_payload), start, j));
             } else {
                 let v: i64 = i64::from_str(src[int_start..num_end]);
-                tokens.push(Token::Int(v, suffix_payload));
+                tokens.push(spanned(Token::Int(v, suffix_payload), start, j));
             }
             i = j;
             continue;
@@ -6421,7 +6466,7 @@ pub fn tokenize(src: str) -> Vec<Token> {
         if is_alpha(b) {
             let mut j: i64 = i;
             while j < n && is_alnum(src.byte_at(j)) { j = j + 1; }
-            tokens.push(keyword_of(src[i..j]));
+            tokens.push(spanned(keyword_of(src[i..j]), start, j));
             i = j;
             continue;
         }
@@ -6438,7 +6483,7 @@ pub fn tokenize(src: str) -> Vec<Token> {
                     let e: u8 = src.byte_at(j + 1);
                     let decoded: u8 = decode_escape(e);
                     if decoded == 0u8 {
-                        tokens.push(Token::Error(src[i..j+2]));
+                        tokens.push(spanned(Token::Error(src[i..j+2]), start, j + 2));
                         j = j + 2;
                         had_error = true;
                         closed = true;
@@ -6452,33 +6497,33 @@ pub fn tokenize(src: str) -> Vec<Token> {
                 j = j + 1;
             }
             if !closed {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
             if !had_error {
-                tokens.push(Token::Str(buf.to_str()));
+                tokens.push(spanned(Token::Str(buf.to_str()), start, j));
             }
             i = j;
             continue;
         }
         if b == 39u8 {
             if i + 2 >= n {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
             let c: u8 = src.byte_at(i + 1);
             let ch_byte: u8 = if c == 92u8 {
                 if i + 3 >= n {
-                    tokens.push(Token::Error(src[i..n]));
+                    tokens.push(spanned(Token::Error(src[i..n]), start, n));
                     i = n;
                     continue;
                 }
                 let e: u8 = src.byte_at(i + 2);
                 let d: u8 = decode_escape(e);
                 if d == 0u8 {
-                    tokens.push(Token::Error(src[i..i+4]));
+                    tokens.push(spanned(Token::Error(src[i..i+4]), start, i + 4));
                     i = i + 4;
                     continue;
                 }
@@ -6486,47 +6531,47 @@ pub fn tokenize(src: str) -> Vec<Token> {
             } else { c };
             let close_pos: i64 = if c == 92u8 { i + 3 } else { i + 2 };
             if close_pos >= n || src.byte_at(close_pos) != 39u8 {
-                tokens.push(Token::Error(src[i..n]));
+                tokens.push(spanned(Token::Error(src[i..n]), start, n));
                 i = n;
                 continue;
             }
-            tokens.push(Token::Char(ch_byte));
+            tokens.push(spanned(Token::Char(ch_byte), start, close_pos + 1));
             i = close_pos + 1;
             continue;
         }
         let next: u8 = peek_byte(src, i + 1, n);
         if b == 61u8 {
-            if next == 61u8 { tokens.push(Token::EqEq); i = i + 2; continue; }
-            if next == 62u8 { tokens.push(Token::FatArrow); i = i + 2; continue; }
-            tokens.push(Token::Eq); i = i + 1; continue;
+            if next == 61u8 { tokens.push(spanned(Token::EqEq, start, i + 2)); i = i + 2; continue; }
+            if next == 62u8 { tokens.push(spanned(Token::FatArrow, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Eq, start, i + 1)); i = i + 1; continue;
         }
         if b == 33u8 {
-            if next == 61u8 { tokens.push(Token::BangEq); i = i + 2; continue; }
-            tokens.push(Token::Bang); i = i + 1; continue;
+            if next == 61u8 { tokens.push(spanned(Token::BangEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Bang, start, i + 1)); i = i + 1; continue;
         }
         if b == 60u8 {
-            if next == 61u8 { tokens.push(Token::LtEq); i = i + 2; continue; }
-            tokens.push(Token::Lt); i = i + 1; continue;
+            if next == 61u8 { tokens.push(spanned(Token::LtEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Lt, start, i + 1)); i = i + 1; continue;
         }
         if b == 62u8 {
-            if next == 61u8 { tokens.push(Token::GtEq); i = i + 2; continue; }
-            tokens.push(Token::Gt); i = i + 1; continue;
+            if next == 61u8 { tokens.push(spanned(Token::GtEq, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Gt, start, i + 1)); i = i + 1; continue;
         }
         if b == 38u8 {
-            if next == 38u8 { tokens.push(Token::AmpAmp); i = i + 2; continue; }
-            tokens.push(Token::Amp); i = i + 1; continue;
+            if next == 38u8 { tokens.push(spanned(Token::AmpAmp, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Amp, start, i + 1)); i = i + 1; continue;
         }
         if b == 124u8 {
-            if next == 124u8 { tokens.push(Token::PipePipe); i = i + 2; continue; }
-            tokens.push(Token::Pipe); i = i + 1; continue;
+            if next == 124u8 { tokens.push(spanned(Token::PipePipe, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Pipe, start, i + 1)); i = i + 1; continue;
         }
         if b == 58u8 {
-            if next == 58u8 { tokens.push(Token::ColonColon); i = i + 2; continue; }
-            tokens.push(Token::Colon); i = i + 1; continue;
+            if next == 58u8 { tokens.push(spanned(Token::ColonColon, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Colon, start, i + 1)); i = i + 1; continue;
         }
         if b == 45u8 {
-            if next == 62u8 { tokens.push(Token::Arrow); i = i + 2; continue; }
-            tokens.push(Token::Minus); i = i + 1; continue;
+            if next == 62u8 { tokens.push(spanned(Token::Arrow, start, i + 2)); i = i + 2; continue; }
+            tokens.push(spanned(Token::Minus, start, i + 1)); i = i + 1; continue;
         }
         let t: Token = match b {
             40u8 => Token::LParen, 41u8 => Token::RParen,
@@ -6536,10 +6581,10 @@ pub fn tokenize(src: str) -> Vec<Token> {
             59u8 => Token::Semi, 44u8 => Token::Comma, 46u8 => Token::Dot,
             _ => Token::Error(src[i..i+1]),
         };
-        tokens.push(t);
+        tokens.push(spanned(t, start, i + 1));
         i = i + 1;
     }
-    tokens.push(Token::Eof);
+    tokens.push(spanned(Token::Eof, n, n));
     tokens
 }
 "#;
@@ -6550,7 +6595,7 @@ fn rune_lexer_simple_assignment() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("let x = 1 + 2;");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("let x = 1 + 2;");
             toks.len()
         }
     "#;
@@ -6565,7 +6610,7 @@ fn rune_lexer_empty_string_yields_only_eof() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("");
             toks.len()
         }
     "#;
@@ -6582,8 +6627,8 @@ fn rune_lexer_skips_whitespace_runs() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let dense: Vec<lexer::Token> = lexer::tokenize("a+b");
-            let sparse: Vec<lexer::Token> = lexer::tokenize("  a  +  b  ");
+            let dense: Vec<lexer::Spanned> = lexer::tokenize("a+b");
+            let sparse: Vec<lexer::Spanned> = lexer::tokenize("  a  +  b  ");
             if dense.len() == sparse.len() { dense.len() } else { 0 }
         }
     "#;
@@ -6601,8 +6646,8 @@ fn rune_lexer_int_literal_value() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("12345");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("12345");
+            match toks.get(0).kind {
                 lexer::Token::Int(v, _) => v,
                 _ => -1,
             }
@@ -6620,8 +6665,8 @@ fn rune_lexer_ident_payload_matches() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("foobar");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("foobar");
+            match toks.get(0).kind {
                 lexer::Token::Ident(name) => {
                     if name == "foobar" { 1 } else { 0 }
                 }
@@ -6642,7 +6687,7 @@ fn rune_lexer_punctuation_each_char() {
         mod lexer;
         fn main() -> i64 {
             // 11 distinct single-char tokens + Eof = 12
-            let toks: Vec<lexer::Token> = lexer::tokenize("(){}+-*/=;,");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("(){}+-*/=;,");
             toks.len()
         }
     "#;
@@ -6659,8 +6704,8 @@ fn rune_lexer_recognizes_keywords() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("fn let if else");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("fn let if else");
+            match toks.get(0).kind {
                 lexer::Token::Fn => 1,
                 lexer::Token::Ident(_) => 0,
                 _ => -1,
@@ -6681,12 +6726,12 @@ fn rune_lexer_keyword_vs_ident_disambiguation() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("fn function");
-            let first_is_fn: bool = match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("fn function");
+            let first_is_fn: bool = match toks.get(0).kind {
                 lexer::Token::Fn => true,
                 _ => false,
             };
-            let second_is_ident: bool = match toks.get(1) {
+            let second_is_ident: bool = match toks.get(1).kind {
                 lexer::Token::Ident(name) => name == "function",
                 _ => false,
             };
@@ -6705,10 +6750,10 @@ fn rune_lexer_two_char_eq_eq() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("==");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("==");
             // Should be EqEq + Eof = 2 tokens
             if toks.len() == 2 {
-                match toks.get(0) {
+                match toks.get(0).kind {
                     lexer::Token::EqEq => 1,
                     _ => 0,
                 }
@@ -6727,14 +6772,14 @@ fn rune_lexer_two_char_arrows() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("-> =>");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("-> =>");
             // Arrow + FatArrow + Eof = 3
             if toks.len() != 3 { return 0; }
-            let a_ok: bool = match toks.get(0) {
+            let a_ok: bool = match toks.get(0).kind {
                 lexer::Token::Arrow => true,
                 _ => false,
             };
-            let b_ok: bool = match toks.get(1) {
+            let b_ok: bool = match toks.get(1).kind {
                 lexer::Token::FatArrow => true,
                 _ => false,
             };
@@ -6754,13 +6799,13 @@ fn rune_lexer_two_char_logical_ops() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("&& ||");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("&& ||");
             if toks.len() != 3 { return 0; }
-            let a_ok: bool = match toks.get(0) {
+            let a_ok: bool = match toks.get(0).kind {
                 lexer::Token::AmpAmp => true,
                 _ => false,
             };
-            let b_ok: bool = match toks.get(1) {
+            let b_ok: bool = match toks.get(1).kind {
                 lexer::Token::PipePipe => true,
                 _ => false,
             };
@@ -6780,10 +6825,10 @@ fn rune_lexer_single_char_op_after_lookahead_fails() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("=x");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("=x");
             // Eq + Ident + Eof = 3
             if toks.len() != 3 { return 0; }
-            match toks.get(0) {
+            match toks.get(0).kind {
                 lexer::Token::Eq => 1,
                 _ => 0,
             }
@@ -6801,10 +6846,10 @@ fn rune_lexer_float_literal_basic() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("3.14");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("3.14");
             // Float + Eof = 2
             if toks.len() != 2 { return 0; }
-            match toks.get(0) {
+            match toks.get(0).kind {
                 lexer::Token::Float(_, _) => 1,
                 _ => 0,
             }
@@ -6822,8 +6867,8 @@ fn rune_lexer_float_literal_exponent() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("1e10");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("1e10");
+            match toks.get(0).kind {
                 lexer::Token::Float(v, _) => v as i64,
                 _ => -1,
             }
@@ -6841,8 +6886,8 @@ fn rune_lexer_int_with_suffix() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("42i32");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("42i32");
+            match toks.get(0).kind {
                 lexer::Token::Int(v, suf) => {
                     if suf == "i32" { v } else { -1 }
                 }
@@ -6862,8 +6907,8 @@ fn rune_lexer_float_with_suffix() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("3.14f64");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("3.14f64");
+            match toks.get(0).kind {
                 lexer::Token::Float(_, suf) => {
                     if suf == "f64" { 1 } else { 0 }
                 }
@@ -6884,8 +6929,8 @@ fn rune_lexer_int_with_f32_suffix_becomes_float() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("42f32");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("42f32");
+            match toks.get(0).kind {
                 lexer::Token::Float(v, suf) => {
                     if suf == "f32" { v as i64 } else { -1 }
                 }
@@ -6906,8 +6951,8 @@ fn rune_lexer_int_no_suffix_has_empty_suffix() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("5");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("5");
+            match toks.get(0).kind {
                 lexer::Token::Int(v, suf) => {
                     if suf == "" { v } else { -1 }
                 }
@@ -6927,7 +6972,7 @@ fn rune_lexer_float_realistic_let_binding() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("let pi: f64 = 3.14;");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("let pi: f64 = 3.14;");
             toks.len()
         }
     "#;
@@ -6938,15 +6983,145 @@ fn rune_lexer_float_realistic_let_binding() {
 }
 
 #[test]
+fn rune_lexer_line_comment_skipped() {
+    // `// comment` followed by content on next line.
+    // The comment produces no tokens; lex picks up after the newline.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(
+                "// skip\nlet x = 1;"
+            );
+            // Let Ident("x") Eq Int(1, "") Semi Eof = 6
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        6
+    );
+}
+
+#[test]
+fn rune_lexer_block_comment_skipped() {
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(
+                "let /* skip */ x = 1;"
+            );
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        6
+    );
+}
+
+#[test]
+fn rune_lexer_nested_block_comment() {
+    // Nested /* /* */ */ — only the outer close terminates.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(
+                "/* outer /* inner */ still inside */ x"
+            );
+            // Just Ident("x") + Eof = 2
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        2
+    );
+}
+
+#[test]
+fn rune_lexer_unterminated_block_comment_is_error() {
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("/* never closes");
+            match toks.get(0).kind {
+                lexer::Token::Error(_) => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_span_covers_int_lexeme() {
+    // Source: "  42  " — the Int token's span should be 2..4.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("  42  ");
+            // toks.get(0).span.start == 2 && .end == 4
+            let s: lexer::Span = toks.get(0).span;
+            if s.start == 2 { if s.end == 4 { 1 } else { 0 } } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_span_eof_at_end() {
+    // Eof token's span is [n, n) — both equal to source length.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let src: str = "hello";
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(src);
+            // Last token is Eof; its span.start should equal src.len()
+            let eof: lexer::Spanned = toks.get(toks.len() - 1);
+            if eof.span.start == src.len() {
+                if eof.span.end == src.len() { 1 } else { 0 }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_span_multi_char_op() {
+    // "==" should produce one token spanning [0, 2).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("==");
+            let s: lexer::Span = toks.get(0).span;
+            (s.end - s.start)
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        2
+    );
+}
+
+#[test]
 fn rune_lexer_string_literal_basic() {
     // "hello" lexes as one Str token + Eof.
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("\"hello\"");
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("\"hello\"");
             // Str("hello") + Eof = 2
             if toks.len() != 2 { return 0; }
-            match toks.get(0) {
+            match toks.get(0).kind {
                 lexer::Token::Str(s) => if s == "hello" { 1 } else { 0 },
                 _ => 0,
             }
@@ -6964,8 +7139,8 @@ fn rune_lexer_string_literal_with_escapes() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("\"a\\nb\"");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("\"a\\nb\"");
+            match toks.get(0).kind {
                 lexer::Token::Str(s) => s.len(),
                 _ => -1,
             }
@@ -6983,8 +7158,8 @@ fn rune_lexer_string_literal_escaped_quote() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("\"a\\\"b\"");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("\"a\\\"b\"");
+            match toks.get(0).kind {
                 lexer::Token::Str(s) => s.len(),
                 _ => -1,
             }
@@ -7002,8 +7177,8 @@ fn rune_lexer_string_literal_unterminated_is_error() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("\"hello");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("\"hello");
+            match toks.get(0).kind {
                 lexer::Token::Error(_) => 1,
                 _ => 0,
             }
@@ -7021,8 +7196,8 @@ fn rune_lexer_char_literal_basic() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("'a'");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("'a'");
+            match toks.get(0).kind {
                 lexer::Token::Char(b) => b as i64,
                 _ => -1,
             }
@@ -7040,8 +7215,8 @@ fn rune_lexer_char_literal_escape() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("'\\n'");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("'\\n'");
+            match toks.get(0).kind {
                 lexer::Token::Char(b) => b as i64,
                 _ => -1,
             }
@@ -7061,7 +7236,7 @@ fn rune_lexer_str_and_char_in_statement() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize(
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(
                 "let s = \"hi\\n\"; let c = 'a';"
             );
             toks.len()
@@ -7082,7 +7257,7 @@ fn rune_lexer_realistic_function_signature() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize(
+            let toks: Vec<lexer::Spanned> = lexer::tokenize(
                 "pub fn double(x: i64) -> i64 { x * 2 }"
             );
             toks.len()
@@ -7101,8 +7276,8 @@ fn rune_lexer_unknown_byte_becomes_error_token() {
     let main = r#"
         mod lexer;
         fn main() -> i64 {
-            let toks: Vec<lexer::Token> = lexer::tokenize("@");
-            match toks.get(0) {
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("@");
+            match toks.get(0).kind {
                 lexer::Token::Error(_) => 1,
                 _ => 0,
             }

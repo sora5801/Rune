@@ -353,9 +353,11 @@ shipped, `let-else` expressible via match.
 - **Session 130**: String and char literals with escape
   sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`).
 - **Session 131**: Float literals (`3.14`, `1e10`) + numeric
-  suffixes (`42i32`, `3.14f64`). Lexer is ~85% complete by
-  surface area.
-- **Next**: comments + source spans, then the parser.
+  suffixes (`42i32`, `3.14f64`).
+- **Session 132**: Comments (`//` line, `/* */` block with
+  nesting) + source spans on every token. **Lexer feature-
+  complete** (~370 LOC of Rune in one file).
+- **Next**: Pratt-style parser construction.
 
 See `examples/bootstrap/lexer.rn`. Per session 117's plan:
 ~25 more sessions to a working Rune-in-Rune tree-walking
