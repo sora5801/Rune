@@ -1614,6 +1614,90 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn for_tuple_pattern_over_entries() {
+    // Session 085: `for (k, v) in m.entries()` works directly,
+    // no `let (k, v) = kv` workaround. The lowerer threads
+    // session 074's expand_tuple_let_from_local into the
+    // Iterator-protocol desugar's some-arm body.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(5, 100);
+            m.insert(7, 200);
+            let mut total: i64 = 0;
+            for (k, v) in m.entries() {
+                total = total + k * v;
+            }
+            total
+        }
+    "#;
+    // 5*100 + 7*200 = 500 + 1400 = 1900
+    assert_eq!(run_main(src), 1900);
+}
+
+#[test]
+fn for_tuple_pattern_str_keyed_entries() {
+    // Tuple for-pattern over str-keyed HashMap entries.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("ab", 10);
+            m.insert("cde", 20);
+            let mut total: i64 = 0;
+            for (k, v) in m.entries() {
+                total = total + k.len() * v;
+            }
+            total
+        }
+    "#;
+    // "ab".len() * 10 + "cde".len() * 20 = 20 + 60 = 80
+    assert_eq!(run_main(src), 80);
+}
+
+#[test]
+fn for_tuple_pattern_with_wildcard() {
+    // A `_` sub-pattern skips that element's binding.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(1, 10);
+            m.insert(2, 20);
+            m.insert(3, 30);
+            let mut total: i64 = 0;
+            for (_, v) in m.entries() {
+                total = total + v;
+            }
+            total
+        }
+    "#;
+    // 10 + 20 + 30 = 60
+    assert_eq!(run_main(src), 60);
+}
+
+#[test]
+fn for_tuple_pattern_nested_lookup() {
+    // Use the entries iter to drive a per-key lookup, exercising
+    // the destructure-binds-in-body shape.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<i64, i64> = hashmap_new();
+            m.insert(2, 3);
+            m.insert(5, 7);
+            let lookup: std::HashMap<i64, i64> = hashmap_new();
+            lookup.insert(2, 100);
+            lookup.insert(5, 200);
+            let mut acc: i64 = 0;
+            for (k, v) in m.entries() {
+                acc = acc + v * lookup.get(k);
+            }
+            acc
+        }
+    "#;
+    // 3 * 100 + 7 * 200 = 300 + 1400 = 1700
+    assert_eq!(run_main(src), 1700);
+}
+
+#[test]
 fn hashmap_str_keys_iteration() {
     // Session 083: .keys() on a str-keyed HashMap yields each
     // live key as a str. The lowerer routes to

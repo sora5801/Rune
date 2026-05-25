@@ -331,8 +331,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
    `impl on i64/i32/f64/...` resolver restriction
 2. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
 3. Cartesian-product exhaustiveness for tuple patterns
-4. For-loop tuple patterns — `for (k, v) in m.entries()`
-5. Self-hosted bootstrap (long-term)
+4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

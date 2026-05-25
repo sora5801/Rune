@@ -1877,18 +1877,25 @@ impl<'a> Lowerer<'a> {
         iter: &ast::Expr,
         body: &ast::Block,
     ) -> HirExprKind {
+        // Session 085: tuple for-patterns (`for (k, v) in m.entries()
+        // { ... }`) are accepted on the Iterator-protocol path —
+        // they desugar by binding the iter Item to a fresh sym and
+        // then expanding the tuple-destructure inside the loop body
+        // (session 074's machinery). For the range/array fast
+        // paths, tuple patterns wouldn't typecheck anyway (scalar
+        // Item), so they keep rejecting.
         let local = match pat {
             ast::Pattern::Wildcard(_) => None,
             ast::Pattern::Ident { name, .. } => self.res.decl_to_sym.get(&name.span).copied(),
+            ast::Pattern::Tuple { .. } => None,
             ast::Pattern::Literal { .. }
             | ast::Pattern::Path { .. }
             | ast::Pattern::Range { .. }
             | ast::Pattern::TupleVariant { .. }
             | ast::Pattern::NamedVariant { .. }
-            | ast::Pattern::Tuple { .. }
             | ast::Pattern::Or { .. } => {
                 return HirExprKind::Unsupported(
-                    "for-loop pattern must be an identifier or `_`".into(),
+                    "for-loop pattern must be an identifier, `_`, or a tuple pattern".into(),
                 );
             }
         };
@@ -1948,6 +1955,7 @@ impl<'a> Lowerer<'a> {
                 if let Some(desugar) = self.lower_for_iterator(
                     Some(*struct_sym),
                     local,
+                    pat,
                     iter_hir.clone(),
                     body,
                 ) {
@@ -1963,6 +1971,7 @@ impl<'a> Lowerer<'a> {
                 if let Some(desugar) = self.lower_for_iterator(
                     None,
                     local,
+                    pat,
                     iter_hir.clone(),
                     body,
                 ) {
@@ -1990,6 +1999,7 @@ impl<'a> Lowerer<'a> {
         &self,
         struct_sym: Option<SymbolId>,
         local: Option<SymbolId>,
+        pat: &ast::Pattern,
         iter_hir: HirExpr,
         body: &ast::Block,
     ) -> Option<HirExprKind> {
@@ -2063,10 +2073,23 @@ impl<'a> Lowerer<'a> {
             ty: option_item_ty.clone(),
         };
 
-        // Some(__x) => { (if pat is `let x`, bind x); body; () }
+        // Some(__x) => { (if pat is `let x`, bind x; if pat is a
+        //               tuple, destructure x; if `_`, do nothing);
+        //               body; () }
         let x_sym = self.fresh_sym();
         let mut some_body_stmts: Vec<HirStmt> = Vec::new();
-        if let Some(user_sym) = local {
+        if let ast::Pattern::Tuple { patterns: tuple_patterns, .. } = pat {
+            // Session 085: tuple for-pattern. Expand the destructure
+            // against the freshly bound __x sym. Uses session 074's
+            // expand_tuple_let_from_local — same shape as
+            // `let (a, b) = kv` inside the loop body, just inlined.
+            self.expand_tuple_let_from_local(
+                tuple_patterns,
+                x_sym,
+                &item_ty,
+                &mut some_body_stmts,
+            );
+        } else if let Some(user_sym) = local {
             // Alias the user's pattern symbol to the freshly bound __x.
             some_body_stmts.push(HirStmt::Let(HirLet {
                 sym: Some(user_sym),
@@ -2244,6 +2267,24 @@ impl<'a> Lowerer<'a> {
                 }
                 Ty::Assoc(Box::new(new_base), name.clone())
             }
+            // Session 085: same gap session 075 patched in
+            // apply_subst_inner_with — Ty::Tuple / Ty::HashMap /
+            // Ty::Dyn need explicit element-wise substitution,
+            // otherwise inner TypeVars leak through the catch-all
+            // clone-as-is. Surfaced when a `HashMapEntriesIter<V>`
+            // for-loop substitutes V into its `type Item = (i64,
+            // V)` binding.
+            Ty::Tuple(elems) => Ty::Tuple(
+                elems.iter().map(|t| self.apply_subst_ty(t, subst)).collect(),
+            ),
+            Ty::HashMap(k, v) => Ty::HashMap(
+                Box::new(self.apply_subst_ty(k, subst)),
+                Box::new(self.apply_subst_ty(v, subst)),
+            ),
+            Ty::Dyn(s, args) => Ty::Dyn(
+                *s,
+                args.iter().map(|t| self.apply_subst_ty(t, subst)).collect(),
+            ),
             _ => ty.clone(),
         }
     }
