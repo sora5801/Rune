@@ -329,9 +329,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
    `.fold(init, +)` beyond i64
-2. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
-3. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
-4. Cartesian-product exhaustiveness for tuple patterns
+2. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+3. Cartesian-product exhaustiveness for tuple patterns
+4. For-loop tuple patterns — `for (k, v) in m.entries()`
 5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

@@ -1526,6 +1526,142 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn hashmap_str_keys_iteration() {
+    // Session 083: .keys() on a str-keyed HashMap yields each
+    // live key as a str. The lowerer routes to
+    // HashMapStrKeysIter; hashmap_key_at is now polymorphic on
+    // K so the iterator's body reads the right type.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("ab", 10);
+            m.insert("cde", 20);
+            m.insert("f", 30);
+            let mut total: i64 = 0;
+            for k in m.keys() {
+                total = total + k.len();
+            }
+            total
+        }
+    "#;
+    // 2 + 3 + 1 = 6
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn hashmap_str_entries_iteration() {
+    // .entries() on a str-keyed map yields (str, V) tuples.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("ab", 10);
+            m.insert("cde", 20);
+            m.insert("f", 30);
+            let mut total: i64 = 0;
+            for kv in m.entries() {
+                total = total + kv.0.len() + kv.1;
+            }
+            total
+        }
+    "#;
+    // (2+3+1) + (10+20+30) = 6 + 60 = 66
+    assert_eq!(run_main(src), 66);
+}
+
+#[test]
+fn hashmap_str_entries_destructure_in_for() {
+    // Tuple destructuring (session 074) over str-keyed entries.
+    // For-pattern itself only takes ident/_; the inner `let
+    // (k, v) = kv` does the unpack — same shape as the
+    // i64-keyed version.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("one", 100);
+            m.insert("two", 200);
+            let mut acc: i64 = 0;
+            for kv in m.entries() {
+                let (k, v) = kv;
+                acc = acc + k.len() * v;
+            }
+            acc
+        }
+    "#;
+    // "one"*100 + "two"*200 = 300 + 600 = 900
+    assert_eq!(run_main(src), 900);
+}
+
+#[test]
+fn hashmap_str_keys_after_remove_skips_tombstones() {
+    // The iterator's is_live_at check must skip occupied==2
+    // (tombstones), not just occupied==0.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("a", 1);
+            m.insert("b", 2);
+            m.insert("c", 3);
+            let _ = m.remove("b");
+            let mut count: i64 = 0;
+            for _ in m.keys() {
+                count = count + 1;
+            }
+            count
+        }
+    "#;
+    assert_eq!(run_main(src), 2);
+}
+
+#[test]
+fn hashmap_str_keys_iter_with_vec_values() {
+    // Mixed ARC keys + ARC values. Stress test: keys are
+    // retained when yielded from the iter, vals borrowed from
+    // the map. The runtime release walks live str keys at map
+    // drop; the synth per-V release walks Vec values.
+    let src = r#"
+        fn build() -> i64 {
+            let m: std::HashMap<str, Vec<i64>> = hashmap_str_new();
+            let v: Vec<i64> = vec_new();
+            v.push(5); v.push(7);
+            m.insert("xy", v);
+            let w: Vec<i64> = vec_new();
+            w.push(11);
+            m.insert("abc", w);
+            let mut total: i64 = 0;
+            for k in m.keys() {
+                total = total + k.len();
+            }
+            total
+        }
+        fn main() -> i64 {
+            let mut sum: i64 = 0;
+            for _ in 0..30 {
+                sum = sum + build();
+            }
+            sum
+        }
+    "#;
+    // per build: "xy".len() + "abc".len() = 2 + 3 = 5; 30 * 5 = 150.
+    assert_eq!(run_main(src), 150);
+}
+
+#[test]
+fn hashmap_str_entries_via_count_default_method() {
+    // Inherited Iterator default methods work on the str-keyed
+    // iterator structs. .count() comes from session 076.
+    let src = r#"
+        fn main() -> i64 {
+            let m: std::HashMap<str, i64> = hashmap_str_new();
+            m.insert("a", 1);
+            m.insert("b", 2);
+            m.insert("c", 3);
+            m.entries().count()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
 fn hashmap_count_distinct_via_insert() {
     // Idiom: count by inserting `1` (or += 1) on each occurrence.
     // Here we just insert once per key and read m.len() to confirm

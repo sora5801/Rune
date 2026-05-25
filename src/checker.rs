@@ -4038,8 +4038,13 @@ impl<'r> Checker<'r> {
                 Ty::Bool
             }
             "hashmap_key_at" => {
+                // Session 083: polymorphic on K. Returns the map's
+                // key type — `Ty::Int(I64)` for i64-keyed maps,
+                // `Ty::Str` for str-keyed. The runtime's
+                // `rune_hashmap_key_at` returns the raw 8-byte
+                // slot in both cases; only the Rune-side type
+                // changes.
                 if arg_tys.len() != 2
-                    || !matches!(arg_tys[0], Ty::HashMap(_, _) | Ty::Error)
                     || !matches!(arg_tys[1], Ty::Int(_) | Ty::Error)
                 {
                     self.error(
@@ -4048,7 +4053,17 @@ impl<'r> Checker<'r> {
                     );
                     return Ty::Error;
                 }
-                Ty::Int(crate::ty::IntTy::I64)
+                match &arg_tys[0] {
+                    Ty::HashMap(k, _) => (**k).clone(),
+                    Ty::Error => Ty::Error,
+                    _ => {
+                        self.error(
+                            span,
+                            "`hashmap_key_at(map, i)` expects (HashMap, i64)".to_string(),
+                        );
+                        Ty::Error
+                    }
+                }
             }
             "hashmap_val_at" => {
                 // Session 075: returns the V at slot `i`. Type is
@@ -4427,8 +4442,15 @@ impl<'r> Checker<'r> {
             }
         }
         if name == "keys" {
-            if let Ty::HashMap(_, v) = recv {
-                let keys_iter_sym = self.find_struct_sym("HashMapKeysIter")?;
+            if let Ty::HashMap(k, v) = recv {
+                // Session 083: dispatch on K. Str-keyed maps get
+                // a separate iterator struct because the field
+                // `map: HashMap<K, V>` is K-typed.
+                let iter_name = match k.as_ref() {
+                    Ty::Str => "HashMapStrKeysIter",
+                    _ => "HashMapKeysIter",
+                };
+                let keys_iter_sym = self.find_struct_sym(iter_name)?;
                 return Some(MethodSig {
                     params: vec![],
                     ret: Ty::Struct(keys_iter_sym, vec![(**v).clone()]),
@@ -4436,8 +4458,12 @@ impl<'r> Checker<'r> {
             }
         }
         if name == "entries" {
-            if let Ty::HashMap(_, v) = recv {
-                let entries_iter_sym = self.find_struct_sym("HashMapEntriesIter")?;
+            if let Ty::HashMap(k, v) = recv {
+                let iter_name = match k.as_ref() {
+                    Ty::Str => "HashMapStrEntriesIter",
+                    _ => "HashMapEntriesIter",
+                };
+                let entries_iter_sym = self.find_struct_sym(iter_name)?;
                 return Some(MethodSig {
                     params: vec![],
                     ret: Ty::Struct(entries_iter_sym, vec![(**v).clone()]),

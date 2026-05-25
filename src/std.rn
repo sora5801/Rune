@@ -293,6 +293,54 @@ pub mod std {
         }
     }
 
+    /* Session 083: str-keyed counterparts of the two iterators
+       above. The runtime layout is identical (one descriptor type,
+       branched on `key_kind`); only the Rune-side Key type differs.
+       Lowerer's `.keys()` / `.entries()` builtins dispatch on the
+       map's K (Ty::Str → these, Ty::Int(I64) → the i64 variants). */
+    pub struct HashMapStrKeysIter<V> {
+        map: HashMap<str, V>,
+        cursor: i64,
+    }
+
+    pub impl<V> Iterator for HashMapStrKeysIter<V> {
+        type Item = str;
+        fn next(self: HashMapStrKeysIter<V>) -> Option<str> {
+            let cap: i64 = hashmap_cap(self.map);
+            while self.cursor < cap {
+                if hashmap_is_live_at(self.map, self.cursor) {
+                    let k: str = hashmap_key_at(self.map, self.cursor);
+                    self.cursor = self.cursor + 1;
+                    return Option::Some(k);
+                }
+                self.cursor = self.cursor + 1;
+            }
+            Option::None
+        }
+    }
+
+    pub struct HashMapStrEntriesIter<V> {
+        map: HashMap<str, V>,
+        cursor: i64,
+    }
+
+    pub impl<V> Iterator for HashMapStrEntriesIter<V> {
+        type Item = (str, V);
+        fn next(self: HashMapStrEntriesIter<V>) -> Option<(str, V)> {
+            let cap: i64 = hashmap_cap(self.map);
+            while self.cursor < cap {
+                if hashmap_is_live_at(self.map, self.cursor) {
+                    let k: str = hashmap_key_at(self.map, self.cursor);
+                    let v: V = hashmap_val_at(self.map, self.cursor);
+                    self.cursor = self.cursor + 1;
+                    return Option::Some((k, v));
+                }
+                self.cursor = self.cursor + 1;
+            }
+            Option::None
+        }
+    }
+
     /* Adapter: yields `f(x)` for each `x` in the wrapped iterator.
        `F` is any one-argument callable — typically a closure literal
        (capturing or not) or a synthesized fn wrapper. The Fn1 bound

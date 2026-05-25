@@ -2393,16 +2393,24 @@ impl<'a> Lowerer<'a> {
     /// inspection fns (`hashmap_cap`, `hashmap_is_live_at`,
     /// `hashmap_key_at`), skipping non-live slots.
     fn lower_hashmap_keys(&self, receiver_hir: HirExpr) -> Option<HirExprKind> {
-        let v_ty = match &receiver_hir.ty {
-            Ty::HashMap(_, v) => (**v).clone(),
+        let (k_ty, v_ty) = match &receiver_hir.ty {
+            Ty::HashMap(k, v) => ((**k).clone(), (**v).clone()),
             _ => return None,
         };
-        let keys_sym = self.find_struct_sym("HashMapKeysIter")?;
+        // Session 083: route to the str-keyed iterator struct when
+        // the map's K is `Ty::Str`. Same layout shape (map + cursor
+        // fields), different K type — the iterator's `next` reads
+        // `hashmap_key_at` (polymorphic) and yields the right type.
+        let iter_name = match &k_ty {
+            Ty::Str => "HashMapStrKeysIter",
+            _ => "HashMapKeysIter",
+        };
+        let keys_sym = self.find_struct_sym(iter_name)?;
         let layout = self.check.struct_layouts.get(&keys_sym)?;
         let map_offset = layout.fields.iter().find(|f| f.name == "map").map(|f| f.offset)?;
         let cursor_offset =
             layout.fields.iter().find(|f| f.name == "cursor").map(|f| f.offset)?;
-        let map_ty_hir = Ty::HashMap(Box::new(Ty::Int(IntTy::I64)), Box::new(v_ty));
+        let map_ty_hir = Ty::HashMap(Box::new(k_ty), Box::new(v_ty));
         let cursor_lit = HirExpr {
             kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
             ty: Ty::Int(IntTy::I64),
@@ -2429,19 +2437,24 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Session 075: mirror of `lower_hashmap_keys` for the
-    /// entries iter. Yields `(i64, V)` tuples; the lowered
-    /// struct-lit fills the same map + cursor fields.
+    /// entries iter. Yields `(K, V)` tuples; the lowered
+    /// struct-lit fills the same map + cursor fields. Session
+    /// 083 routes to the str variant when K = Ty::Str.
     fn lower_hashmap_entries(&self, receiver_hir: HirExpr) -> Option<HirExprKind> {
-        let v_ty = match &receiver_hir.ty {
-            Ty::HashMap(_, v) => (**v).clone(),
+        let (k_ty, v_ty) = match &receiver_hir.ty {
+            Ty::HashMap(k, v) => ((**k).clone(), (**v).clone()),
             _ => return None,
         };
-        let entries_sym = self.find_struct_sym("HashMapEntriesIter")?;
+        let iter_name = match &k_ty {
+            Ty::Str => "HashMapStrEntriesIter",
+            _ => "HashMapEntriesIter",
+        };
+        let entries_sym = self.find_struct_sym(iter_name)?;
         let layout = self.check.struct_layouts.get(&entries_sym)?;
         let map_offset = layout.fields.iter().find(|f| f.name == "map").map(|f| f.offset)?;
         let cursor_offset =
             layout.fields.iter().find(|f| f.name == "cursor").map(|f| f.offset)?;
-        let map_ty_hir = Ty::HashMap(Box::new(Ty::Int(IntTy::I64)), Box::new(v_ty));
+        let map_ty_hir = Ty::HashMap(Box::new(k_ty), Box::new(v_ty));
         let cursor_lit = HirExpr {
             kind: HirExprKind::Lit(HirLit::Int(0, IntTy::I64)),
             ty: Ty::Int(IntTy::I64),
