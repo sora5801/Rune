@@ -1,38 +1,43 @@
-// Session 128 — first lexer module of the Rune-in-Rune bootstrap.
-// Tokenizes a subset of Rune source: identifiers, integers, the
-// most common single-char operators, and parens / braces / semi /
-// comma. Whitespace is skipped. Returns `Vec<Token>` ending in
-// `Token::Eof`.
+// Session 129 — extends the session-128 lexer with multi-char
+// operators (==, !=, <=, >=, &&, ||, ::, ->, =>) and keyword
+// recognition (fn, let, if, else, while, for, return, match,
+// struct, enum, trait, impl, pub, mod, use, mut, as, in, true,
+// false, break, continue).
 //
-// What's NOT here yet (future sessions):
-//   - Multi-char operators (==, !=, <=, &&, ::, ->, =>, ..)
-//   - String / char literals
-//   - Float literals
-//   - Keyword recognition (Ident covers everything that looks like an
-//     identifier; the parser-side will dispatch on byte content)
-//   - Comments
-//   - Spans (each token carries no source position yet)
+// The single-char token set and core tokenize loop carry over
+// from session 128; this session bolts on:
+//   - Lookahead via `peek_byte(src, j, n)` for the `=`/`!`/`<`/
+//     `>`/`&`/`|`/`:`/`-` lead bytes that may form 2-char tokens.
+//   - `keyword_of(name) -> Token` that maps a recognized keyword
+//     lexeme to its Token, falling through to `Token::Ident(name)`
+//     for non-keywords.
 //
-// The point of this session is to ship a real, runnable Rune program
-// that tokenizes a meaningful subset, demonstrating that Phase 2 of
-// the self-hosted bootstrap is feasible.
+// Still NOT here (future sessions): string/char literals, float
+// literals, numeric suffixes, comments, source spans.
 
 pub enum Token {
     Ident(str),
     Int(i64),
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Eq,
-    Semi,
-    Comma,
+
+    // Single-char operators and punctuation.
+    LParen, RParen, LBrace, RBrace,
+    Plus, Minus, Star, Slash, Percent,
+    Eq, Semi, Comma, Dot,
+    Lt, Gt, Bang, Amp, Pipe, Colon,
+
+    // Multi-char operators.
+    EqEq, BangEq, LtEq, GtEq,
+    AmpAmp, PipePipe,
+    ColonColon, Arrow, FatArrow,
+
+    // Keywords. The lexer reclassifies a matching Ident lexeme
+    // into one of these via `keyword_of`.
+    Fn, Let, If, Else, While, For, Return, Match,
+    Struct, Enum, Trait, Impl, Pub, Mod, Use, Mut, As, In,
+    True, False, Break, Continue,
+
     Eof,
-    Error(str),   // for unknown bytes
+    Error(str),
 }
 
 // ---- character classifiers ----
@@ -40,19 +45,49 @@ pub enum Token {
 fn is_whitespace(b: u8) -> bool {
     b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8
 }
-
-fn is_digit(b: u8) -> bool {
-    b >= 48u8 && b <= 57u8     // '0'..='9'
-}
-
+fn is_digit(b: u8) -> bool { b >= 48u8 && b <= 57u8 }
 fn is_alpha(b: u8) -> bool {
-    (b >= 65u8 && b <= 90u8)   // 'A'..='Z'
-        || (b >= 97u8 && b <= 122u8)  // 'a'..='z'
-        || b == 95u8                  // '_'
+    (b >= 65u8 && b <= 90u8) || (b >= 97u8 && b <= 122u8) || b == 95u8
+}
+fn is_alnum(b: u8) -> bool { is_alpha(b) || is_digit(b) }
+
+// Bounds-safe lookahead. Returns 0 when j is past the end, which
+// is fine because no legitimate operator's continuation byte is 0.
+fn peek_byte(src: str, j: i64, n: i64) -> u8 {
+    if j < n { src.byte_at(j) } else { 0u8 }
 }
 
-fn is_alnum(b: u8) -> bool {
-    is_alpha(b) || is_digit(b)
+// ---- keyword recognition ----
+//
+// Maps a recognized keyword lexeme to its Token; returns
+// Token::Ident(name) for non-keywords. The order here doesn't
+// matter — match arms are checked sequentially but each compares
+// against a distinct literal. A real lexer would speed this up
+// with a hash, but for v0.x's bootstrap a 22-arm match is fine.
+pub fn keyword_of(name: str) -> Token {
+    if name == "fn" { return Token::Fn; }
+    if name == "let" { return Token::Let; }
+    if name == "if" { return Token::If; }
+    if name == "else" { return Token::Else; }
+    if name == "while" { return Token::While; }
+    if name == "for" { return Token::For; }
+    if name == "return" { return Token::Return; }
+    if name == "match" { return Token::Match; }
+    if name == "struct" { return Token::Struct; }
+    if name == "enum" { return Token::Enum; }
+    if name == "trait" { return Token::Trait; }
+    if name == "impl" { return Token::Impl; }
+    if name == "pub" { return Token::Pub; }
+    if name == "mod" { return Token::Mod; }
+    if name == "use" { return Token::Use; }
+    if name == "mut" { return Token::Mut; }
+    if name == "as" { return Token::As; }
+    if name == "in" { return Token::In; }
+    if name == "true" { return Token::True; }
+    if name == "false" { return Token::False; }
+    if name == "break" { return Token::Break; }
+    if name == "continue" { return Token::Continue; }
+    Token::Ident(name)
 }
 
 // ---- main tokenizer ----
@@ -64,7 +99,6 @@ pub fn tokenize(src: str) -> Vec<Token> {
     while i < n {
         let b: u8 = src.byte_at(i);
 
-        // Whitespace — just advance.
         if is_whitespace(b) {
             i = i + 1;
             continue;
@@ -73,52 +107,145 @@ pub fn tokenize(src: str) -> Vec<Token> {
         // Integer literal.
         if is_digit(b) {
             let mut j: i64 = i;
-            while j < n {
-                let bb: u8 = src.byte_at(j);
-                if is_digit(bb) {
-                    j = j + 1;
-                } else {
-                    break;
-                }
+            while j < n && is_digit(src.byte_at(j)) {
+                j = j + 1;
             }
-            let lexeme: str = src[i..j];
-            tokens.push(Token::Int(i64::from_str(lexeme)));
+            tokens.push(Token::Int(i64::from_str(src[i..j])));
             i = j;
             continue;
         }
 
-        // Identifier (and would-be keyword) — start with alpha or _,
-        // continue with alnum.
+        // Identifier-or-keyword.
         if is_alpha(b) {
             let mut j: i64 = i;
-            while j < n {
-                let bb: u8 = src.byte_at(j);
-                if is_alnum(bb) {
-                    j = j + 1;
-                } else {
-                    break;
-                }
+            while j < n && is_alnum(src.byte_at(j)) {
+                j = j + 1;
             }
-            let lexeme: str = src[i..j];
-            tokens.push(Token::Ident(lexeme));
+            tokens.push(keyword_of(src[i..j]));
             i = j;
             continue;
         }
 
-        // Single-char operators / punctuation.
+        // Two-char operators. Lookahead at i+1; if it matches a
+        // two-char shape, consume two bytes; otherwise produce
+        // the one-char fallback.
+        let next: u8 = peek_byte(src, i + 1, n);
+
+        // `==`, `=`, `=>`
+        if b == 61u8 {           // '='
+            if next == 61u8 {    // "=="
+                tokens.push(Token::EqEq);
+                i = i + 2;
+                continue;
+            }
+            if next == 62u8 {    // "=>"
+                tokens.push(Token::FatArrow);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Eq);
+            i = i + 1;
+            continue;
+        }
+
+        // `!=`, `!`
+        if b == 33u8 {           // '!'
+            if next == 61u8 {
+                tokens.push(Token::BangEq);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Bang);
+            i = i + 1;
+            continue;
+        }
+
+        // `<=`, `<`
+        if b == 60u8 {
+            if next == 61u8 {
+                tokens.push(Token::LtEq);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Lt);
+            i = i + 1;
+            continue;
+        }
+
+        // `>=`, `>`
+        if b == 62u8 {
+            if next == 61u8 {
+                tokens.push(Token::GtEq);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Gt);
+            i = i + 1;
+            continue;
+        }
+
+        // `&&`, `&`
+        if b == 38u8 {
+            if next == 38u8 {
+                tokens.push(Token::AmpAmp);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Amp);
+            i = i + 1;
+            continue;
+        }
+
+        // `||`, `|`
+        if b == 124u8 {
+            if next == 124u8 {
+                tokens.push(Token::PipePipe);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Pipe);
+            i = i + 1;
+            continue;
+        }
+
+        // `::`, `:`
+        if b == 58u8 {
+            if next == 58u8 {
+                tokens.push(Token::ColonColon);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Colon);
+            i = i + 1;
+            continue;
+        }
+
+        // `->`, `-`
+        if b == 45u8 {
+            if next == 62u8 {
+                tokens.push(Token::Arrow);
+                i = i + 2;
+                continue;
+            }
+            tokens.push(Token::Minus);
+            i = i + 1;
+            continue;
+        }
+
+        // Plain single-char operators / punctuation.
         let t: Token = match b {
-            40u8  => Token::LParen,  // '('
-            41u8  => Token::RParen,  // ')'
-            123u8 => Token::LBrace,  // '{'
-            125u8 => Token::RBrace,  // '}'
-            43u8  => Token::Plus,    // '+'
-            45u8  => Token::Minus,   // '-'
-            42u8  => Token::Star,    // '*'
-            47u8  => Token::Slash,   // '/'
-            61u8  => Token::Eq,      // '='
-            59u8  => Token::Semi,    // ';'
-            44u8  => Token::Comma,   // ','
-            _     => Token::Error(src[i..i+1]),
+            40u8 => Token::LParen,
+            41u8 => Token::RParen,
+            123u8 => Token::LBrace,
+            125u8 => Token::RBrace,
+            43u8 => Token::Plus,
+            42u8 => Token::Star,
+            47u8 => Token::Slash,
+            37u8 => Token::Percent,
+            59u8 => Token::Semi,
+            44u8 => Token::Comma,
+            46u8 => Token::Dot,
+            _ => Token::Error(src[i..i+1]),
         };
         tokens.push(t);
         i = i + 1;
@@ -127,26 +254,35 @@ pub fn tokenize(src: str) -> Vec<Token> {
     tokens
 }
 
-// ---- helper for tests: a string description of a token's kind ----
-//
-// Codegen tests over the bootstrap lexer compare against these
-// labels rather than reaching into the enum variant — keeps the
-// tests robust to variant additions.
+// Convenience for tests: a stable string label per token kind.
+// Tests compare against these labels rather than reaching into
+// variant payloads, keeping them robust to enum reordering.
 pub fn kind_of(t: Token) -> str {
     match t {
         Token::Ident(_) => "Ident",
         Token::Int(_) => "Int",
-        Token::LParen => "LParen",
-        Token::RParen => "RParen",
-        Token::LBrace => "LBrace",
-        Token::RBrace => "RBrace",
-        Token::Plus => "Plus",
-        Token::Minus => "Minus",
-        Token::Star => "Star",
-        Token::Slash => "Slash",
-        Token::Eq => "Eq",
-        Token::Semi => "Semi",
-        Token::Comma => "Comma",
+        Token::LParen => "LParen", Token::RParen => "RParen",
+        Token::LBrace => "LBrace", Token::RBrace => "RBrace",
+        Token::Plus => "Plus", Token::Minus => "Minus",
+        Token::Star => "Star", Token::Slash => "Slash", Token::Percent => "Percent",
+        Token::Eq => "Eq", Token::Semi => "Semi", Token::Comma => "Comma",
+        Token::Dot => "Dot",
+        Token::Lt => "Lt", Token::Gt => "Gt", Token::Bang => "Bang",
+        Token::Amp => "Amp", Token::Pipe => "Pipe", Token::Colon => "Colon",
+        Token::EqEq => "EqEq", Token::BangEq => "BangEq",
+        Token::LtEq => "LtEq", Token::GtEq => "GtEq",
+        Token::AmpAmp => "AmpAmp", Token::PipePipe => "PipePipe",
+        Token::ColonColon => "ColonColon",
+        Token::Arrow => "Arrow", Token::FatArrow => "FatArrow",
+        Token::Fn => "Fn", Token::Let => "Let", Token::If => "If",
+        Token::Else => "Else", Token::While => "While", Token::For => "For",
+        Token::Return => "Return", Token::Match => "Match",
+        Token::Struct => "Struct", Token::Enum => "Enum",
+        Token::Trait => "Trait", Token::Impl => "Impl",
+        Token::Pub => "Pub", Token::Mod => "Mod", Token::Use => "Use",
+        Token::Mut => "Mut", Token::As => "As", Token::In => "In",
+        Token::True => "True", Token::False => "False",
+        Token::Break => "Break", Token::Continue => "Continue",
         Token::Eof => "Eof",
         Token::Error(_) => "Error",
     }

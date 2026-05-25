@@ -344,14 +344,18 @@ shipped, `let-else` expressible via match.
 
 **Phase 2 — Rune-in-Rune interpreter** (in progress).
 
-- **Session 128**: First lexer module — tokenizes Rune source
-  into `Vec<Token>` via byte-walk. See `examples/bootstrap/`.
-- **Next**: multi-char operators + keyword recognition, then
-  string/char/float literals, then comments + source spans,
-  then the parser.
+- **Session 128**: First lexer — tokenizes single-char ops,
+  idents, integer literals.
+- **Session 129**: Multi-char operators (`==`, `!=`, `<=`,
+  `&&`, `||`, `::`, `->`, `=>`) + 22 keyword tokens (`fn`,
+  `let`, `if`, `else`, `match`, `pub`, ...). The lexer now
+  tokenizes `pub fn double(x: i64) -> i64 { x * 2 }` correctly.
+- **Next**: string/char literals, float literals, comments +
+  source spans, then the parser.
 
-Per session 117's plan: ~30 more sessions to a working Rune-
-in-Rune tree-walking interpreter.
+See `examples/bootstrap/lexer.rn`. Per session 117's plan:
+~25 more sessions to a working Rune-in-Rune tree-walking
+interpreter.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

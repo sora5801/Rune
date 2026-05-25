@@ -6293,8 +6293,15 @@ pub enum Token {
     Ident(str),
     Int(i64),
     LParen, RParen, LBrace, RBrace,
-    Plus, Minus, Star, Slash,
-    Eq, Semi, Comma,
+    Plus, Minus, Star, Slash, Percent,
+    Eq, Semi, Comma, Dot,
+    Lt, Gt, Bang, Amp, Pipe, Colon,
+    EqEq, BangEq, LtEq, GtEq,
+    AmpAmp, PipePipe,
+    ColonColon, Arrow, FatArrow,
+    Fn, Let, If, Else, While, For, Return, Match,
+    Struct, Enum, Trait, Impl, Pub, Mod, Use, Mut, As, In,
+    True, False, Break, Continue,
     Eof,
     Error(str),
 }
@@ -6308,6 +6315,36 @@ fn is_alpha(b: u8) -> bool {
 }
 fn is_alnum(b: u8) -> bool { is_alpha(b) || is_digit(b) }
 
+fn peek_byte(src: str, j: i64, n: i64) -> u8 {
+    if j < n { src.byte_at(j) } else { 0u8 }
+}
+
+pub fn keyword_of(name: str) -> Token {
+    if name == "fn" { return Token::Fn; }
+    if name == "let" { return Token::Let; }
+    if name == "if" { return Token::If; }
+    if name == "else" { return Token::Else; }
+    if name == "while" { return Token::While; }
+    if name == "for" { return Token::For; }
+    if name == "return" { return Token::Return; }
+    if name == "match" { return Token::Match; }
+    if name == "struct" { return Token::Struct; }
+    if name == "enum" { return Token::Enum; }
+    if name == "trait" { return Token::Trait; }
+    if name == "impl" { return Token::Impl; }
+    if name == "pub" { return Token::Pub; }
+    if name == "mod" { return Token::Mod; }
+    if name == "use" { return Token::Use; }
+    if name == "mut" { return Token::Mut; }
+    if name == "as" { return Token::As; }
+    if name == "in" { return Token::In; }
+    if name == "true" { return Token::True; }
+    if name == "false" { return Token::False; }
+    if name == "break" { return Token::Break; }
+    if name == "continue" { return Token::Continue; }
+    Token::Ident(name)
+}
+
 pub fn tokenize(src: str) -> Vec<Token> {
     let tokens: Vec<Token> = vec_new();
     let mut i: i64 = 0;
@@ -6317,28 +6354,58 @@ pub fn tokenize(src: str) -> Vec<Token> {
         if is_whitespace(b) { i = i + 1; continue; }
         if is_digit(b) {
             let mut j: i64 = i;
-            while j < n {
-                if is_digit(src.byte_at(j)) { j = j + 1; } else { break; }
-            }
+            while j < n && is_digit(src.byte_at(j)) { j = j + 1; }
             tokens.push(Token::Int(i64::from_str(src[i..j])));
             i = j;
             continue;
         }
         if is_alpha(b) {
             let mut j: i64 = i;
-            while j < n {
-                if is_alnum(src.byte_at(j)) { j = j + 1; } else { break; }
-            }
-            tokens.push(Token::Ident(src[i..j]));
+            while j < n && is_alnum(src.byte_at(j)) { j = j + 1; }
+            tokens.push(keyword_of(src[i..j]));
             i = j;
             continue;
+        }
+        let next: u8 = peek_byte(src, i + 1, n);
+        if b == 61u8 {
+            if next == 61u8 { tokens.push(Token::EqEq); i = i + 2; continue; }
+            if next == 62u8 { tokens.push(Token::FatArrow); i = i + 2; continue; }
+            tokens.push(Token::Eq); i = i + 1; continue;
+        }
+        if b == 33u8 {
+            if next == 61u8 { tokens.push(Token::BangEq); i = i + 2; continue; }
+            tokens.push(Token::Bang); i = i + 1; continue;
+        }
+        if b == 60u8 {
+            if next == 61u8 { tokens.push(Token::LtEq); i = i + 2; continue; }
+            tokens.push(Token::Lt); i = i + 1; continue;
+        }
+        if b == 62u8 {
+            if next == 61u8 { tokens.push(Token::GtEq); i = i + 2; continue; }
+            tokens.push(Token::Gt); i = i + 1; continue;
+        }
+        if b == 38u8 {
+            if next == 38u8 { tokens.push(Token::AmpAmp); i = i + 2; continue; }
+            tokens.push(Token::Amp); i = i + 1; continue;
+        }
+        if b == 124u8 {
+            if next == 124u8 { tokens.push(Token::PipePipe); i = i + 2; continue; }
+            tokens.push(Token::Pipe); i = i + 1; continue;
+        }
+        if b == 58u8 {
+            if next == 58u8 { tokens.push(Token::ColonColon); i = i + 2; continue; }
+            tokens.push(Token::Colon); i = i + 1; continue;
+        }
+        if b == 45u8 {
+            if next == 62u8 { tokens.push(Token::Arrow); i = i + 2; continue; }
+            tokens.push(Token::Minus); i = i + 1; continue;
         }
         let t: Token = match b {
             40u8 => Token::LParen, 41u8 => Token::RParen,
             123u8 => Token::LBrace, 125u8 => Token::RBrace,
-            43u8 => Token::Plus, 45u8 => Token::Minus,
-            42u8 => Token::Star, 47u8 => Token::Slash,
-            61u8 => Token::Eq, 59u8 => Token::Semi, 44u8 => Token::Comma,
+            43u8 => Token::Plus,
+            42u8 => Token::Star, 47u8 => Token::Slash, 37u8 => Token::Percent,
+            59u8 => Token::Semi, 44u8 => Token::Comma, 46u8 => Token::Dot,
             _ => Token::Error(src[i..i+1]),
         };
         tokens.push(t);
@@ -6454,6 +6521,170 @@ fn rune_lexer_punctuation_each_char() {
     assert_eq!(
         run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
         12
+    );
+}
+
+#[test]
+fn rune_lexer_recognizes_keywords() {
+    // "fn let if else" produces 4 distinct keyword tokens + Eof.
+    // Verify by checking the first token is Token::Fn (not Ident).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("fn let if else");
+            match toks.get(0) {
+                lexer::Token::Fn => 1,
+                lexer::Token::Ident(_) => 0,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_keyword_vs_ident_disambiguation() {
+    // "fn foo" yields Token::Fn followed by Token::Ident("foo")
+    // — keyword recognition shouldn't swallow non-keyword names
+    // that happen to share a prefix.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("fn function");
+            let first_is_fn: bool = match toks.get(0) {
+                lexer::Token::Fn => true,
+                _ => false,
+            };
+            let second_is_ident: bool = match toks.get(1) {
+                lexer::Token::Ident(name) => name == "function",
+                _ => false,
+            };
+            if first_is_fn { if second_is_ident { 1 } else { 0 } } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_two_char_eq_eq() {
+    // "==" lexes as one EqEq token (not two Eq tokens).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("==");
+            // Should be EqEq + Eof = 2 tokens
+            if toks.len() == 2 {
+                match toks.get(0) {
+                    lexer::Token::EqEq => 1,
+                    _ => 0,
+                }
+            } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_two_char_arrows() {
+    // "->" → Arrow, "=>" → FatArrow. Both 2-char tokens.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("-> =>");
+            // Arrow + FatArrow + Eof = 3
+            if toks.len() != 3 { return 0; }
+            let a_ok: bool = match toks.get(0) {
+                lexer::Token::Arrow => true,
+                _ => false,
+            };
+            let b_ok: bool = match toks.get(1) {
+                lexer::Token::FatArrow => true,
+                _ => false,
+            };
+            if a_ok { if b_ok { 1 } else { 0 } } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_two_char_logical_ops() {
+    // "&&" and "||" lex as AmpAmp / PipePipe, not as paired
+    // single-char tokens.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("&& ||");
+            if toks.len() != 3 { return 0; }
+            let a_ok: bool = match toks.get(0) {
+                lexer::Token::AmpAmp => true,
+                _ => false,
+            };
+            let b_ok: bool = match toks.get(1) {
+                lexer::Token::PipePipe => true,
+                _ => false,
+            };
+            if a_ok { if b_ok { 1 } else { 0 } } else { 0 }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_single_char_op_after_lookahead_fails() {
+    // "=x" — the = isn't followed by another = or >, so we fall
+    // back to a single Eq token, then the Ident.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("=x");
+            // Eq + Ident + Eof = 3
+            if toks.len() != 3 { return 0; }
+            match toks.get(0) {
+                lexer::Token::Eq => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_realistic_function_signature() {
+    // A real Rune fragment: `pub fn double(x: i64) -> i64 { x * 2 }`
+    // Token sequence: Pub Fn Ident("double") LParen Ident("x")
+    //                 Colon Ident("i64") RParen Arrow Ident("i64")
+    //                 LBrace Ident("x") Star Int(2) RBrace Eof = 16
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize(
+                "pub fn double(x: i64) -> i64 { x * 2 }"
+            );
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        16
     );
 }
 
