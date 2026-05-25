@@ -952,6 +952,95 @@ fn as_cast_chain_through_bindings() {
 }
 
 #[test]
+fn shift_left_at_bit_width_rejected() {
+    // Session 110: `1i64 << 64` has b == bit_width(i64); Cranelift
+    // / LLVM treat this as UB. Diagnose at typecheck.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: i64 = 1 << 64;
+            x
+        }
+        "#,
+        "left shift amount `64` is out of range for `i64`",
+    );
+}
+
+#[test]
+fn shift_left_above_bit_width_rejected() {
+    // `1i32 << 32` is also UB — i32's bit width is 32.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: i32 = 1i32 << 32;
+            x as i64
+        }
+        "#,
+        "left shift amount `32` is out of range for `i32`",
+    );
+}
+
+#[test]
+fn shift_right_above_bit_width_rejected() {
+    // Right-shift mirrors left-shift; the diagnostic names "right".
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: u8 = 200u8 >> 8;
+            x as i64
+        }
+        "#,
+        "right shift amount `8` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn shift_negative_amount_rejected() {
+    // Negative shift amounts are also undefined.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let n: i64 = -1;
+            let x: i64 = 1 << n;
+            x
+        }
+        "#,
+        "left shift amount `-1` is out of range",
+    );
+}
+
+#[test]
+fn shift_through_const_tracked_binding_rejected() {
+    // Cross-let const-eval (session 106) flows in: the shift
+    // amount is recorded then matched against the bit width.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let amt: i64 = 100;
+            let x: i64 = 1 << amt;
+            x
+        }
+        "#,
+        "left shift amount `100` is out of range for `i64`",
+    );
+}
+
+#[test]
+fn shift_inside_bit_width_accepted() {
+    // Positive controls: shifts within bit width compile cleanly.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: i64 = 1 << 63;
+            let b: i32 = 1i32 << 31;
+            let c: u8 = 1u8 << 7;
+            (a >> 60) + (b as i64) + (c as i64)
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

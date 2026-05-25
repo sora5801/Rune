@@ -2279,6 +2279,34 @@ impl<'r> Checker<'r> {
                     self.error(span, format!("{} by zero", opname));
                 }
             }
+            // Session 110: shift-out-of-range diagnostic. `x << 64`
+            // on a u64 or `1i8 << 8` is undefined per Cranelift's
+            // ishl/ushr semantics; catch it at typecheck when the
+            // shift amount const-evals. The bit width comes from
+            // the *result* type which equals lhs's type for shifts.
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                if let Some(b) = self.const_eval_int(rhs) {
+                    let bits = int_bit_width(*result_ty);
+                    if b < 0 || b >= bits as i64 {
+                        let opname = if matches!(op, BinOp::Shl) {
+                            "left"
+                        } else {
+                            "right"
+                        };
+                        self.error(
+                            span,
+                            format!(
+                                "{} shift amount `{}` is out of range for `{}` \
+                                 (must be 0..{})",
+                                opname,
+                                b,
+                                result_ty.name(),
+                                bits,
+                            ),
+                        );
+                    }
+                }
+            }
             if matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
@@ -2288,6 +2316,7 @@ impl<'r> Checker<'r> {
                 if let (Some(a), Some(b)) =
                     (self.const_eval_int(lhs), self.const_eval_int(rhs))
                 {
+                    let bits = int_bit_width(*result_ty) as i64;
                     let result = match op {
                         BinOp::Add => a.checked_add(b),
                         BinOp::Sub => a.checked_sub(b),
@@ -2297,28 +2326,37 @@ impl<'r> Checker<'r> {
                         BinOp::BitAnd => Some(a & b),
                         BinOp::BitOr => Some(a | b),
                         BinOp::BitXor => Some(a ^ b),
-                        BinOp::Shl if b >= 0 && b < 64 => a.checked_shl(b as u32),
-                        BinOp::Shr if b >= 0 && b < 64 => a.checked_shr(b as u32),
+                        BinOp::Shl if b >= 0 && b < bits => a.checked_shl(b as u32),
+                        BinOp::Shr if b >= 0 && b < bits => a.checked_shr(b as u32),
                         _ => None,
                     };
                     if let Some(v) = result {
-                        // `check_int_value_in_range` was designed for
-                        // source literals (magnitude + sign flag). A
-                        // compound binop result is signed: translate
-                        // to (magnitude, negated) before checking.
-                        // i64::MIN can't be negated so we silently
-                        // skip — it fits no signed type narrower than
-                        // i64, and i64 always fits.
-                        if v < 0 {
-                            if let Some(neg) = v.checked_neg() {
+                        // Shifts produce intentional bit patterns
+                        // (`1i32 << 31 = i32::MIN`, computed in i64
+                        // as 2147483648). Skip the range check for
+                        // them — the session-110 out-of-range check
+                        // above already catches the misuses.
+                        let skip_range = matches!(op, BinOp::Shl | BinOp::Shr);
+                        if !skip_range {
+                            // `check_int_value_in_range` was designed
+                            // for source literals (magnitude + sign).
+                            // A compound binop result is signed:
+                            // translate to (magnitude, negated)
+                            // before checking. i64::MIN can't be
+                            // negated so we silently skip — it fits
+                            // no signed type narrower than i64, and
+                            // i64 always fits.
+                            if v < 0 {
+                                if let Some(neg) = v.checked_neg() {
+                                    self.check_int_value_in_range(
+                                        neg, *result_ty, true, span,
+                                    );
+                                }
+                            } else {
                                 self.check_int_value_in_range(
-                                    neg, *result_ty, true, span,
+                                    v, *result_ty, false, span,
                                 );
                             }
-                        } else {
-                            self.check_int_value_in_range(
-                                v, *result_ty, false, span,
-                            );
                         }
                     }
                 }
@@ -3280,6 +3318,31 @@ impl<'r> Checker<'r> {
                     self.error(span, format!("{} by zero", opname));
                 }
             }
+            // Session 110: shift-out-of-range diagnostic (same
+            // shape as finish_binary's).
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                if let Some(b) = self.const_eval_int(rhs) {
+                    let bits = int_bit_width(*result_ty);
+                    if b < 0 || b >= bits as i64 {
+                        let opname = if matches!(op, BinOp::Shl) {
+                            "left"
+                        } else {
+                            "right"
+                        };
+                        self.error(
+                            span,
+                            format!(
+                                "{} shift amount `{}` is out of range for `{}` \
+                                 (must be 0..{})",
+                                opname,
+                                b,
+                                result_ty.name(),
+                                bits,
+                            ),
+                        );
+                    }
+                }
+            }
             if matches!(
                 op,
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
@@ -3289,6 +3352,7 @@ impl<'r> Checker<'r> {
                 if let (Some(a), Some(b)) =
                     (self.const_eval_int(lhs), self.const_eval_int(rhs))
                 {
+                    let bits = int_bit_width(*result_ty) as i64;
                     let result = match op {
                         BinOp::Add => a.checked_add(b),
                         BinOp::Sub => a.checked_sub(b),
@@ -3298,28 +3362,37 @@ impl<'r> Checker<'r> {
                         BinOp::BitAnd => Some(a & b),
                         BinOp::BitOr => Some(a | b),
                         BinOp::BitXor => Some(a ^ b),
-                        BinOp::Shl if b >= 0 && b < 64 => a.checked_shl(b as u32),
-                        BinOp::Shr if b >= 0 && b < 64 => a.checked_shr(b as u32),
+                        BinOp::Shl if b >= 0 && b < bits => a.checked_shl(b as u32),
+                        BinOp::Shr if b >= 0 && b < bits => a.checked_shr(b as u32),
                         _ => None,
                     };
                     if let Some(v) = result {
-                        // `check_int_value_in_range` was designed for
-                        // source literals (magnitude + sign flag). A
-                        // compound binop result is signed: translate
-                        // to (magnitude, negated) before checking.
-                        // i64::MIN can't be negated so we silently
-                        // skip — it fits no signed type narrower than
-                        // i64, and i64 always fits.
-                        if v < 0 {
-                            if let Some(neg) = v.checked_neg() {
+                        // Shifts produce intentional bit patterns
+                        // (`1i32 << 31 = i32::MIN`, computed in i64
+                        // as 2147483648). Skip the range check for
+                        // them — the session-110 out-of-range check
+                        // above already catches the misuses.
+                        let skip_range = matches!(op, BinOp::Shl | BinOp::Shr);
+                        if !skip_range {
+                            // `check_int_value_in_range` was designed
+                            // for source literals (magnitude + sign).
+                            // A compound binop result is signed:
+                            // translate to (magnitude, negated)
+                            // before checking. i64::MIN can't be
+                            // negated so we silently skip — it fits
+                            // no signed type narrower than i64, and
+                            // i64 always fits.
+                            if v < 0 {
+                                if let Some(neg) = v.checked_neg() {
+                                    self.check_int_value_in_range(
+                                        neg, *result_ty, true, span,
+                                    );
+                                }
+                            } else {
                                 self.check_int_value_in_range(
-                                    neg, *result_ty, true, span,
+                                    v, *result_ty, false, span,
                                 );
                             }
-                        } else {
-                            self.check_int_value_in_range(
-                                v, *result_ty, false, span,
-                            );
                         }
                     }
                     // If checked_* returned None, i64 overflowed
@@ -6268,6 +6341,20 @@ fn enum_generic_args(
 
 fn is_printable(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Str)
+}
+
+/// Session 110: bit width of an integer type. Used by the shift-
+/// out-of-range diagnostic and the const-eval shift gate. `isize` /
+/// `usize` are 64-bit on every target Rune supports today (x86-64
+/// and aarch64); update if 32-bit targets land.
+fn int_bit_width(t: crate::ty::IntTy) -> u32 {
+    use crate::ty::IntTy::*;
+    match t {
+        I8 | U8 => 8,
+        I16 | U16 => 16,
+        I32 | U32 => 32,
+        I64 | U64 | ISize | USize => 64,
+    }
 }
 
 /// Session 109: const-eval `v as <to>` for integer targets.
