@@ -2508,6 +2508,59 @@ impl<'r> Checker<'r> {
     /// before negation is one larger than the positive range).
     /// Unsigned types reject any negation. Bare integers (no
     /// suffix) and float literals skip the check.
+    /// Session 102: best-effort const-evaluation for integer
+    /// expressions. Returns `Some(v)` when the expression is pure
+    /// literal arithmetic (with optional suffix), `None` otherwise.
+    /// Operands are evaluated as i64; arithmetic uses `checked_*`
+    /// so an i64-level overflow bails out (returns None) rather
+    /// than wrapping silently. The caller then range-checks the
+    /// returned value against the binop's result type.
+    ///
+    /// Supports: integer literals (suffixed or bare), unary neg,
+    /// binary +/-/*/div/mod and bitwise &/|/^ and shifts. Anything
+    /// else (paths, calls, casts, method calls) returns None — the
+    /// expression isn't a compile-time constant.
+    fn const_eval_int(&self, e: &Expr) -> Option<i64> {
+        match e {
+            Expr::Lit { lit: Lit::Int(v, _), .. } => Some(*v),
+            Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => {
+                let v = self.const_eval_int(expr)?;
+                v.checked_neg()
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let a = self.const_eval_int(lhs)?;
+                let b = self.const_eval_int(rhs)?;
+                use crate::ast::BinOp::*;
+                match op {
+                    Add => a.checked_add(b),
+                    Sub => a.checked_sub(b),
+                    Mul => a.checked_mul(b),
+                    Div => a.checked_div(b),
+                    Mod => a.checked_rem(b),
+                    BitAnd => Some(a & b),
+                    BitOr => Some(a | b),
+                    BitXor => Some(a ^ b),
+                    Shl => {
+                        if b < 0 || b >= 64 {
+                            None
+                        } else {
+                            a.checked_shl(b as u32)
+                        }
+                    }
+                    Shr => {
+                        if b < 0 || b >= 64 {
+                            None
+                        } else {
+                            a.checked_shr(b as u32)
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Session 099: range check the raw `(v, ty)` pair regardless
     /// of whether the type came from a source-level suffix or from
     /// hint flow. The suffix-only `check_numeric_lit_in_range` is
@@ -2845,6 +2898,47 @@ impl<'r> Checker<'r> {
         } else {
             lt.clone()
         };
+        // Session 102: when both operands const-eval to integers
+        // and the binop's result type is a bounded integer, compute
+        // the result with checked arithmetic and range-check
+        // against the result type. Catches `100u8 + 200u8` (sum
+        // 300 overflows u8) and `100i8 * 2i8` (200 overflows i8)
+        // at compile time. Pure-literal-arithmetic only; an `a +
+        // 1` where `a` is a let-bound variable doesn't const-eval
+        // and falls through to the runtime.
+        if let Ty::Int(result_ty) = &t {
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Shl | BinOp::Shr
+            ) {
+                if let (Some(a), Some(b)) =
+                    (self.const_eval_int(lhs), self.const_eval_int(rhs))
+                {
+                    let result = match op {
+                        BinOp::Add => a.checked_add(b),
+                        BinOp::Sub => a.checked_sub(b),
+                        BinOp::Mul => a.checked_mul(b),
+                        BinOp::Div => a.checked_div(b),
+                        BinOp::Mod => a.checked_rem(b),
+                        BinOp::BitAnd => Some(a & b),
+                        BinOp::BitOr => Some(a | b),
+                        BinOp::BitXor => Some(a ^ b),
+                        BinOp::Shl if b >= 0 && b < 64 => a.checked_shl(b as u32),
+                        BinOp::Shr if b >= 0 && b < 64 => a.checked_shr(b as u32),
+                        _ => None,
+                    };
+                    if let Some(v) = result {
+                        self.check_int_value_in_range(v, *result_ty, false, span);
+                    }
+                    // If checked_* returned None, i64 overflowed
+                    // — runtime would wrap. Don't error here in
+                    // v0.x (out of scope of "compile-time range");
+                    // could be tightened in a future session.
+                }
+            }
+        }
         match op {
             BinOp::Add => {
                 // `+` concatenates strings as well as adding numbers.

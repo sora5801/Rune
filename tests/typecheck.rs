@@ -515,6 +515,82 @@ fn suffix_overflow_in_range_accepted() {
 }
 
 #[test]
+fn const_eval_add_overflow_rejected() {
+    // Session 102: `100u8 + 200u8` const-evals to 300 which
+    // overflows u8.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 100u8 + 200u8;
+            a as i64
+        }
+        "#,
+        "literal `300` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn const_eval_mul_overflow_rejected() {
+    // `100i8 * 2i8` const-evals to 200 which overflows i8.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: i8 = 100i8 * 2i8;
+            a as i64
+        }
+        "#,
+        "literal `200` is out of range for `i8`",
+    );
+}
+
+#[test]
+fn const_eval_unsigned_underflow_rejected() {
+    // `5u8 - 10u8` const-evals to -5 which doesn't fit u8.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 5u8 - 10u8;
+            a as i64
+        }
+        "#,
+        "literal `-5` is out of range for `u8`",
+    );
+}
+
+#[test]
+fn const_eval_in_range_accepted() {
+    // Sanity: a const-eval'd binop whose result fits the type
+    // compiles cleanly.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 50u8 + 100u8;
+            let b: i8 = 10i8 * 5i8;
+            (a as i64) + (b as i64)
+        }
+        "#,
+    );
+}
+
+#[test]
+fn const_eval_skipped_for_non_const_operand() {
+    // When one operand isn't a literal-expression, the
+    // const-eval check doesn't fire. Runtime overflow still
+    // happens; this confirms the check is a compile-time
+    // gate, not a runtime one (and not a false positive).
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let a: u8 = 100u8;
+            let b: u8 = 200u8;
+            let c: u8 = a + b;
+            c as i64
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].
