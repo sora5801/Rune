@@ -780,6 +780,10 @@ impl Resolver {
             ("bool", Ty::Bool),
             ("char", Ty::Char),
             ("str", Ty::Str),
+            // Session 121: mutable String type. Path `String` (top-
+            // level) and `std::String` both resolve to Ty::String.
+            ("String", Ty::String),
+            ("std::String", Ty::String),
             ("i8", Ty::Int(IntTy::I8)),
             ("i16", Ty::Int(IntTy::I16)),
             ("i32", Ty::Int(IntTy::I32)),
@@ -875,6 +879,19 @@ impl Resolver {
                 ret: Ty::Vec(Box::new(Ty::Str)),
             }),
         );
+        // Session 121: String::new() constructor. Surface under both
+        // `String::new` and the std-namespaced `std::String::new`.
+        for path in ["String::new", "std::String::new"] {
+            self.intern(
+                path.to_string(),
+                zero,
+                SymbolKind::BuiltinFn(BuiltinFn {
+                    name: "string_new",
+                    params: vec![],
+                    ret: Ty::String,
+                }),
+            );
+        }
         self.intern(
             "vec_new".to_string(),
             zero,

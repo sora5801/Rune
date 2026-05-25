@@ -47,6 +47,13 @@ pub enum Ty {
     Int(IntTy),
     Float(FloatTy),
     Str,
+    /// Session 121: mutable, heap-grown owned string. Distinct from
+    /// `Ty::Str` (which is an immutable view, possibly a literal with
+    /// rc=-1). `String` is always owned (rc≥1) with a growth-amortized
+    /// internal buffer. Constructed via `String::new()`, mutated via
+    /// `.push_str(s)` / `.push_byte(b)`, converted to a borrowed
+    /// view via `.to_str()`.
+    String,
     Unit,
     Array(Box<Ty>, usize),
     /// Heap-allocated growable list — `Vec<T>`, carrying its element
@@ -305,6 +312,7 @@ impl Ty {
             Ty::Int(i) => i.name().into(),
             Ty::Float(f) => f.name().into(),
             Ty::Str => "str".into(),
+            Ty::String => "String".into(),
             Ty::Unit => "()".into(),
             Ty::Array(elem, n) => format!("[{}; {}]", elem.display(), n),
             Ty::Vec(elem) => format!("Vec<{}>", elem.display()),

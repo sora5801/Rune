@@ -133,6 +133,86 @@ static struct rune_str* str_slice_owned(const char* src_ptr, int64_t a, int64_t 
     return r;
 }
 
+// Session 121: mutable, heap-grown String type. Same descriptor
+// shape as rune_str but with a `cap` field for amortized growth.
+// Allocations follow the Vec doubling pattern: cap = 4 minimum,
+// doubles when len would exceed cap. The runtime owns the byte
+// buffer (free on release). Conversion `.to_str()` copies bytes
+// into a fresh immutable rune_str — the String stays mutable
+// after the read.
+struct rune_string {
+    char*   ptr;
+    int64_t len;
+    int64_t cap;
+    int64_t rc;
+};
+
+struct rune_string* rune_string_new(void) {
+    struct rune_string* s = (struct rune_string*)malloc(sizeof(struct rune_string));
+    s->ptr = (char*)0;
+    s->len = 0;
+    s->cap = 0;
+    s->rc = 1;
+    return s;
+}
+
+static void rune_string_reserve(struct rune_string* s, int64_t need) {
+    if (s->cap >= need) return;
+    int64_t new_cap = s->cap == 0 ? 8 : s->cap * 2;
+    while (new_cap < need) new_cap *= 2;
+    char* nb = (char*)malloc((size_t)new_cap);
+    if (s->len > 0) memcpy(nb, s->ptr, (size_t)s->len);
+    if (s->ptr != (char*)0) free(s->ptr);
+    s->ptr = nb;
+    s->cap = new_cap;
+}
+
+void rune_string_push_str(struct rune_string* s, const struct rune_str* x) {
+    if (x->len <= 0) return;
+    rune_string_reserve(s, s->len + x->len);
+    memcpy(s->ptr + s->len, x->ptr, (size_t)x->len);
+    s->len += x->len;
+}
+
+void rune_string_push_byte(struct rune_string* s, uint8_t b) {
+    rune_string_reserve(s, s->len + 1);
+    s->ptr[s->len] = (char)b;
+    s->len += 1;
+}
+
+int64_t rune_string_len(const struct rune_string* s) {
+    return s->len;
+}
+
+struct rune_str* rune_string_to_str(const struct rune_string* s) {
+    struct rune_str* r = (struct rune_str*)malloc(sizeof(struct rune_str));
+    r->rc = 1;
+    if (s->len <= 0) {
+        r->ptr = (const char*)0;
+        r->len = 0;
+        return r;
+    }
+    char* bytes = (char*)malloc((size_t)s->len);
+    memcpy(bytes, s->ptr, (size_t)s->len);
+    r->ptr = bytes;
+    r->len = s->len;
+    return r;
+}
+
+void rune_retain_string(struct rune_string* s) {
+    if (s == (struct rune_string*)0 || s->rc == -1) return;
+    s->rc += 1;
+}
+
+void rune_release_string(struct rune_string* s) {
+    if (s == (struct rune_string*)0 || s->rc == -1) return;
+    s->rc -= 1;
+    if (s->rc == 0) {
+        if (s->ptr != (char*)0) free(s->ptr);
+        free(s);
+    }
+}
+
 // Session 120: command-line args. The AOT C main wrapper calls
 // rune_argv_init at process start with the OS-provided argc/argv;
 // std::env::args() then returns a fresh Vec<str> per call that

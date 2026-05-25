@@ -6691,6 +6691,23 @@ fn resolve_method(recv: &Ty, name: &str) -> Option<MethodSig> {
             params: vec![Ty::Str],
             ret: Ty::Vec(Box::new(Ty::Str)),
         }),
+        // Session 121: mutable String methods.
+        (Ty::String, "push_str") => Some(MethodSig {
+            params: vec![Ty::Str],
+            ret: Ty::Unit,
+        }),
+        (Ty::String, "push_byte") => Some(MethodSig {
+            params: vec![Ty::Int(IntTy::U8)],
+            ret: Ty::Unit,
+        }),
+        (Ty::String, "len") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Int(IntTy::I64),
+        }),
+        (Ty::String, "to_str") => Some(MethodSig {
+            params: vec![],
+            ret: Ty::Str,
+        }),
         (Ty::Array(_, _), "len") => Some(MethodSig {
             params: vec![],
             ret: Ty::Int(IntTy::I64),

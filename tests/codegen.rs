@@ -120,6 +120,108 @@ fn compound_assignment() {
     );
 }
 
+// ---- session 121: mutable String type ----
+
+#[test]
+fn string_new_empty() {
+    // Fresh String has len 0.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 0);
+}
+
+#[test]
+fn string_push_str_accumulates_len() {
+    // push_str twice — total len is the sum of pieces.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            s.push_str("hello");
+            s.push_str(", world");
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn string_push_byte_grows() {
+    // push_byte one byte at a time — final len equals number of pushes.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            s.push_byte(72u8);   // 'H'
+            s.push_byte(105u8);  // 'i'
+            s.push_byte(33u8);   // '!'
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn string_to_str_roundtrip_via_starts_with() {
+    // Build "rune-key", convert to str, check via starts_with.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            s.push_str("rune-key");
+            let view: str = s.to_str();
+            if view.starts_with("rune-") { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn string_to_str_equality_recovers_exact_content() {
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            s.push_str("hello");
+            let view: str = s.to_str();
+            if view == "hello" { 1 } else { 0 }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn string_amortized_growth() {
+    // Push many bytes — exercises the doubling growth path. Final
+    // length should equal the number of pushes regardless of how
+    // many internal reallocs happened.
+    let src = r#"
+        fn main() -> i64 {
+            let s: String = String::new();
+            let mut i: i64 = 0;
+            while i < 1000 {
+                s.push_byte(97u8);  // 'a'
+                i = i + 1;
+            }
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 1000);
+}
+
+#[test]
+fn string_via_std_namespace() {
+    // The `std::String` / `std::String::new` qualified names also work.
+    let src = r#"
+        fn main() -> i64 {
+            let s: std::String = std::String::new();
+            s.push_str("abc");
+            s.len()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
 // ---- session 120: command-line args ----
 
 #[test]

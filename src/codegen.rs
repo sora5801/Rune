@@ -177,6 +177,13 @@ unsafe extern "C" {
     fn rune_write_file(path: *const u8, contents: *const u8) -> i8;
     fn rune_argv_init(argc: i32, argv: *mut *mut u8);
     fn rune_env_args() -> *mut u8;
+    fn rune_string_new() -> *mut u8;
+    fn rune_string_push_str(s: *mut u8, x: *const u8);
+    fn rune_string_push_byte(s: *mut u8, b: u8);
+    fn rune_string_len(s: *const u8) -> i64;
+    fn rune_string_to_str(s: *const u8) -> *mut u8;
+    fn rune_retain_string(s: *mut u8);
+    fn rune_release_string(s: *mut u8);
     fn rune_vec_new() -> *mut u8;
     fn rune_vec_push(v: *mut u8, x: i64);
     fn rune_vec_get(v: *const u8, i: i64) -> i64;
@@ -1229,6 +1236,13 @@ impl Codegen<JITModule> {
         builder.symbol("rune_write_file", rune_write_file as *const u8);
         builder.symbol("rune_argv_init", rune_argv_init as *const u8);
         builder.symbol("rune_env_args", rune_env_args as *const u8);
+        builder.symbol("rune_string_new", rune_string_new as *const u8);
+        builder.symbol("rune_string_push_str", rune_string_push_str as *const u8);
+        builder.symbol("rune_string_push_byte", rune_string_push_byte as *const u8);
+        builder.symbol("rune_string_len", rune_string_len as *const u8);
+        builder.symbol("rune_string_to_str", rune_string_to_str as *const u8);
+        builder.symbol("rune_retain_string", rune_retain_string as *const u8);
+        builder.symbol("rune_release_string", rune_release_string as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
         builder.symbol("rune_vec_push", rune_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_vec_get as *const u8);
@@ -2895,6 +2909,41 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 // Fresh +1 Vec<str> owned by the caller; no retain.
                 Ok(Some(self.builder.inst_results(inst)[0]))
             }
+            // Session 121: String mutating + conversion methods.
+            (Ty::String, m)
+                if matches!(m, "push_str" | "push_byte" | "len" | "to_str") =>
+            {
+                let runtime_key = match m {
+                    "push_str" => "string_push_str",
+                    "push_byte" => "string_push_byte",
+                    "len" => "string_len",
+                    "to_str" => "string_to_str",
+                    _ => unreachable!(),
+                };
+                let func_id = self.ensure_runtime_func(runtime_key)?;
+                let local_func = self
+                    .module
+                    .declare_func_in_func(func_id, self.builder.func);
+                let mut call_args = vec![recv_val];
+                call_args.extend(&arg_vals);
+                let inst = self.builder.ins().call(local_func, &call_args);
+                let results = self.builder.inst_results(inst);
+                let result = if results.is_empty() {
+                    None
+                } else {
+                    Some(results[0])
+                };
+                // push_str's str arg is borrowed (read-only). If
+                // caller produced a fresh +1 (non-Local), reclaim.
+                if m == "push_str" {
+                    if let HirExprKind::Local(_) = &args[0].kind {
+                        // borrowed — no-op
+                    } else if is_arc_type(&args[0].ty, self.struct_arc_fields, self.enum_has_payload) {
+                        self.emit_arc_call("release", &args[0].ty, arg_vals[0])?;
+                    }
+                }
+                Ok(result)
+            }
             (Ty::HashMap(_, v_ty), m)
                 if matches!(m, "insert" | "get" | "contains_key" | "len" | "remove") =>
             {
@@ -4051,6 +4100,7 @@ fn mangle_ty_name(ty: &Ty) -> String {
         Ty::Assoc(base, name) => format!("Assoc_{}_{}", mangle_ty_name(base), name),
         Ty::Never => "never".into(),
         Ty::Error => "err".into(),
+        Ty::String => "string".into(),
     }
 }
 
@@ -4061,6 +4111,9 @@ fn is_arc_type(
 ) -> bool {
     match ty {
         Ty::Vec(_) | Ty::Str => true,
+        // Session 121: String is a heap-grown owned buffer with
+        // ARC; same shape as Vec / Str.
+        Ty::String => true,
         Ty::HashMap(_, _) => true,
         Ty::Struct(_, _) => true,
         Ty::Enum(sym, _) => enum_has_payload.contains(sym),
@@ -4087,6 +4140,9 @@ fn arc_helper_name(action: &str, ty: &Ty) -> Result<&'static str, CodegenError> 
         ("release", Ty::HashMap(_, _)) => "release_hashmap",
         ("retain", Ty::Str) => "retain_str",
         ("release", Ty::Str) => "release_str",
+        // Session 121: String ARC helpers.
+        ("retain", Ty::String) => "retain_string",
+        ("release", Ty::String) => "release_string",
         // Weak<T> uses the weak-counted helpers per inner type.
         // v0.x only supports Weak<Vec>.
         ("retain", Ty::Weak(inner)) if matches!(**inner, Ty::Vec(_)) => "weak_retain_vec",
@@ -4112,6 +4168,9 @@ fn cranelift_type(ty: &Ty) -> Result<Type, CodegenError> {
         Ty::Array(_, _) => types::I64,
         // Strings are represented as a pointer to a (ptr, len) descriptor.
         Ty::Str => types::I64,
+        // Session 121: String is a pointer to a heap-allocated
+        // rune_string descriptor — same shape as Vec / Str.
+        Ty::String => types::I64,
         // Structs are represented as a pointer to their stack-allocated body.
         Ty::Struct(_, _) => types::I64,
         // Vec is a pointer to a heap-allocated descriptor.
@@ -4219,8 +4278,8 @@ fn elem_size(ty: &Ty) -> Result<u32, CodegenError> {
         Ty::Int(IntTy::I32 | IntTy::U32) | Ty::Char | Ty::Float(FloatTy::F32) => 4,
         Ty::Int(IntTy::I64 | IntTy::U64 | IntTy::ISize | IntTy::USize)
         | Ty::Float(FloatTy::F64) => 8,
-        Ty::Array(_, _) | Ty::Str | Ty::Struct(_, _) | Ty::Vec(_) | Ty::Enum(_, _) | Ty::Weak(_)
-        | Ty::Dyn(_, _) => 8,
+        Ty::Array(_, _) | Ty::Str | Ty::String | Ty::Struct(_, _) | Ty::Vec(_)
+        | Ty::Enum(_, _) | Ty::Weak(_) | Ty::Dyn(_, _) => 8,
         _ => {
             return Err(CodegenError(format!(
                 "cannot determine size of `{}`",
@@ -4462,6 +4521,46 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.returns.push(AbiParam::new(types::I64)); // *mut Vec<str>
             ("rune_env_args", sig)
+        }
+        // Session 121: String constructors / methods.
+        "string_new" => {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_string_new", sig)
+        }
+        "string_push_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // self
+            sig.params.push(AbiParam::new(types::I64)); // *const rune_str
+            ("rune_string_push_str", sig)
+        }
+        "string_push_byte" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I8));
+            ("rune_string_push_byte", sig)
+        }
+        "string_len" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            ("rune_string_len", sig)
+        }
+        "string_to_str" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64)); // fresh +1 *mut rune_str
+            ("rune_string_to_str", sig)
+        }
+        "retain_string" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_retain_string", sig)
+        }
+        "release_string" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            ("rune_release_string", sig)
         }
         // (idx, len) -> never. Used by the inline bounds-check pattern.
         "panic_bounds" => {

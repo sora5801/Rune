@@ -329,7 +329,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 Phase 1 — capability buildout (next ~20 sessions):
 
-1. Mutable `String` type + builder methods
+1. `String::from(s: str)` + integer/float formatting (`i64::to_str`)
 2. Module system at file granularity
 3. `Box<T>` (or implicit boxing of recursive enum variants)
 4. Pattern guards + `let ... else`
@@ -338,7 +338,8 @@ Phase 1 — capability buildout (next ~20 sessions):
 
 Already shipped from Phase 1: file I/O (session 118), string
 methods `.byte_at` / `.find` / `.split` + `Vec<str>` (session 119),
-command-line args via `std::env::args()` (session 120),
+command-line args via `std::env::args()` (session 120), mutable
+`String` type with push_str / push_byte / to_str (session 121),
 `.starts_with` / `.ends_with` / `.contains` on `str`.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
