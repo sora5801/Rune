@@ -329,7 +329,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. Binary-op hint flow — `a: i32; a + 1` lets `1` adopt i32 from the LHS
 2. Per-arm unreachability inside tuple matches
-3. Polished diagnostics — friendly struct/enum names everywhere
+3. Const-eval overflow checks — reject `100u8 + 200u8`
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

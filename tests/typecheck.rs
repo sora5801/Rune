@@ -338,6 +338,54 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
+fn diagnostics_use_friendly_struct_name() {
+    // Session 093: type errors should reference the struct's
+    // source name instead of the internal sym index.
+    let (le, pe, re, te) = run(
+        r#"
+        struct Point { x: i64, y: i64 }
+        fn use_point(p: Point) -> i64 { p.x }
+        fn main() -> i64 { use_point(42) }
+        "#,
+    );
+    assert!(le.is_empty() && pe.is_empty() && re.is_empty());
+    let msgs: Vec<String> = te.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("expected `Point`")),
+        "expected `Point` in diagnostic, got {:?}",
+        msgs
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("struct#")),
+        "diagnostic should not contain `struct#NN`, got {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn diagnostics_use_friendly_enum_name() {
+    let (le, pe, re, te) = run(
+        r#"
+        enum Color { Red, Green, Blue }
+        fn use_color(c: Color) -> i64 { 0 }
+        fn main() -> i64 { use_color(true) }
+        "#,
+    );
+    assert!(le.is_empty() && pe.is_empty() && re.is_empty());
+    let msgs: Vec<String> = te.iter().map(|e| e.message.clone()).collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("expected `Color`")),
+        "expected `Color` in diagnostic, got {:?}",
+        msgs
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("enum#")),
+        "diagnostic should not contain `enum#NN`, got {:?}",
+        msgs
+    );
+}
+
+#[test]
 fn suffix_overflow_u8_rejected() {
     // Session 092: `1000u8` doesn't fit u8 (max 255); rejected
     // at type-check.

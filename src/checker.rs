@@ -694,7 +694,7 @@ impl<'r> Checker<'r> {
                                          (integers, bool, char, structs, enums, \
                                          trait objects, or a nested Vec; not str, \
                                          floats, or arrays)",
-                                        elem.display()
+                                        self.ty_pretty(&elem)
                                     ),
                                 );
                                 Ty::Error
@@ -731,7 +731,7 @@ impl<'r> Checker<'r> {
                                     format!(
                                         "`HashMap<{}, ...>` — only `i64` or `str` \
                                          keys are supported in v0.x",
-                                        k.display()
+                                        self.ty_pretty(&k)
                                     ),
                                 );
                                 Ty::Error
@@ -741,7 +741,7 @@ impl<'r> Checker<'r> {
                                     format!(
                                         "`HashMap<i64, {}>` is not supported in v0.x — \
                                          the value type must fit an 8-byte slot",
-                                        v.display()
+                                        self.ty_pretty(&v)
                                     ),
                                 );
                                 Ty::Error
@@ -891,8 +891,8 @@ impl<'r> Checker<'r> {
                             format!(
                                 "default method `{}` returns `{}` but body has type `{}`",
                                 m.name.name,
-                                ret_ty.display(),
-                                body_ty.display()
+                                self.ty_pretty(&ret_ty),
+                                self.ty_pretty(&body_ty)
                             ),
                         );
                     }
@@ -1057,8 +1057,8 @@ impl<'r> Checker<'r> {
                 format!(
                     "function `{}` returns `{}` but body has type `{}`",
                     f.name.name,
-                    ret_ty.display(),
-                    body_ty.display()
+                    self.ty_pretty(&ret_ty),
+                    self.ty_pretty(&body_ty)
                 ),
             );
         }
@@ -1074,8 +1074,8 @@ impl<'r> Checker<'r> {
                 format!(
                     "const `{}` declared as `{}` but value has type `{}`",
                     c.name.name,
-                    declared.display(),
-                    actual.display(),
+                    self.ty_pretty(&declared),
+                    self.ty_pretty(&actual),
                 ),
             );
         }
@@ -1152,8 +1152,8 @@ impl<'r> Checker<'r> {
                         l.span,
                         format!(
                             "let binding declared `{}` but initializer has type `{}`",
-                            d.display(),
-                            i.display()
+                            self.ty_pretty(&d),
+                            self.ty_pretty(&i)
                         ),
                     );
                 }
@@ -1281,7 +1281,7 @@ impl<'r> Checker<'r> {
                     match_span,
                     format!(
                         "non-exhaustive `match` on `{}`: add a `_` arm to catch the rest",
-                        scrutinee_ty.display()
+                        self.ty_pretty(&scrutinee_ty)
                     ),
                 );
             }
@@ -1348,7 +1348,7 @@ impl<'r> Checker<'r> {
             match_span,
             format!(
                 "non-exhaustive `match` on `{}`: add a `_` arm or cover the missing combination",
-                Ty::Tuple(elem_tys.to_vec()).display()
+                self.ty_pretty(&Ty::Tuple(elem_tys.to_vec()))
             ),
         );
     }
@@ -1497,8 +1497,8 @@ impl<'r> Checker<'r> {
                         *span,
                         format!(
                             "pattern type `{}` doesn't match scrutinee type `{}`",
-                            pat_ty.display(),
-                            scrutinee_ty.display()
+                            self.ty_pretty(&pat_ty),
+                            self.ty_pretty(&scrutinee_ty)
                         ),
                     );
                 }
@@ -1518,8 +1518,8 @@ impl<'r> Checker<'r> {
                                 *span,
                                 format!(
                                     "pattern matches `{}` but scrutinee is `{}`",
-                                    pat_ty.display(),
-                                    scrutinee_ty.display()
+                                    self.ty_pretty(&pat_ty),
+                                    self.ty_pretty(&scrutinee_ty)
                                 ),
                             );
                         }
@@ -1571,7 +1571,7 @@ impl<'r> Checker<'r> {
                                 format!(
                                     "tuple pattern arity {} doesn't match `{}`",
                                     patterns.len(),
-                                    scrutinee_ty.display()
+                                    self.ty_pretty(&scrutinee_ty)
                                 ),
                             );
                         }
@@ -1585,7 +1585,7 @@ impl<'r> Checker<'r> {
                         *span,
                         format!(
                             "tuple pattern cannot match value of type `{}`",
-                            scrutinee_ty.display()
+                            self.ty_pretty(&scrutinee_ty)
                         ),
                     ),
                 }
@@ -1609,7 +1609,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "range pattern with integer bounds doesn't match \
                              scrutinee type `{}`",
-                            scrutinee_ty.display()
+                            self.ty_pretty(&scrutinee_ty)
                         ),
                     );
                     return;
@@ -1623,7 +1623,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "range pattern with char bounds doesn't match \
                              scrutinee type `{}`",
-                            scrutinee_ty.display()
+                            self.ty_pretty(&scrutinee_ty)
                         ),
                     );
                     return;
@@ -1738,7 +1738,7 @@ impl<'r> Checker<'r> {
                                 format!(
                                     "tuple pattern has {} element(s) but value has type `{}` with {}",
                                     patterns.len(),
-                                    ty.display(),
+                                    self.ty_pretty(&ty),
                                     elems.len()
                                 ),
                             );
@@ -1758,7 +1758,7 @@ impl<'r> Checker<'r> {
                             *span,
                             format!(
                                 "tuple pattern cannot destructure value of type `{}`",
-                                ty.display()
+                                self.ty_pretty(&ty)
                             ),
                         );
                     }
@@ -1789,8 +1789,8 @@ impl<'r> Checker<'r> {
                 span,
                 format!(
                     "pattern matches `{}` but scrutinee is `{}`",
-                    enum_ty.display(),
-                    scrutinee_ty.display()
+                    self.ty_pretty(&enum_ty),
+                    self.ty_pretty(&scrutinee_ty)
                 ),
             );
             return;
@@ -1878,8 +1878,8 @@ impl<'r> Checker<'r> {
                 span,
                 format!(
                     "pattern matches `{}` but scrutinee is `{}`",
-                    enum_ty.display(),
-                    scrutinee_ty.display()
+                    self.ty_pretty(&enum_ty),
+                    self.ty_pretty(&scrutinee_ty)
                 ),
             );
             return;
@@ -1975,7 +1975,7 @@ impl<'r> Checker<'r> {
                                     "tuple index {} out of range — type `{}` has {} \
                                      element(s)",
                                     index,
-                                    recv_ty.display(),
+                                    self.ty_pretty(&recv_ty),
                                     elems.len()
                                 ),
                             );
@@ -1988,7 +1988,7 @@ impl<'r> Checker<'r> {
                             *span,
                             format!(
                                 "cannot index into non-tuple type `{}`",
-                                recv_ty.display()
+                                self.ty_pretty(&recv_ty)
                             ),
                         );
                         Ty::Error
@@ -2006,7 +2006,7 @@ impl<'r> Checker<'r> {
                 if !ct.compatible(&Ty::Bool) {
                     self.error(
                         cond.span(),
-                        format!("while condition must be `bool`, found `{}`", ct.display()),
+                        format!("while condition must be `bool`, found `{}`", self.ty_pretty(&ct)),
                     );
                 }
                 self.check_block(body);
@@ -2036,7 +2036,7 @@ impl<'r> Checker<'r> {
                             s.span(),
                             format!(
                                 "range bound must be an integer, found `{}`",
-                                ty.display()
+                                self.ty_pretty(&ty)
                             ),
                         );
                     }
@@ -2048,7 +2048,7 @@ impl<'r> Checker<'r> {
                             e.span(),
                             format!(
                                 "range bound must be an integer, found `{}`",
-                                ty.display()
+                                self.ty_pretty(&ty)
                             ),
                         );
                     }
@@ -2191,21 +2191,15 @@ impl<'r> Checker<'r> {
                     }
                 }
                 if dup {
-                    // Prefer the friendly struct/enum name when the
-                    // target resolves to a user type; fall back to
-                    // Ty::display otherwise.
-                    let target_name = match &target_ty {
-                        Ty::Struct(s, _) | Ty::Enum(s, _) => {
-                            self.res.symbol(*s).name.clone()
-                        }
-                        _ => target_ty.display(),
-                    };
+                    // Session 093: ty_pretty already emits friendly
+                    // struct/enum names; the bespoke branch from
+                    // session 090 is now redundant.
                     self.error(
                         fn_span,
                         format!(
                             "duplicate `impl Into<{}> for {}` — a previous `impl` block \
                              already declared this conversion",
-                            target_name,
+                            self.ty_pretty(&target_ty),
                             source_name,
                         ),
                     );
@@ -2358,8 +2352,8 @@ impl<'r> Checker<'r> {
                         body.span(),
                         format!(
                             "closure body returns `{}` but the context wants `{}`",
-                            body_ty.display(),
-                            er.display()
+                            self.ty_pretty(&body_ty),
+                            self.ty_pretty(&er)
                         ),
                     );
                 }
@@ -2498,6 +2492,77 @@ impl<'r> Checker<'r> {
         }
     }
 
+    /// Session 093: format a `Ty` for error messages, consulting
+    /// the resolver for friendly struct / enum / trait / type-param
+    /// names. `Ty::display` falls back to `struct#NN` / `enum#NN` /
+    /// `T#NN` because it has no symbol-table access; this method
+    /// is the friendly wrapper.
+    fn ty_pretty(&self, ty: &Ty) -> String {
+        match ty {
+            Ty::Struct(id, args) => {
+                let name = self.res.symbol(*id).name.clone();
+                if args.is_empty() {
+                    name
+                } else {
+                    let s: Vec<String> = args.iter().map(|a| self.ty_pretty(a)).collect();
+                    format!("{}<{}>", name, s.join(", "))
+                }
+            }
+            Ty::Enum(id, args) => {
+                let name = self.res.symbol(*id).name.clone();
+                if args.is_empty() {
+                    name
+                } else {
+                    let s: Vec<String> = args.iter().map(|a| self.ty_pretty(a)).collect();
+                    format!("{}<{}>", name, s.join(", "))
+                }
+            }
+            Ty::Dyn(id, args) => {
+                let name = self.res.symbol(*id).name.clone();
+                if args.is_empty() {
+                    format!("dyn {}", name)
+                } else {
+                    let s: Vec<String> = args.iter().map(|a| self.ty_pretty(a)).collect();
+                    format!("dyn {}<{}>", name, s.join(", "))
+                }
+            }
+            Ty::TypeVar(id) => {
+                // Inference TypeVars (session 062, counted down from
+                // u32::MAX) have no resolver entry. Fall back to a
+                // generic placeholder so users don't see huge
+                // "T#4294967294" indexes.
+                let idx = id.0 as usize;
+                if idx < self.res.symbols.len() {
+                    self.res.symbol(*id).name.clone()
+                } else {
+                    "_".into()
+                }
+            }
+            Ty::Array(elem, n) => format!("[{}; {}]", self.ty_pretty(elem), n),
+            Ty::Vec(elem) => format!("Vec<{}>", self.ty_pretty(elem)),
+            Ty::HashMap(k, v) => {
+                format!("HashMap<{}, {}>", self.ty_pretty(k), self.ty_pretty(v))
+            }
+            Ty::Tuple(elems) => {
+                let parts: Vec<String> =
+                    elems.iter().map(|t| self.ty_pretty(t)).collect();
+                format!("({})", parts.join(", "))
+            }
+            Ty::Fn { params, ret } => {
+                let ps: Vec<String> =
+                    params.iter().map(|t| self.ty_pretty(t)).collect();
+                format!("fn({}) -> {}", ps.join(", "), self.ty_pretty(ret))
+            }
+            Ty::Weak(inner) => format!("Weak<{}>", self.ty_pretty(inner)),
+            Ty::Assoc(base, name) => {
+                format!("{}::{}", self.ty_pretty(base), name)
+            }
+            // Primitives / Self / Never / Error fall through to the
+            // ty.rs display.
+            _ => ty.display(),
+        }
+    }
+
     fn lit_type(&self, lit: &Lit) -> Ty {
         match lit {
             // Session 088: an explicit suffix (`10i32`, `42u64`)
@@ -2595,7 +2660,7 @@ impl<'r> Checker<'r> {
                 if t.is_numeric() {
                     t
                 } else {
-                    self.error(span, format!("cannot negate `{}`", t.display()));
+                    self.error(span, format!("cannot negate `{}`", self.ty_pretty(&t)));
                     Ty::Error
                 }
             }
@@ -2603,7 +2668,7 @@ impl<'r> Checker<'r> {
                 if matches!(t, Ty::Bool) {
                     Ty::Bool
                 } else {
-                    self.error(span, format!("`!` requires `bool`, found `{}`", t.display()));
+                    self.error(span, format!("`!` requires `bool`, found `{}`", self.ty_pretty(&t)));
                     Ty::Error
                 }
             }
@@ -2613,7 +2678,7 @@ impl<'r> Checker<'r> {
                 } else {
                     self.error(
                         span,
-                        format!("`~` requires an integer, found `{}`", t.display()),
+                        format!("`~` requires an integer, found `{}`", self.ty_pretty(&t)),
                     );
                     Ty::Error
                 }
@@ -2672,8 +2737,8 @@ impl<'r> Checker<'r> {
                 format!(
                     "operands of `{}` have mismatched types: `{}` vs `{}`",
                     binop_symbol(op),
-                    lt.display(),
-                    rt.display()
+                    self.ty_pretty(&lt),
+                    self.ty_pretty(&rt)
                 ),
             );
             return Ty::Error;
@@ -2702,7 +2767,7 @@ impl<'r> Checker<'r> {
                         span,
                         format!(
                             "operator `+` requires numeric or string operands, got `{}`",
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -2716,7 +2781,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "operator `{}` requires numeric operands, got `{}`",
                             binop_symbol(op),
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -2739,7 +2804,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "operator `{}` requires ordered operands, got `{}`",
                             binop_symbol(op),
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -2753,7 +2818,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "operator `{}` requires `bool` operands, got `{}`",
                             binop_symbol(op),
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -2767,7 +2832,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "operator `{}` requires integer operands, got `{}`",
                             binop_symbol(op),
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -2786,8 +2851,8 @@ impl<'r> Checker<'r> {
                 span,
                 format!(
                     "cannot assign `{}` to `{}`",
-                    rt.display(),
-                    lt.display()
+                    self.ty_pretty(&rt),
+                    self.ty_pretty(&lt)
                 ),
             );
         }
@@ -2805,8 +2870,8 @@ impl<'r> Checker<'r> {
                     format!(
                         "compound assignment `{}=` has mismatched operand types: `{}` vs `{}`",
                         binop_symbol(op),
-                        lt.display(),
-                        rt.display()
+                        self.ty_pretty(&lt),
+                        self.ty_pretty(&rt)
                     ),
                 );
             }
@@ -2821,7 +2886,7 @@ impl<'r> Checker<'r> {
                     format!(
                         "compound assignment `{}=` requires numeric operands, got `{}`",
                         binop_symbol(op),
-                        lt.display()
+                        self.ty_pretty(&lt)
                     ),
                 );
             }
@@ -3285,8 +3350,8 @@ impl<'r> Checker<'r> {
                             format!(
                                 "argument {} has type `{}`, expected `{}`",
                                 i + 1,
-                                arg_ty.display(),
-                                param_ty.display()
+                                self.ty_pretty(&arg_ty),
+                                self.ty_pretty(&param_ty)
                             ),
                         );
                     }
@@ -3331,8 +3396,8 @@ impl<'r> Checker<'r> {
                             format!(
                                 "argument {} has type `{}`, expected `{}`",
                                 i + 1,
-                                a.display(),
-                                p.display()
+                                self.ty_pretty(&a),
+                                self.ty_pretty(&p)
                             ),
                         );
                     }
@@ -3340,7 +3405,7 @@ impl<'r> Checker<'r> {
                 *call_ret
             }
             other => {
-                self.error(span, format!("cannot call value of type `{}`", other.display()));
+                self.error(span, format!("cannot call value of type `{}`", self.ty_pretty(&other)));
                 Ty::Error
             }
         }
@@ -3402,8 +3467,8 @@ impl<'r> Checker<'r> {
                     format!(
                         "variant payload {} has type `{}`, expected `{}`",
                         i + 1,
-                        arg_ty.display(),
-                        param_ty.display()
+                        self.ty_pretty(&arg_ty),
+                        self.ty_pretty(&param_ty)
                     ),
                 );
             }
@@ -3492,8 +3557,8 @@ impl<'r> Checker<'r> {
                     format!(
                         "field `{}` has type `{}`, expected `{}`",
                         name,
-                        actual.display(),
-                        expected.display()
+                        self.ty_pretty(&actual),
+                        self.ty_pretty(&expected)
                     ),
                 );
             }
@@ -3944,8 +4009,8 @@ impl<'r> Checker<'r> {
                 span,
                 format!(
                     "field bound mismatch: expected `{}` from the trait bound, found `{}`",
-                    expected.display(),
-                    actual.display(),
+                    self.ty_pretty(&expected),
+                    self.ty_pretty(&actual),
                 ),
             );
         }
@@ -3999,8 +4064,8 @@ impl<'r> Checker<'r> {
                     format!(
                         "field `{}` declared `{}` but value has type `{}`",
                         init.name.name,
-                        expected.display(),
-                        value_ty.display()
+                        self.ty_pretty(&expected),
+                        self.ty_pretty(&value_ty)
                     ),
                 );
             }
@@ -4038,7 +4103,7 @@ impl<'r> Checker<'r> {
                     format!(
                         "cannot access field `{}` on type `{}`",
                         name.name,
-                        recv_ty.display()
+                        self.ty_pretty(&recv_ty)
                     ),
                 );
             }
@@ -4240,7 +4305,7 @@ impl<'r> Checker<'r> {
                     format!(
                         "no method `.{}` on type `{}`",
                         method.name,
-                        recv_ty.display()
+                        self.ty_pretty(&recv_ty)
                     ),
                 );
             }
@@ -4260,7 +4325,7 @@ impl<'r> Checker<'r> {
                          be projected through `{}`; call it on a concrete \
                          receiver instead",
                         method.name,
-                        recv_ty.display()
+                        self.ty_pretty(&recv_ty)
                     ),
                 );
             }
@@ -4289,8 +4354,8 @@ impl<'r> Checker<'r> {
                     format!(
                         "argument {} has type `{}`, expected `{}`",
                         i + 1,
-                        a.display(),
-                        p.display()
+                        self.ty_pretty(&a),
+                        self.ty_pretty(&p)
                     ),
                 );
             }
@@ -4324,7 +4389,7 @@ impl<'r> Checker<'r> {
                         format!(
                             "`print` does not yet support values of type `{}` \
                              (currently: i64-family integers and str)",
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                 }
@@ -4345,7 +4410,7 @@ impl<'r> Checker<'r> {
                         args[0].span(),
                         format!(
                             "`weak` only supports `Vec` in v0.x — got `{}`",
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                     return Ty::Error;
@@ -4374,7 +4439,7 @@ impl<'r> Checker<'r> {
                             args[0].span(),
                             format!(
                                 "`upgrade_or` first arg must be `Weak<T>`, got `{}`",
-                                weak_ty.display()
+                                self.ty_pretty(&weak_ty)
                             ),
                         );
                         return Ty::Error;
@@ -4385,8 +4450,8 @@ impl<'r> Checker<'r> {
                         args[1].span(),
                         format!(
                             "`upgrade_or` default has type `{}`, expected `{}`",
-                            default_ty.display(),
-                            inner.display()
+                            self.ty_pretty(&default_ty),
+                            self.ty_pretty(&inner)
                         ),
                     );
                 }
@@ -4525,7 +4590,7 @@ impl<'r> Checker<'r> {
                 if !st.is_integer() && !st.is_error() {
                     self.error(
                         s.span(),
-                        format!("slice start must be integer, found `{}`", st.display()),
+                        format!("slice start must be integer, found `{}`", self.ty_pretty(&st)),
                     );
                 }
             }
@@ -4534,7 +4599,7 @@ impl<'r> Checker<'r> {
                 if !et.is_integer() && !et.is_error() {
                     self.error(
                         e.span(),
-                        format!("slice end must be integer, found `{}`", et.display()),
+                        format!("slice end must be integer, found `{}`", self.ty_pretty(&et)),
                     );
                 }
             }
@@ -4544,7 +4609,7 @@ impl<'r> Checker<'r> {
                 other => {
                     self.error(
                         span,
-                        format!("cannot slice value of type `{}`", other.display()),
+                        format!("cannot slice value of type `{}`", self.ty_pretty(&other)),
                     );
                     Ty::Error
                 }
@@ -4555,7 +4620,7 @@ impl<'r> Checker<'r> {
         if !it.is_integer() && !it.is_error() {
             self.error(
                 index.span(),
-                format!("index must be an integer, found `{}`", it.display()),
+                format!("index must be an integer, found `{}`", self.ty_pretty(&it)),
             );
         }
         match rt {
@@ -4564,7 +4629,7 @@ impl<'r> Checker<'r> {
             Ty::Str => Ty::Int(crate::ty::IntTy::I64),
             Ty::Error => Ty::Error,
             other => {
-                self.error(span, format!("cannot index value of type `{}`", other.display()));
+                self.error(span, format!("cannot index value of type `{}`", self.ty_pretty(&other)));
                 Ty::Error
             }
         }
@@ -4583,7 +4648,7 @@ impl<'r> Checker<'r> {
         if !allowed {
             self.error(
                 span,
-                format!("cannot cast `{}` to `{}`", from.display(), to.display()),
+                format!("cannot cast `{}` to `{}`", self.ty_pretty(&from), self.ty_pretty(&to)),
             );
         }
         to
@@ -4604,8 +4669,8 @@ impl<'r> Checker<'r> {
                     e.span(),
                     format!(
                         "array element has type `{}` but earlier elements have type `{}`",
-                        t.display(),
-                        elem_ty.display()
+                        self.ty_pretty(&t),
+                        self.ty_pretty(&elem_ty)
                     ),
                 );
                 elem_ty = Ty::Error;
@@ -4625,7 +4690,7 @@ impl<'r> Checker<'r> {
         if !ct.compatible(&Ty::Bool) {
             self.error(
                 cond.span(),
-                format!("if condition must be `bool`, found `{}`", ct.display()),
+                format!("if condition must be `bool`, found `{}`", self.ty_pretty(&ct)),
             );
         }
         let tt = self.check_block(then_branch);
@@ -4639,8 +4704,8 @@ impl<'r> Checker<'r> {
                             span,
                             format!(
                                 "`if` branches have different types: `{}` vs `{}`",
-                                tt.display(),
-                                et.display()
+                                self.ty_pretty(&tt),
+                                self.ty_pretty(&et)
                             ),
                         );
                         Ty::Error
@@ -4653,7 +4718,7 @@ impl<'r> Checker<'r> {
                         then_branch.span,
                         format!(
                             "`if` without `else` must yield `()`, found `{}`",
-                            tt.display()
+                            self.ty_pretty(&tt)
                         ),
                     );
                 }
@@ -4672,7 +4737,7 @@ impl<'r> Checker<'r> {
                         endpoint.span(),
                         format!(
                             "range endpoints must be integers, found `{}`",
-                            t.display()
+                            self.ty_pretty(&t)
                         ),
                     );
                 }
@@ -4721,7 +4786,7 @@ impl<'r> Checker<'r> {
                     iter.span(),
                     format!(
                         "cannot iterate over `{}` — type does not implement `std::Iterator`",
-                        other.display()
+                        self.ty_pretty(&other)
                     ),
                 );
                 Ty::Error
@@ -4861,7 +4926,7 @@ impl<'r> Checker<'r> {
                 if !gt.compatible(&Ty::Bool) {
                     self.error(
                         g.span(),
-                        format!("match guard must be `bool`, found `{}`", gt.display()),
+                        format!("match guard must be `bool`, found `{}`", self.ty_pretty(&gt)),
                     );
                 }
             }
@@ -4875,8 +4940,8 @@ impl<'r> Checker<'r> {
                             arm.body.span(),
                             format!(
                                 "match arm has type `{}` but previous arms had type `{}`",
-                                body_ty.display(),
-                                prev.display()
+                                self.ty_pretty(&body_ty),
+                                self.ty_pretty(&prev)
                             ),
                         );
                         Ty::Error
@@ -4932,7 +4997,7 @@ impl<'r> Checker<'r> {
                             "the `?` operator on `Option` can only be used \
                              in a function returning `Option`, but this one \
                              returns `{}`",
-                            other.display()
+                            self.ty_pretty(&other)
                         ),
                     );
                     return Ty::Error;
@@ -4961,7 +5026,7 @@ impl<'r> Checker<'r> {
                 format!(
                     "the `?` operator requires a `Result` or `Option`, but \
                      the operand has type `{}`",
-                    inner_ty.display()
+                    self.ty_pretty(&inner_ty)
                 ),
             );
             return Ty::Error;
@@ -5006,10 +5071,10 @@ impl<'r> Checker<'r> {
                                  enclosing function's `Result` error type is `{}` \
                                  — implement `Into<{}>` for `{}` to convert at the \
                                  `?` site",
-                                err_ty.display(),
-                                ret_args[1].display(),
-                                ret_args[1].display(),
-                                err_ty.display()
+                                self.ty_pretty(&err_ty),
+                                self.ty_pretty(&ret_args[1]),
+                                self.ty_pretty(&ret_args[1]),
+                                self.ty_pretty(&err_ty)
                             ),
                         );
                     }
@@ -5021,7 +5086,7 @@ impl<'r> Checker<'r> {
                     format!(
                         "the `?` operator can only be used in a function \
                          returning a `Result`, but this one returns `{}`",
-                        other.display()
+                        self.ty_pretty(&other)
                     ),
                 );
             }
@@ -5038,8 +5103,8 @@ impl<'r> Checker<'r> {
                 span,
                 format!(
                     "return value has type `{}` but function returns `{}`",
-                    actual.display(),
-                    ret_ty.display()
+                    self.ty_pretty(&actual),
+                    self.ty_pretty(&ret_ty)
                 ),
             );
         }
