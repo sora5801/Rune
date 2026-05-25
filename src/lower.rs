@@ -226,6 +226,27 @@ impl<'a> Lowerer<'a> {
                 }
                 anchors
             },
+            sym_names: {
+                // Session 097: snapshot Struct / Enum / Trait names
+                // so codegen-time errors can read friendly names.
+                // Only kinds that contribute to user-visible type
+                // displays are included (TypeParam / Fn / etc. are
+                // never rendered as a Ty::Struct/Enum/Dyn).
+                let mut names: std::collections::HashMap<SymbolId, String> =
+                    std::collections::HashMap::new();
+                for (i, sym) in self.res.symbols.iter().enumerate() {
+                    if matches!(
+                        sym.kind,
+                        crate::resolver::SymbolKind::Struct
+                            | crate::resolver::SymbolKind::Enum
+                            | crate::resolver::SymbolKind::Trait
+                            | crate::resolver::SymbolKind::TypeParam
+                    ) {
+                        names.insert(SymbolId(i as u32), sym.name.clone());
+                    }
+                }
+                names
+            },
         }
     }
 

@@ -94,6 +94,65 @@ pub struct Codegen<M: Module> {
     /// type. A heap array is a refcounted block; its release walks
     /// the ARC elements and frees the block at zero.
     array_release_funcs: HashMap<Ty, FuncId>,
+    /// Session 097: struct/enum/trait/dyn sym → display name.
+    /// Used by `ty_pretty` to format friendly names in
+    /// codegen error messages. Populated from
+    /// `HirModule::sym_names` in `compile_module`.
+    sym_names: HashMap<SymbolId, String>,
+}
+
+/// Session 097: format a `Ty` with friendly struct/enum/trait
+/// names from a name map, falling back to the bare `Ty::display`
+/// shape for anything else. Used in codegen error messages so
+/// "struct#83" reads as "AppErr".
+fn ty_pretty(ty: &Ty, names: &HashMap<SymbolId, String>) -> String {
+    match ty {
+        Ty::Struct(s, args) | Ty::Enum(s, args) => {
+            let label = names.get(s).cloned().unwrap_or_else(|| ty.display());
+            if args.is_empty() {
+                label
+            } else {
+                let parts: Vec<String> =
+                    args.iter().map(|a| ty_pretty(a, names)).collect();
+                format!("{}<{}>", label, parts.join(", "))
+            }
+        }
+        Ty::Dyn(s, args) => {
+            let label = names.get(s).cloned().unwrap_or_else(|| ty.display());
+            if args.is_empty() {
+                format!("dyn {}", label)
+            } else {
+                let parts: Vec<String> =
+                    args.iter().map(|a| ty_pretty(a, names)).collect();
+                format!("dyn {}<{}>", label, parts.join(", "))
+            }
+        }
+        Ty::TypeVar(s) => names
+            .get(s)
+            .cloned()
+            .unwrap_or_else(|| ty.display()),
+        Ty::Vec(elem) => format!("Vec<{}>", ty_pretty(elem, names)),
+        Ty::HashMap(k, v) => {
+            format!("HashMap<{}, {}>", ty_pretty(k, names), ty_pretty(v, names))
+        }
+        Ty::Array(elem, n) => format!("[{}; {}]", ty_pretty(elem, names), n),
+        Ty::Tuple(elems) => {
+            let parts: Vec<String> =
+                elems.iter().map(|t| ty_pretty(t, names)).collect();
+            format!("({})", parts.join(", "))
+        }
+        Ty::Fn { params, ret } => {
+            let parts: Vec<String> =
+                params.iter().map(|p| ty_pretty(p, names)).collect();
+            format!("fn({}) -> {}", parts.join(", "), ty_pretty(ret, names))
+        }
+        Ty::Weak(inner) => format!("Weak<{}>", ty_pretty(inner, names)),
+        Ty::Assoc(base, name) => {
+            format!("{}::{}", ty_pretty(base, names), name)
+        }
+        // Primitives / SelfType / Never / Error fall through to display.
+        _ => ty.display(),
+    }
 }
 
 // The Rune runtime lives in `runtime.c`, the single source of
@@ -156,6 +215,7 @@ impl<M: Module> Codegen<M> {
         self.trait_methods = hir.trait_methods.clone();
         self.trait_methods_flat = hir.trait_methods_flat.clone();
         self.impl_methods = hir.impl_methods.clone();
+        self.sym_names = hir.sym_names.clone();
         // Pass 0: declare per-struct + per-enum release functions so
         // they can call each other (e.g. a struct with a nested
         // struct field, or an enum payload that's a struct).
@@ -1076,6 +1136,7 @@ impl<M: Module> Codegen<M> {
             impl_methods: &self.impl_methods,
             dyn_release_funcs: &self.dyn_release_funcs,
             array_release_funcs: &self.array_release_funcs,
+            sym_names: &self.sym_names,
             builder,
             var_map: HashMap::new(),
             var_counter: 0,
@@ -1107,7 +1168,7 @@ impl<M: Module> Codegen<M> {
                         return Err(CodegenError(format!(
                             "function `{}` declared `{}` but body produced no value",
                             f.name,
-                            ret_ty.display()
+                            ty_pretty(&ret_ty, &self.sym_names)
                         )));
                     }
                 }
@@ -1205,6 +1266,7 @@ impl Codegen<JITModule> {
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
             array_release_funcs: HashMap::new(),
+            sym_names: HashMap::new(),
         })
     }
 
@@ -1267,6 +1329,7 @@ impl Codegen<ObjectModule> {
             impl_methods: HashMap::new(),
             dyn_release_funcs: HashMap::new(),
             array_release_funcs: HashMap::new(),
+            sym_names: HashMap::new(),
         })
     }
 
@@ -1349,6 +1412,10 @@ struct FnCodegen<'a, M: Module> {
     impl_methods: &'a HashMap<(SymbolId, String), SymbolId>,
     dyn_release_funcs: &'a HashMap<SymbolId, FuncId>,
     array_release_funcs: &'a HashMap<Ty, FuncId>,
+    /// Session 097: borrowed view of the Codegen-level sym_names
+    /// table, used by per-function error sites that need a
+    /// friendly `Ty` rendering.
+    sym_names: &'a HashMap<SymbolId, String>,
     builder: FunctionBuilder<'a>,
     var_map: HashMap<SymbolId, Variable>,
     var_counter: u32,
@@ -1782,7 +1849,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                     other => {
                         return Err(CodegenError(format!(
                             "indirect call callee has non-fn type `{}`",
-                            other.display()
+                            ty_pretty(other, self.sym_names)
                         )));
                     }
                 };
@@ -2243,8 +2310,8 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         } else {
             return Err(CodegenError(format!(
                 "no `as` codegen for `{}` -> `{}`",
-                src_ty.display(),
-                dest_ty.display()
+                ty_pretty(&src_ty, self.sym_names),
+                ty_pretty(&dest_ty, self.sym_names)
             )));
         };
         Ok(Some(result))
@@ -2263,7 +2330,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             HirUnOp::Neg => match ty {
                 Ty::Int(_) => self.builder.ins().ineg(v),
                 Ty::Float(_) => self.builder.ins().fneg(v),
-                _ => return Err(CodegenError(format!("cannot negate `{}`", ty.display()))),
+                _ => {
+                    return Err(CodegenError(format!(
+                        "cannot negate `{}`",
+                        ty_pretty(ty, self.sym_names)
+                    )));
+                }
             },
             HirUnOp::Not => {
                 let one = self.builder.ins().iconst(types::I8, 1);
@@ -2895,7 +2967,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             (recv_ty, _) => Err(CodegenError(format!(
                 "method `.{}` on `{}` is not implemented",
                 method,
-                recv_ty.display()
+                ty_pretty(recv_ty, self.sym_names)
             ))),
         }
     }
@@ -3219,7 +3291,7 @@ impl<'a, M: Module> FnCodegen<'a, M> {
             _ => {
                 return Err(CodegenError(format!(
                     "indexing non-array type `{}`",
-                    array.ty.display()
+                    ty_pretty(&array.ty, self.sym_names)
                 )));
             }
         };

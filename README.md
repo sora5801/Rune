@@ -328,8 +328,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 ## Roadmap
 
 1. Const-eval overflow checks — reject `100u8 + 200u8`
-2. Codegen-side diagnostic polish — friendly type names in codegen errors
-3. Chained binop hint propagation — `1 + 2 + a: i32` works without parens
+2. Chained binop hint propagation — `1 + 2 + a: i32` works without parens
+3. Pre-1.0 audit — retrospective doc covering deferred items + 1.0 scope
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

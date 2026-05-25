@@ -101,6 +101,12 @@ pub struct HirModule {
     /// route `5.add(3)` (a MethodCall on Ty::Int(I64)) through
     /// the same lookup as struct receivers.
     pub primitive_anchors: HashMap<Ty, SymbolId>,
+    /// Session 097: struct/enum/trait/dyn sym → display name, so
+    /// codegen error messages can read "AppErr" / "Iterator"
+    /// instead of "struct#83" / "dyn#47". Populated by the
+    /// lowerer; covers every symbol with a user-visible name
+    /// (Struct / Enum / Trait kinds).
+    pub sym_names: HashMap<SymbolId, String>,
 }
 
 #[derive(Debug, Clone)]
