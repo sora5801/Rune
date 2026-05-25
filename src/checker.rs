@@ -2158,6 +2158,44 @@ impl<'r> Checker<'r> {
     /// Returns `None` when no Into impls match (the caller falls
     /// through to the default bottom-up check, which may surface
     /// a clearer error).
+    /// Session 096: hint a bare-numeric-literal receiver when the
+    /// method name uniquely identifies one primitive-impl method.
+    /// `3.add(x)` with `impl Numeric for i32 { fn add(...) }` and
+    /// no other `.add` impls hints 3 to i32 so method dispatch
+    /// finds the right impl. Returns `None` when the receiver
+    /// isn't a bare numeric literal, the method name is
+    /// ambiguous, or no primitive anchor has it.
+    fn maybe_hint_method_receiver(
+        &mut self,
+        receiver: &Expr,
+        method_name: &str,
+    ) -> Option<Ty> {
+        let is_bare_lit = matches!(
+            receiver,
+            Expr::Lit { lit: Lit::Int(_, None), .. }
+                | Expr::Lit { lit: Lit::Float(_, None), .. }
+        );
+        if !is_bare_lit {
+            return None;
+        }
+        let mut candidates: Vec<Ty> = Vec::new();
+        for ((sym, name), _) in &self.res.impl_methods {
+            if name != method_name {
+                continue;
+            }
+            if let SymbolKind::BuiltinType(ty) = &self.res.symbol(*sym).kind {
+                if matches!(ty, Ty::Int(_) | Ty::Float(_)) {
+                    candidates.push(ty.clone());
+                }
+            }
+        }
+        if candidates.len() != 1 {
+            return None;
+        }
+        let hint = candidates.into_iter().next().unwrap();
+        Some(self.check_expr_with_hint(receiver, Some(&hint)))
+    }
+
     /// Session 090: walk every `impl Into<T> for S` block and
     /// reject duplicate-target impls per source. The resolver
     /// already stored ALL Into impls in `into_impls` (session 072);
@@ -4295,7 +4333,20 @@ impl<'r> Checker<'r> {
         args: &[Expr],
         span: Span,
     ) -> Ty {
-        let recv_ty = self.check_expr(receiver);
+        // Session 096: receiver hint flow. When the receiver is a
+        // bare numeric literal AND the method name appears on
+        // exactly one primitive-anchor impl, hint the receiver to
+        // that primitive's type. Closes the gap where `3.add(x)`
+        // — with `.add` defined on i32 via session 087's primitive
+        // impls — would otherwise default 3 to i64 and the lookup
+        // would fail.
+        let recv_ty = if let Some(hinted) =
+            self.maybe_hint_method_receiver(receiver, &method.name)
+        {
+            hinted
+        } else {
+            self.check_expr(receiver)
+        };
         // Session 081: bidirectional hints at method-call sites.
         // When the method resolves through impl_methods (the
         // user_method_sig path), walk its param types alongside

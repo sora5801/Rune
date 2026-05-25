@@ -1613,6 +1613,43 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn method_receiver_hint_primitive_impl() {
+    // Session 096: `.add` is defined only on i32 via Numeric;
+    // a bare `3.add(x)` receiver hints to i32 so the method
+    // dispatch finds the right impl.
+    let src = r#"
+        impl std::Numeric for i32 {
+            fn add(self: i32, other: i32) -> i32 { self + other }
+            fn lt(self: i32, other: i32) -> bool { self < other }
+        }
+        fn main() -> i64 {
+            let a: i32 = 5;
+            let r: i32 = 3.add(a);
+            r as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 8);
+}
+
+#[test]
+fn method_receiver_hint_chain_two_literals() {
+    // Both receiver and arg are bare literals; receiver hints
+    // to i32 via `.add` uniqueness, and the arg hints via
+    // session 081's bidirectional method-arg flow.
+    let src = r#"
+        impl std::Numeric for i32 {
+            fn add(self: i32, other: i32) -> i32 { self + other }
+            fn lt(self: i32, other: i32) -> bool { self < other }
+        }
+        fn main() -> i64 {
+            let r: i32 = 4.add(7);
+            r as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 11);
+}
+
+#[test]
 fn binop_hint_rhs_literal() {
     // Session 095: `a: i32 + 1` lets the bare `1` adopt i32
     // from the LHS's concrete type. Previously errored as

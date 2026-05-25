@@ -329,7 +329,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. Const-eval overflow checks — reject `100u8 + 200u8`
 2. Codegen-side diagnostic polish — friendly type names in codegen errors
-3. Method-receiver hint flow — `42.method()` adopts typed receiver from context
+3. Chained binop hint propagation — `1 + 2 + a: i32` works without parens
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
