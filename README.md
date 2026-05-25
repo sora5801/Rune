@@ -329,8 +329,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 1. Integer literal hint flow — `let x: i32 = 10;` picks i32 from
    the annotation instead of defaulting to i64
-2. Same-target Into duplicate detection
-3. Suffix overflow checks — reject `1000u8`
+2. Suffix overflow checks — reject `1000u8`
+3. Per-arm unreachability inside tuple matches
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

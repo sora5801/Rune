@@ -198,6 +198,15 @@ impl<'r> Checker<'r> {
         // Pass 1b: function signatures + const types + impl methods +
         // trait signature types — recurse into modules.
         self.register_signatures(&m.items);
+        // Session 090: detect `impl Into<T> for S` blocks that
+        // collide on target. The resolver stores all per-source
+        // Into impls in `into_impls`; we resolve each target_ast
+        // to a `Ty` and flag duplicates structurally so
+        // `impl Into<AppErr> for IoErr` declared twice — or two
+        // textually-different paths resolving to the same struct —
+        // surfaces at type-check time instead of silently picking
+        // first-match at the .into() site.
+        self.check_into_impl_duplicates();
         // Pass 2: bodies.
         for item in &m.items {
             self.check_item(item);
@@ -2095,6 +2104,61 @@ impl<'r> Checker<'r> {
     /// Returns `None` when no Into impls match (the caller falls
     /// through to the default bottom-up check, which may surface
     /// a clearer error).
+    /// Session 090: walk every `impl Into<T> for S` block and
+    /// reject duplicate-target impls per source. The resolver
+    /// already stored ALL Into impls in `into_impls` (session 072);
+    /// at type-check time we resolve each target's AST to a `Ty`
+    /// and structurally compare. Compatible Tys → duplicate. The
+    /// error fires at the LATER impl's span so the diagnostic
+    /// pairs naturally with "remove this block."
+    fn check_into_impl_duplicates(&mut self) {
+        let by_source: Vec<(SymbolId, Vec<(crate::ast::Type, SymbolId)>)> = self
+            .res
+            .into_impls
+            .iter()
+            .map(|(s, impls)| (*s, impls.clone()))
+            .collect();
+        for (source_sym, impls) in by_source {
+            let source_name = self.res.symbol(source_sym).name.clone();
+            let mut seen: Vec<(Ty, Span)> = Vec::new();
+            for (target_ast, fn_sym) in impls {
+                let target_ty = self.resolve_type(&target_ast);
+                if target_ty.is_error() {
+                    continue;
+                }
+                let fn_span = self.res.symbol(fn_sym).span;
+                let mut dup = false;
+                for (prev_ty, _prev_span) in &seen {
+                    if target_ty.compatible(prev_ty) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if dup {
+                    // Prefer the friendly struct/enum name when the
+                    // target resolves to a user type; fall back to
+                    // Ty::display otherwise.
+                    let target_name = match &target_ty {
+                        Ty::Struct(s, _) | Ty::Enum(s, _) => {
+                            self.res.symbol(*s).name.clone()
+                        }
+                        _ => target_ty.display(),
+                    };
+                    self.error(
+                        fn_span,
+                        format!(
+                            "duplicate `impl Into<{}> for {}` — a previous `impl` block \
+                             already declared this conversion",
+                            target_name,
+                            source_name,
+                        ),
+                    );
+                }
+                seen.push((target_ty, fn_span));
+            }
+        }
+    }
+
     fn try_into_disambiguation(
         &mut self,
         receiver: &Expr,

@@ -338,6 +338,47 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
+fn duplicate_into_impl_rejected() {
+    // Session 090: two `impl Into<AppErr> for IoErr` blocks
+    // collide on target and must error at type-check. The
+    // diagnostic uses the friendly struct name in the message.
+    check_has_error(
+        r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: 1 } }
+        }
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: 2 } }
+        }
+        fn main() -> i64 { 0 }
+        "#,
+        "duplicate `impl Into<AppErr> for IoErr`",
+    );
+}
+
+#[test]
+fn distinct_into_targets_accepted() {
+    // Two Into impls with DIFFERENT targets remain valid — the
+    // duplicate-detection only fires on identical-target collisions.
+    check_ok(
+        r#"
+        struct IoErr { code: i64 }
+        struct AppErr { code: i64 }
+        struct DbErr { code: i64 }
+        impl std::Into<AppErr> for IoErr {
+            fn into(self: IoErr) -> AppErr { AppErr { code: self.code + 100 } }
+        }
+        impl std::Into<DbErr> for IoErr {
+            fn into(self: IoErr) -> DbErr { DbErr { code: self.code + 200 } }
+        }
+        fn main() -> i64 { 0 }
+        "#,
+    );
+}
+
+#[test]
 fn try_without_into_impl_rejected() {
     // Session 065: `?` with mismatched err types and NO Into impl
     // is still an error. The error message names the missing impl
