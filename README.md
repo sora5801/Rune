@@ -110,14 +110,15 @@ rune: linked with clang -> primes.exe
   `.min()`, `.max()`, `.filter(p)`, `.map(f)`, `.fold(init, f)` are
   declared as default-body methods on the `Iterator` trait, so every
   implementor inherits them. The pipeline reads as a method chain
-  end-to-end: `v.iter().filter(|x| x > 1).map(|x: i64| x * 10)
-  .fold(0, |a: i64, x: i64| a + x)`. `.min()` and `.max()` return
-  `Option<i64>::Some(best)` over non-empty iterators (i64-only until
-  a `Numeric` trait lands). `.filter` and `.map` take any callable
-  (named fn, non-capturing closure, or capturing closure), pinned
-  through method-level generic params with `Fn1` bounds; `.fold`
-  uses `Fn2<U, Self::Item, U>` for its (acc, next) -> acc binary
-  closure.
+  end-to-end with unannotated closures: `v.iter().filter(|x| x > 1)
+  .map(|x| x * 10).fold(0, |a, x| a + x)` — the checker synthesizes
+  a `Ty::Fn` hint at each method-call position from F's `Fn1` /
+  `Fn2` bound and uses it to bind closure params bidirectionally.
+  `.min()` and `.max()` return `Option<i64>::Some(best)` over non-
+  empty iterators (i64-only until a `Numeric` trait lands).
+  `.filter` and `.map` take any callable (named fn, non-capturing
+  closure, or capturing closure); `.fold` uses `Fn2<U, Self::Item,
+  U>` for its (acc, next) -> acc binary closure.
 - **Function-pointer values + closures (capturing)** — named
   `fn` items are first-class values; closure literals `|x| body`
   / `|x, y| body` / `|| body` lower to anonymous fn items
@@ -326,14 +327,12 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Bidirectional hints at method-call sites — unblocks unannotated
-   closures in `.fold` / `.map` / `.filter` chains
-2. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
+1. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
    `.fold(init, +)` beyond i64
-3. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
-4. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
-5. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
-6. Self-hosted bootstrap (long-term)
+2. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
+3. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
+4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 

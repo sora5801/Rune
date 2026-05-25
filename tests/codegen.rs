@@ -628,6 +628,69 @@ fn iterator_fold_multiplies() {
 }
 
 #[test]
+fn iterator_fold_unannotated_closure() {
+    // Session 081: bidirectional hints at method-call sites.
+    // The closure's params (acc, x) get their types from F's
+    // Fn2<U, Self::Item, U> bound — U pinned from init (i64),
+    // Self::Item from VecIter<i64> = i64. No annotation needed.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4);
+            v.iter().fold(0, |acc, x| acc + x)
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn iterator_map_unannotated_closure() {
+    // Session 081: unannotated closure in .map. F's Fn1<Self::
+    // Item, U> bound supplies x: i64 from VecIter<i64>::Item;
+    // U remains an inference TypeVar that the body's `x * x`
+    // (i64) pins.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3);
+            v.iter().map(|x| x * x).sum()
+        }
+    "#;
+    // 1 + 4 + 9 = 14
+    assert_eq!(run_main(src), 14);
+}
+
+#[test]
+fn iterator_filter_unannotated_closure() {
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter().filter(|x| x > 2).count()
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn iterator_chain_all_unannotated() {
+    // Three back-to-back unannotated closures in one chain.
+    // The bidirectional hint flow has to fire at each step.
+    let src = r#"
+        fn main() -> i64 {
+            let v: Vec<i64> = vec_new();
+            v.push(1); v.push(2); v.push(3); v.push(4); v.push(5);
+            v.iter()
+                .filter(|x| x > 1)
+                .map(|x| x * 10)
+                .fold(0, |acc, x| acc + x)
+        }
+    "#;
+    // filter > 1 = [2,3,4,5]; map *10 = [20,30,40,50]; fold sum = 140
+    assert_eq!(run_main(src), 140);
+}
+
+#[test]
 fn iterator_fold_with_capturing_closure() {
     // Capturing closure → synthesized struct implementing Fn2.
     // Tests that the bound-propagation cascade reads the call

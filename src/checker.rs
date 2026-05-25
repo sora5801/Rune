@@ -2640,17 +2640,23 @@ impl<'r> Checker<'r> {
         expected: &Ty,
         subst: &std::collections::HashMap<SymbolId, Ty>,
     ) -> Option<Ty> {
-        let Ty::TypeVar(struct_sym) = expected else {
+        let Ty::TypeVar(generic_sym) = expected else {
             return None;
         };
-        let impl_sym = self
+        // Session 081: for struct-side syms (struct-lit field
+        // types), translate to impl-side via impl_to_struct_generic;
+        // for method-level syms (method-call arg types at sites
+        // like `.fold(0, |acc, x| ...)`), the TypeVar's sym is
+        // already the bound's keyed sym — use it directly.
+        let lookup_sym = self
             .res
             .impl_to_struct_generic
             .iter()
-            .find(|&(_, &s)| s == *struct_sym)
-            .map(|(&i, _)| i)?;
+            .find(|&(_, &s)| s == *generic_sym)
+            .map(|(&i, _)| i)
+            .unwrap_or(*generic_sym);
         for (&(p, _t), arg_spans) in self.res.generic_bound_args.iter() {
-            if p != impl_sym || arg_spans.is_empty() {
+            if p != lookup_sym || arg_spans.is_empty() {
                 continue;
             }
             let last = arg_spans.len() - 1;
@@ -3148,6 +3154,155 @@ impl<'r> Checker<'r> {
             }
         }
         Ty::Enum(enum_sym, Vec::new())
+    }
+
+    /// Session 081: check method-call arguments with bidirectional
+    /// hints. For each arg position, look at the method's
+    /// corresponding param type; if it's a callable-bounded
+    /// TypeVar (e.g. `F: Fn2<U, Self::Item, U>`), synthesize a
+    /// `Ty::Fn` hint from the bound's args and apply the running
+    /// subst (so Self → recv_ty and earlier-pinned generics
+    /// resolve). Pass the hint to `check_expr_with_hint` so a
+    /// closure arg binds its params from the hint instead of
+    /// erroring with "needs a type annotation."
+    ///
+    /// Returns `None` when the method isn't found via
+    /// `impl_methods` (builtin, dyn, etc.) — callers fall back to
+    /// the existing bottom-up arg-check loop.
+    fn check_method_args_bidirectional(
+        &mut self,
+        recv_ty: &Ty,
+        method_name: &str,
+        args: &[Expr],
+    ) -> Option<Vec<Ty>> {
+        let Ty::Struct(sym_id, _) = recv_ty else { return None };
+        let &method_sym =
+            self.res.impl_methods.get(&(*sym_id, method_name.to_string()))?;
+        let method_span = self.res.symbol(method_sym).span;
+        let fn_ty = self.fn_signatures.get(&method_span)?.clone();
+        let Ty::Fn { params, .. } = fn_ty else { return None };
+        let (self_ty, rest) = params.split_first()?;
+        if rest.len() != args.len() {
+            return None;
+        }
+        let mut subst: std::collections::HashMap<SymbolId, Ty> =
+            std::collections::HashMap::new();
+        unify_typevars(self_ty, recv_ty, &mut subst);
+        let mut arg_tys: Vec<Ty> = Vec::with_capacity(args.len());
+        for (param, arg) in rest.iter().zip(args) {
+            // Compute the expected type for this arg under the
+            // current subst (Self pinned + any earlier args'
+            // method-generic pins).
+            let expected = self.apply_subst(param, &subst, None);
+            // If `expected` is a callable-bounded TypeVar, turn
+            // it into a Ty::Fn { params, ret } hint via the
+            // bound's args. expand_callable_typevar already
+            // applies `subst` to the bound's args, so Self::Item
+            // resolves to the recv's Item binding and any pinned
+            // U resolves to its concrete.
+            let synthesized_hint =
+                self.expand_callable_typevar(&expected, &subst);
+            let hint = synthesized_hint.as_ref().unwrap_or(&expected);
+            let arg_ty = self.check_expr_with_hint(arg, Some(hint));
+            // Update subst with this arg's inferred type so later
+            // args see the latest pins (e.g. for fold, init's
+            // type pins U before f's hint is built).
+            unify_typevars(param, &arg_ty, &mut subst);
+            // Run the cascade so a freshly-pinned F propagates U
+            // through its bound (mirroring the cascade in
+            // user_method_sig_with_args).
+            for _ in 0..3 {
+                let entries: Vec<(SymbolId, Ty)> = subst
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect();
+                let mut changed = false;
+                for (param_sym, concrete) in entries {
+                    let Some(bound_syms) = self.res.generic_bounds.get(&param_sym) else {
+                        continue;
+                    };
+                    for &trait_sym in bound_syms {
+                        let Some(arg_spans) = self
+                            .res
+                            .generic_bound_args
+                            .get(&(param_sym, trait_sym))
+                        else {
+                            continue;
+                        };
+                        let bound_arg_tys: Vec<Ty> = arg_spans
+                            .iter()
+                            .map(|sp| {
+                                self.type_resolutions
+                                    .get(sp)
+                                    .cloned()
+                                    .unwrap_or(Ty::Error)
+                            })
+                            .collect();
+                        let bound_arg_tys: Vec<Ty> = bound_arg_tys
+                            .iter()
+                            .map(|t| self.apply_subst(t, &subst, None))
+                            .collect();
+                        match &concrete {
+                            Ty::Fn { params: p, ret: r } => {
+                                if bound_arg_tys.len() == p.len() + 1 {
+                                    let before_len = subst.len();
+                                    for (i, p_ty) in p.iter().enumerate() {
+                                        unify_typevars(&bound_arg_tys[i], p_ty, &mut subst);
+                                    }
+                                    unify_typevars(
+                                        &bound_arg_tys[p.len()],
+                                        r,
+                                        &mut subst,
+                                    );
+                                    if subst.len() != before_len {
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            Ty::Struct(struct_sym, _) => {
+                                if let Some(&call_sym) = self
+                                    .res
+                                    .impl_methods
+                                    .get(&(*struct_sym, "call".to_string()))
+                                {
+                                    let call_span = self.res.symbol(call_sym).span;
+                                    if let Some(Ty::Fn { params: cp, ret: cr }) =
+                                        self.fn_signatures.get(&call_span)
+                                    {
+                                        if cp.len() == bound_arg_tys.len()
+                                            && cp.len() >= 2
+                                        {
+                                            let before_len = subst.len();
+                                            for i in 0..cp.len() - 1 {
+                                                unify_typevars(
+                                                    &bound_arg_tys[i],
+                                                    &cp[i + 1],
+                                                    &mut subst,
+                                                );
+                                            }
+                                            unify_typevars(
+                                                &bound_arg_tys[cp.len() - 1],
+                                                cr,
+                                                &mut subst,
+                                            );
+                                            if subst.len() != before_len {
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            arg_tys.push(arg_ty);
+        }
+        Some(arg_tys)
     }
 
     /// Look up a method declared in an `impl` block on a struct type.
@@ -3672,7 +3827,21 @@ impl<'r> Checker<'r> {
         span: Span,
     ) -> Ty {
         let recv_ty = self.check_expr(receiver);
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
+        // Session 081: bidirectional hints at method-call sites.
+        // When the method resolves through impl_methods (the
+        // user_method_sig path), walk its param types alongside
+        // the args so a closure arg whose param is a callable-
+        // bounded TypeVar gets a `Ty::Fn { params, ret }` hint
+        // synthesized from the bound. Unblocks `.fold(0, |acc,
+        // x| acc + x)` and the like — without the hint, the
+        // closure's params get fresh inference TypeVars with no
+        // body-side concretes to pin them. Falls back to the
+        // bottom-up check when the method isn't user-defined
+        // (builtins, dyn, etc.) or when the bidirectional path
+        // can't precompute the sig.
+        let arg_tys: Vec<Ty> = self
+            .check_method_args_bidirectional(&recv_ty, &method.name, args)
+            .unwrap_or_else(|| args.iter().map(|a| self.check_expr(a)).collect());
         let sig = resolve_method(&recv_ty, &method.name)
             .or_else(|| self.builtin_vec_iter_sig(&recv_ty, &method.name))
             .or_else(|| self.user_method_sig_with_args(&recv_ty, &method.name, &arg_tys))
