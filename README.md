@@ -327,8 +327,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Subnormal-as-zero diagnostic (`1e-50f32` silently rounds today)
-2. Shift compound operators (`<<=` `>>=`) — parser extension
+1. Shift compound operators (`<<=` `>>=`) — parser extension
+2. Bit-op compound operators (`&=` `|=` `^=`) — parser extension
 3. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

@@ -1259,6 +1259,99 @@ fn compound_assign_float_div_by_zero_no_check() {
 }
 
 #[test]
+fn f32_literal_underflow_to_zero_rejected() {
+    // Session 113: `1e-50f32` is too small even for f32's
+    // subnormal range — it rounds to exactly 0.0f32. The user
+    // wrote a nonzero magnitude their type can't preserve at
+    // all; surface it as an error.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 1.0e-50f32;
+            x as i64
+        }
+        "#,
+        "underflows to zero in `f32`",
+    );
+}
+
+#[test]
+fn f32_literal_underflow_hinted_rejected() {
+    // Same shape via the hint-flow path: no suffix, f32 hint
+    // from the let annotation.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 1.0e-50;
+            x as i64
+        }
+        "#,
+        "underflows to zero in `f32`",
+    );
+}
+
+#[test]
+fn f32_literal_negative_underflow_rejected() {
+    // `-1e-50` hinted to f32 — Unary-Neg-on-Lit path, with
+    // the `-` rendered in the diagnostic.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = -1.0e-50;
+            x as i64
+        }
+        "#,
+        "underflows to zero in `f32`",
+    );
+}
+
+#[test]
+fn f32_subnormal_still_accepted() {
+    // Per session 108's policy: subnormals (nonzero but
+    // smaller than f32::MIN_POSITIVE) are representable, just
+    // with reduced precision. `1e-40` rounds to a positive
+    // subnormal f32 — accepted.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 1.0e-40f32;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn f32_literal_zero_accepted() {
+    // Explicit `0.0f32` compiles — the underflow check gates on
+    // `v != 0.0`, so a literal zero passes.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 0.0f32;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn f64_underflow_not_checked() {
+    // f64's representable range is much wider — `1e-300` is a
+    // valid f64 (subnormal but nonzero). The underflow check
+    // doesn't fire for f64 because the lexer's parse target IS
+    // f64 — if it parses to nonzero, it's representable.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f64 = 1.0e-300;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

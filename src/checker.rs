@@ -3087,6 +3087,26 @@ impl<'r> Checker<'r> {
                     ty.name(),
                 ),
             );
+            return;
+        }
+        // Session 113: round-to-zero diagnostic for f32. A nonzero
+        // source magnitude that rounds to exactly 0.0f32 represents
+        // a bug — the user wrote a value their float type can't
+        // preserve at all. (Subnormal results — small but nonzero
+        // f32 — are still accepted per session 108's policy; the
+        // value remains representable, just with reduced precision.)
+        // f64 doesn't need the check because the lexer's f64 parse
+        // is the canonical representation; if the user wrote a
+        // value too small for f64, it stays exactly 0 anyway.
+        if matches!(ty, F32) && v != 0.0 && (v as f32) == 0.0 {
+            let sign = if negated { "-" } else { "" };
+            self.error(
+                span,
+                format!(
+                    "literal `{}{}` underflows to zero in `f32`",
+                    sign, v,
+                ),
+            );
         }
     }
 
