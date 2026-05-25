@@ -1614,39 +1614,40 @@ fn hashmap_str_keys_release_with_vec_values() {
 
 #[test]
 fn method_receiver_hint_primitive_impl() {
-    // Session 096: `.add` is defined only on i32 via Numeric;
-    // a bare `3.add(x)` receiver hints to i32 so the method
-    // dispatch finds the right impl.
+    // Session 096: a bare-literal receiver hints to the primitive
+    // type when the method name uniquely identifies one
+    // primitive-impl. Session 104 made `.add` no longer unique
+    // (it's on every Numeric primitive); this test uses
+    // `.shifted` — an inherent-impl method defined only on i32
+    // — to keep testing the uniqueness path.
     let src = r#"
-        impl std::Numeric for i32 {
-            fn add(self: i32, other: i32) -> i32 { self + other }
-            fn lt(self: i32, other: i32) -> bool { self < other }
+        impl i32 {
+            fn shifted(self: i32) -> i32 { self + 1 }
         }
         fn main() -> i64 {
-            let a: i32 = 5;
-            let r: i32 = 3.add(a);
+            let r: i32 = 5.shifted();
             r as i64
         }
     "#;
-    assert_eq!(run_main(src), 8);
+    assert_eq!(run_main(src), 6);
 }
 
 #[test]
 fn method_receiver_hint_chain_two_literals() {
-    // Both receiver and arg are bare literals; receiver hints
-    // to i32 via `.add` uniqueness, and the arg hints via
-    // session 081's bidirectional method-arg flow.
+    // Same uniqueness path but with the receiver-hint pinning
+    // i32 and the method's arg hinted via session 081's
+    // bidirectional method-arg flow.
     let src = r#"
-        impl std::Numeric for i32 {
-            fn add(self: i32, other: i32) -> i32 { self + other }
-            fn lt(self: i32, other: i32) -> bool { self < other }
+        impl i32 {
+            fn weighted(self: i32, w: i32) -> i32 { self + w * 2 }
         }
         fn main() -> i64 {
-            let r: i32 = 4.add(7);
+            let r: i32 = 4.weighted(7);
             r as i64
         }
     "#;
-    assert_eq!(run_main(src), 11);
+    // 4 + 7*2 = 18
+    assert_eq!(run_main(src), 18);
 }
 
 #[test]
@@ -2001,15 +2002,59 @@ fn numeric_literal_suffix_hex_with_u8() {
 }
 
 #[test]
+fn prelude_numeric_works_on_i32() {
+    // Session 104: prelude ships `impl Numeric for i32` so
+    // generic <T: Numeric> code works directly over i32.
+    let src = r#"
+        fn larger<T: std::Numeric>(a: T, b: T) -> T {
+            if a.lt(b) { b } else { a }
+        }
+        fn main() -> i64 {
+            let a: i32 = 7;
+            let b: i32 = 12;
+            larger(a, b) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn prelude_numeric_works_on_u64() {
+    let src = r#"
+        fn sum<T: std::Numeric>(a: T, b: T) -> T { a.add(b) }
+        fn main() -> i64 {
+            let a: u64 = 1000u64;
+            let b: u64 = 234u64;
+            sum(a, b) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 1234);
+}
+
+#[test]
+fn prelude_numeric_via_generic_fn_dispatches_per_primitive() {
+    // Two separate specializations of the same generic fn — one
+    // on i64, one on i32 — confirm monomorphization picks the
+    // right impl_methods entry per call.
+    let src = r#"
+        fn double<T: std::Numeric>(a: T) -> T { a.add(a) }
+        fn main() -> i64 {
+            let i: i64 = 21;
+            let j: i32 = 11;
+            double(i) + (double(j) as i64)
+        }
+    "#;
+    // 42 + 22 = 64
+    assert_eq!(run_main(src), 64);
+}
+
+#[test]
 fn numeric_impl_on_i64_primitive() {
     // Session 087: `impl Numeric for i64` works, lifting the
-    // "impl only on structs" restriction. The trait dispatches
-    // through the BuiltinType anchor sym via impl_methods.
+    // "impl only on structs" restriction. Session 104 ships the
+    // impl in the prelude so the user no longer needs to write
+    // it — `smaller` works directly over i64.
     let src = r#"
-        impl std::Numeric for i64 {
-            fn add(self: i64, other: i64) -> i64 { self + other }
-            fn lt(self: i64, other: i64) -> bool { self < other }
-        }
         fn smaller<T: std::Numeric>(a: T, b: T) -> T {
             if a.lt(b) { a } else { b }
         }
@@ -2024,11 +2069,9 @@ fn numeric_impl_on_i64_primitive() {
 
 #[test]
 fn numeric_impl_on_i64_combined() {
+    // Prelude Numeric impl (session 104) is enough; no user
+    // impl block needed.
     let src = r#"
-        impl std::Numeric for i64 {
-            fn add(self: i64, other: i64) -> i64 { self + other }
-            fn lt(self: i64, other: i64) -> bool { self < other }
-        }
         fn sum_two<T: std::Numeric>(a: T, b: T) -> T { a.add(b) }
         fn main() -> i64 {
             sum_two(7, 8)
@@ -2041,12 +2084,9 @@ fn numeric_impl_on_i64_combined() {
 fn numeric_primitive_method_direct_call() {
     // Calling the impl method directly on a primitive receiver,
     // outside any generic context. `(5).lt(7)` dispatches through
-    // impl_methods on the i64 anchor sym.
+    // impl_methods on the i64 anchor sym — the prelude impl
+    // (session 104) provides the body.
     let src = r#"
-        impl std::Numeric for i64 {
-            fn add(self: i64, other: i64) -> i64 { self + other }
-            fn lt(self: i64, other: i64) -> bool { self < other }
-        }
         fn main() -> i64 {
             let a: i64 = 5;
             let b: i64 = 7;

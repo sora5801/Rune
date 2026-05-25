@@ -182,27 +182,78 @@ pub mod std {
         fn call(self: Self, a: A, b: B) -> R;
     }
 
-    /* Session 084: the numeric trait. User types that want to act
-       as numeric "scalars" (so generic code can sum / compare / fold
+    /* Session 084: the numeric trait. Types that want to act as
+       numeric "scalars" (so generic code can sum / compare / fold
        over them) implement this. The trait carries the arithmetic
        and ordering ops `.sum / .min / .max / .fold(init, +)` need
        to dispatch.
 
-       v0.x doesn't yet support intrinsic impls for primitive
-       numeric types — `impl Numeric for i64 { ... }` would require
-       per-primitive intrinsic lowering at the impl-block layer,
-       deferred. Primitive-typed iterators (Vec<i64>, RangeIter)
-       still work with `.min` / `.max` directly: those default-body
-       methods compare via `<` / `>` which go through the Ty::Assoc
-       opaque pass-through (session 079) at type-check and emit
-       native icmp at codegen. The Numeric trait below is meant
-       for *user* structs that wrap numeric data and want to
-       participate in generic numeric code — e.g.
-       `struct Money { cents: i64 } impl Numeric for Money { ... }`
-       lets a user fn `<T: Numeric>` accept Money values too. */
+       Session 087 lifted the "impl only on structs" restriction —
+       primitives have `BuiltinType(Ty)` anchor syms and
+       impl_methods can be keyed by them. Session 104 ships the
+       per-primitive impls below so user code gets `<T: Numeric>`
+       support over i64 / i32 / u64 / etc. out of the box. */
     pub trait Numeric {
         fn add(self: Self, other: Self) -> Self;
         fn lt(self: Self, other: Self) -> bool;
+    }
+
+    /* Session 104: intrinsic Numeric impls for every primitive
+       numeric type. The bodies use the native `+` / `<` operators
+       which lower to icmp / iadd at codegen. Method dispatch on a
+       primitive receiver (e.g., `5.add(3)`) routes through the
+       BuiltinType anchor in `impl_methods` (session 087).
+
+       Float impls (f32/f64) follow the same shape but use `<` on
+       floats which lowers to fcmp.lt. NaN comparisons follow
+       IEEE-754: any NaN comparison returns false. */
+    impl Numeric for i64 {
+        fn add(self: i64, other: i64) -> i64 { self + other }
+        fn lt(self: i64, other: i64) -> bool { self < other }
+    }
+    impl Numeric for i32 {
+        fn add(self: i32, other: i32) -> i32 { self + other }
+        fn lt(self: i32, other: i32) -> bool { self < other }
+    }
+    impl Numeric for i16 {
+        fn add(self: i16, other: i16) -> i16 { self + other }
+        fn lt(self: i16, other: i16) -> bool { self < other }
+    }
+    impl Numeric for i8 {
+        fn add(self: i8, other: i8) -> i8 { self + other }
+        fn lt(self: i8, other: i8) -> bool { self < other }
+    }
+    impl Numeric for isize {
+        fn add(self: isize, other: isize) -> isize { self + other }
+        fn lt(self: isize, other: isize) -> bool { self < other }
+    }
+    impl Numeric for u64 {
+        fn add(self: u64, other: u64) -> u64 { self + other }
+        fn lt(self: u64, other: u64) -> bool { self < other }
+    }
+    impl Numeric for u32 {
+        fn add(self: u32, other: u32) -> u32 { self + other }
+        fn lt(self: u32, other: u32) -> bool { self < other }
+    }
+    impl Numeric for u16 {
+        fn add(self: u16, other: u16) -> u16 { self + other }
+        fn lt(self: u16, other: u16) -> bool { self < other }
+    }
+    impl Numeric for u8 {
+        fn add(self: u8, other: u8) -> u8 { self + other }
+        fn lt(self: u8, other: u8) -> bool { self < other }
+    }
+    impl Numeric for usize {
+        fn add(self: usize, other: usize) -> usize { self + other }
+        fn lt(self: usize, other: usize) -> bool { self < other }
+    }
+    impl Numeric for f64 {
+        fn add(self: f64, other: f64) -> f64 { self + other }
+        fn lt(self: f64, other: f64) -> bool { self < other }
+    }
+    impl Numeric for f32 {
+        fn add(self: f32, other: f32) -> f32 { self + other }
+        fn lt(self: f32, other: f32) -> bool { self < other }
     }
 
     /* Conversion from `Self` to `T`. The `?` operator calls
