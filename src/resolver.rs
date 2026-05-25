@@ -838,6 +838,29 @@ impl Resolver {
             zero,
             SymbolKind::BuiltinFn(print_i64),
         );
+        // Session 118: file I/O builtins. `read_file(path) -> str`
+        // returns an empty string on error (callers check
+        // `.is_empty()`); `write_file(path, contents) -> bool`
+        // returns false on failure. A proper Result<str, IoErr>
+        // shape lands once Rune has a std::io::Error type.
+        self.intern(
+            "read_file".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "read_file",
+                params: vec![Ty::Str],
+                ret: Ty::Str,
+            }),
+        );
+        self.intern(
+            "write_file".to_string(),
+            zero,
+            SymbolKind::BuiltinFn(BuiltinFn {
+                name: "write_file",
+                params: vec![Ty::Str, Ty::Str],
+                ret: Ty::Bool,
+            }),
+        );
         self.intern(
             "vec_new".to_string(),
             zero,

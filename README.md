@@ -329,13 +329,15 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 Phase 1 — capability buildout (next ~20 sessions):
 
-1. File I/O builtins (`read_file` / `write_file`)
-2. String methods (`.split`, `.starts_with`, `.find`, `.byte_at`)
-3. Command-line args (`std::env::args`)
-4. Module system at file granularity
-5. Mutable `String` type + builder methods
-6. `Box<T>` (or implicit boxing of recursive enum variants)
-7. Pattern guards + `let ... else`
+1. String methods (`.split`, `.find`, `.byte_at`, `.chars`)
+2. Command-line args (`std::env::args`)
+3. Module system at file granularity
+4. Mutable `String` type + builder methods
+5. `Box<T>` (or implicit boxing of recursive enum variants)
+6. Pattern guards + `let ... else`
+
+Already shipped from Phase 1: file I/O builtins (session 118),
+`.starts_with` / `.ends_with` / `.contains` on `str`.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

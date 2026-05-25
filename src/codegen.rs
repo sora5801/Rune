@@ -170,6 +170,8 @@ unsafe extern "C" {
     fn rune_str_starts_with(s: *const u8, prefix: *const u8) -> i8;
     fn rune_str_ends_with(s: *const u8, suffix: *const u8) -> i8;
     fn rune_str_contains(s: *const u8, needle: *const u8) -> i8;
+    fn rune_read_file(path: *const u8) -> *mut u8;
+    fn rune_write_file(path: *const u8, contents: *const u8) -> i8;
     fn rune_vec_new() -> *mut u8;
     fn rune_vec_push(v: *mut u8, x: i64);
     fn rune_vec_get(v: *const u8, i: i64) -> i64;
@@ -1215,6 +1217,8 @@ impl Codegen<JITModule> {
         builder.symbol("rune_str_starts_with", rune_str_starts_with as *const u8);
         builder.symbol("rune_str_ends_with", rune_str_ends_with as *const u8);
         builder.symbol("rune_str_contains", rune_str_contains as *const u8);
+        builder.symbol("rune_read_file", rune_read_file as *const u8);
+        builder.symbol("rune_write_file", rune_write_file as *const u8);
         builder.symbol("rune_vec_new", rune_vec_new as *const u8);
         builder.symbol("rune_vec_push", rune_vec_push as *const u8);
         builder.symbol("rune_vec_get", rune_vec_get as *const u8);
@@ -3151,7 +3155,12 @@ impl<'a, M: Module> FnCodegen<'a, M> {
         // string concat, a field read) is the caller's to reclaim.
         // `weak` / `upgrade_or` are excluded — they alias their
         // argument's control block, so releasing it would dangle.
-        if name == "print_str" {
+        // Session 118: extend the same fresh-arg release dance to
+        // file I/O builtins. read_file / write_file borrow their str
+        // args (just read the descriptor) — a non-Local arg means
+        // the caller produced a fresh +1 that no binding will
+        // reclaim.
+        if matches!(name, "print_str" | "read_file" | "write_file") {
             for (a, &v) in args.iter().zip(&arg_vals) {
                 if is_arc_type(&a.ty, self.struct_arc_fields, self.enum_has_payload)
                     && !matches!(a.kind, HirExprKind::Local(_))
@@ -4287,6 +4296,23 @@ fn declare_builtin<M: Module>(module: &mut M, name: &str) -> Result<FuncId, Code
             let mut sig = module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // *const RuneStr
             ("rune_print_str", sig)
+        }
+        // Session 118: file I/O builtins. Both treat the path as
+        // a rune_str descriptor pointer. read_file returns a fresh
+        // owned descriptor (rc=1, transfer); write_file returns
+        // i8 (1 = success, 0 = failure).
+        "read_file" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // path: *const RuneStr
+            sig.returns.push(AbiParam::new(types::I64)); // *mut RuneStr (fresh +1)
+            ("rune_read_file", sig)
+        }
+        "write_file" => {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // path
+            sig.params.push(AbiParam::new(types::I64)); // contents
+            sig.returns.push(AbiParam::new(types::I8));
+            ("rune_write_file", sig)
         }
         // Internal-only runtime helper: codegen calls this for `==`/`!=`
         // on `str` operands. Not surfaced through the resolver.

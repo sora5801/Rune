@@ -1,4 +1,15 @@
 use rune::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static FILE_IO_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Unique tmp path for file-I/O tests so they don't race each
+/// other when cargo test runs them in parallel.
+fn fileio_temp_path(tag: &str) -> std::path::PathBuf {
+    let id = FILE_IO_COUNTER.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir()
+        .join(format!("rune-fileio-{}-{}-{}.txt", std::process::id(), id, tag))
+}
 
 /// Compile `src` and JIT-call its `main() -> i64`, returning the value.
 /// The standard prelude is prepended so `std::` items are in scope.
@@ -107,6 +118,98 @@ fn compound_assignment() {
         run_main("fn main() -> i64 { let mut x = 1; x += 2; x *= 3; x }"),
         9
     );
+}
+
+// ---- session 118: file I/O builtins ----
+
+#[test]
+fn write_file_then_read_file_roundtrips() {
+    // Session 118: write_file followed by read_file recovers the
+    // same contents. Returns the byte length so the assertion sees
+    // a deterministic i64 (round-trip success).
+    let path = fileio_temp_path("roundtrip");
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        r#"
+        fn main() -> i64 {{
+            let p: str = "{p}";
+            let body: str = "hello world\n";
+            let ok: bool = write_file(p, body);
+            if !ok {{ return -1; }}
+            let got: str = read_file(p);
+            got.len()
+        }}
+        "#,
+        p = path_str
+    );
+    let n = run_main(&src);
+    assert_eq!(n, 12, "expected 12 bytes round-tripped, got {}", n);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn read_file_missing_returns_empty() {
+    // Reading a non-existent path returns an empty str (no panic).
+    // The user can check `.is_empty()` to detect failure.
+    let path = fileio_temp_path("does_not_exist");
+    let _ = std::fs::remove_file(&path); // belt-and-braces
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        r#"
+        fn main() -> i64 {{
+            let p: str = "{p}";
+            let got: str = read_file(p);
+            if got.is_empty() {{ 42 }} else {{ 0 }}
+        }}
+        "#,
+        p = path_str
+    );
+    assert_eq!(run_main(&src), 42);
+}
+
+#[test]
+fn write_file_failure_returns_false() {
+    // Writing to a clearly invalid path (a directory that doesn't
+    // exist) returns false rather than panicking.
+    let path = std::env::temp_dir()
+        .join(format!("rune-fileio-no-such-dir-{}", std::process::id()))
+        .join("nested")
+        .join("does")
+        .join("not")
+        .join("exist.txt");
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        r#"
+        fn main() -> i64 {{
+            let p: str = "{p}";
+            let ok: bool = write_file(p, "hi");
+            if ok {{ 1 }} else {{ 0 }}
+        }}
+        "#,
+        p = path_str
+    );
+    assert_eq!(run_main(&src), 0);
+}
+
+#[test]
+fn read_file_content_matches_via_starts_with() {
+    // Verify content survives the round-trip: write a known prefix,
+    // read it back, check starts_with.
+    let path = fileio_temp_path("prefix");
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    let src = format!(
+        r#"
+        fn main() -> i64 {{
+            let p: str = "{p}";
+            write_file(p, "rune-prefix-marker");
+            let got: str = read_file(p);
+            if got.starts_with("rune-prefix-") {{ 1 }} else {{ 0 }}
+        }}
+        "#,
+        p = path_str
+    );
+    assert_eq!(run_main(&src), 1);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

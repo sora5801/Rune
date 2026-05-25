@@ -87,6 +87,62 @@ int8_t rune_str_contains(const struct rune_str* s, const struct rune_str* needle
     return 0;
 }
 
+// Session 118: file I/O builtins. Both functions take rune_str
+// descriptors and return rune_str (read) / int8_t (write). The
+// path is read as a NUL-terminated C string — Rune `str` isn't
+// NUL-terminated, so we copy onto the stack with a length cap.
+// Errors are surfaced as the simplest possible signal: read_file
+// returns an empty rune_str on failure (callers check `.is_empty()`
+// or `.len() > 0`); write_file returns 0 on failure, 1 on success.
+// A proper Result<str, IoErr> shape can come once Rune has a
+// std::io::Error type — out of scope for v0.x.
+
+static int path_to_cstr(const struct rune_str* path, char* buf, size_t cap) {
+    if ((size_t)path->len + 1 > cap) return 0;
+    if (path->len > 0) memcpy(buf, path->ptr, (size_t)path->len);
+    buf[path->len] = '\0';
+    return 1;
+}
+
+struct rune_str* rune_read_file(const struct rune_str* path) {
+    struct rune_str* result = (struct rune_str*)malloc(sizeof(struct rune_str));
+    result->rc = 1;
+    result->ptr = (const char*)0;
+    result->len = 0;
+    char cpath[4096];
+    if (!path_to_cstr(path, cpath, sizeof(cpath))) return result;
+    FILE* f = fopen(cpath, "rb");
+    if (!f) return result;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return result; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return result; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return result; }
+    if (sz == 0) { fclose(f); return result; }  // empty file → empty str
+    char* bytes = (char*)malloc((size_t)sz);
+    size_t got = fread(bytes, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) {
+        free(bytes);
+        return result;
+    }
+    result->ptr = bytes;
+    result->len = sz;
+    return result;
+}
+
+int8_t rune_write_file(const struct rune_str* path, const struct rune_str* contents) {
+    char cpath[4096];
+    if (!path_to_cstr(path, cpath, sizeof(cpath))) return 0;
+    FILE* f = fopen(cpath, "wb");
+    if (!f) return 0;
+    if (contents->len > 0) {
+        size_t wrote = fwrite(contents->ptr, 1, (size_t)contents->len, f);
+        if (wrote != (size_t)contents->len) { fclose(f); return 0; }
+    }
+    fclose(f);
+    return 1;
+}
+
 struct rune_vec {
     int64_t* ptr;
     int64_t  len;
