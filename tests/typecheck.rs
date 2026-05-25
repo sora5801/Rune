@@ -1352,6 +1352,67 @@ fn f64_underflow_not_checked() {
 }
 
 #[test]
+fn shl_eq_out_of_range_rejected() {
+    // Session 114 adds the `<<=` operator; session 112's check
+    // in check_assign_op fires for free.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i32 = 1i32;
+            a <<= 32;
+            a as i64
+        }
+        "#,
+        "left shift amount `32` is out of range for `i32`",
+    );
+}
+
+#[test]
+fn shr_eq_out_of_range_rejected() {
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i64 = 1;
+            a >>= 64;
+            a
+        }
+        "#,
+        "right shift amount `64` is out of range for `i64`",
+    );
+}
+
+#[test]
+fn shl_eq_negative_amount_rejected() {
+    // Cross-let const-eval flows in: `n` const-evals to -1.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: i32 = 1i32;
+            let n: i32 = -1i32;
+            a <<= n;
+            a as i64
+        }
+        "#,
+        "left shift amount `-1` is out of range for `i32`",
+    );
+}
+
+#[test]
+fn shl_eq_in_range_accepted() {
+    // Positive control: legitimate shift compounds compile.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut a: i32 = 1i32;
+            a <<= 4;
+            a >>= 1;
+            a as i64
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

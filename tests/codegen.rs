@@ -110,6 +110,32 @@ fn compound_assignment() {
 }
 
 #[test]
+fn compound_shift_left_assign() {
+    // Session 114: `<<=` and `>>=`. `1 << 4 = 16`, `16 >> 2 = 4`.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i64 = 1; x <<= 4; x }"),
+        16
+    );
+}
+
+#[test]
+fn compound_shift_right_assign() {
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i64 = 16; x >>= 2; x }"),
+        4
+    );
+}
+
+#[test]
+fn compound_shift_chain() {
+    // Chain compound shift ops with regular arithmetic.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i32 = 1i32; x <<= 5; x >>= 1; (x as i64) + 5 }"),
+        21
+    );
+}
+
+#[test]
 fn shadowing_changes_value() {
     assert_eq!(
         run_main("fn main() -> i64 { let x = 1; let x = x + 10; x + 1 }"),

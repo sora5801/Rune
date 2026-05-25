@@ -79,12 +79,30 @@ impl<'src> Lexer<'src> {
                 '!' => self.if_eq(TokenKind::Bang, TokenKind::BangEq),
                 '<' => match self.peek() {
                     Some('=') => { self.bump(); TokenKind::LtEq }
-                    Some('<') => { self.bump(); TokenKind::Shl }
+                    Some('<') => {
+                        self.bump();
+                        // Session 114: `<<=` shift-left compound assign.
+                        if self.peek() == Some('=') {
+                            self.bump();
+                            TokenKind::ShlEq
+                        } else {
+                            TokenKind::Shl
+                        }
+                    }
                     _ => TokenKind::Lt,
                 },
                 '>' => match self.peek() {
                     Some('=') => { self.bump(); TokenKind::GtEq }
-                    Some('>') => { self.bump(); TokenKind::Shr }
+                    Some('>') => {
+                        self.bump();
+                        // Session 114: `>>=` shift-right compound assign.
+                        if self.peek() == Some('=') {
+                            self.bump();
+                            TokenKind::ShrEq
+                        } else {
+                            TokenKind::Shr
+                        }
+                    }
                     _ => TokenKind::Gt,
                 },
                 '&' => match self.peek() {

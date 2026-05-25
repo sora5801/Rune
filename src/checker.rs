@@ -3622,7 +3622,12 @@ impl<'r> Checker<'r> {
 
     fn check_assign_op(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         let lt = self.check_expr(lhs);
-        let rt = self.check_expr(rhs);
+        // Session 114: hint the RHS literal from LHS's concrete
+        // type (mirrors session 095's bidirectional binop flow).
+        // Lets `let mut a: i32 = 1; a <<= 4;` adopt i32 for the 4
+        // instead of i64-defaulting and erroring on the
+        // compatibility check below.
+        let rt = self.check_expr_with_hint(rhs, Some(&lt));
         self.check_assign_target(lhs, span);
         if !lt.is_error() && !rt.is_error() {
             if !lt.compatible(&rt) {
@@ -3655,14 +3660,8 @@ impl<'r> Checker<'r> {
             // for compound assigns. The LHS is mutable so we can't
             // track its value — but the RHS is just an expression
             // that may const-eval, and the checks that depend only
-            // on the RHS still apply. Currently only div / mod
-            // matter; the parser has no `<<=` / `>>=` / bit-op
-            // compounds, so the shift-out-of-range check that
-            // sessions 110 cover for plain binops has no compound-
-            // assignment surface today. If those operators land in
-            // the parser later, the same gate from finish_binary
-            // applies here verbatim.
-            if matches!(lt, Ty::Int(_)) {
+            // on the RHS still apply.
+            if let Ty::Int(result_ty) = &lt {
                 if matches!(op, BinOp::Div | BinOp::Mod) {
                     if self.const_eval_int(rhs) == Some(0) {
                         let opname = if matches!(op, BinOp::Mod) {
@@ -3671,6 +3670,31 @@ impl<'r> Checker<'r> {
                             "division"
                         };
                         self.error(span, format!("{} by zero", opname));
+                    }
+                }
+                // Session 114: shift compounds now exist (`<<=` `>>=`);
+                // run session 110's shift-out-of-range gate here too.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    if let Some(b) = self.const_eval_int(rhs) {
+                        let bits = int_bit_width(*result_ty);
+                        if b < 0 || b >= bits as i64 {
+                            let opname = if matches!(op, BinOp::Shl) {
+                                "left"
+                            } else {
+                                "right"
+                            };
+                            self.error(
+                                span,
+                                format!(
+                                    "{} shift amount `{}` is out of range for \
+                                     `{}` (must be 0..{})",
+                                    opname,
+                                    b,
+                                    result_ty.name(),
+                                    bits,
+                                ),
+                            );
+                        }
                     }
                 }
             }

@@ -55,7 +55,7 @@ pub enum TokenKind {
     Plus, Minus, Star, Slash, Percent,
 
     // Assignment / compound assignment
-    Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
+    Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, ShlEq, ShrEq,
 
     // Comparison
     EqEq, BangEq, Lt, Gt, LtEq, GtEq,
