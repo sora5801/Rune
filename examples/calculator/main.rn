@@ -1,0 +1,20 @@
+// Multi-file program demonstrating session 124's module system.
+// Three modules collaborate:
+//   math.rn  — pure arithmetic helpers (pub fn add, mul, ...)
+//   stats.rn — reductions over Vec<i64> (uses math)
+//   main.rn  — the entry point
+//
+// Run: rune run examples/calculator/main.rn
+//   prints the sum-of-squares of [1, 2, 3, 4] (= 30).
+
+mod math;
+mod stats;
+
+fn main() -> i64 {
+    let nums: Vec<i64> = vec_new();
+    nums.push(1);
+    nums.push(2);
+    nums.push(3);
+    nums.push(4);
+    stats::sum_of_squares(nums)
+}

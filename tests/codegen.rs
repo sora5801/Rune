@@ -6274,6 +6274,81 @@ fn file_module_uses_std() {
     assert_eq!(run_main_files(&[("main", main), ("m", m)]), 9);
 }
 
+#[test]
+fn file_module_struct_construction() {
+    // Session 124: cross-file struct — define in helper, construct
+    // and access fields from main. Exercises the resolver / checker
+    // path for cross-module type symbols.
+    let main = r#"
+        mod shapes;
+        fn main() -> i64 {
+            let p: shapes::Point = shapes::Point { x: 10, y: 32 };
+            p.x + p.y
+        }
+    "#;
+    let shapes = "pub struct Point { x: i64, y: i64 }";
+    assert_eq!(
+        run_main_files(&[("main", main), ("shapes", shapes)]),
+        42
+    );
+}
+
+#[test]
+fn file_module_enum_match() {
+    // Cross-file enum + variant construction + match.
+    let main = r#"
+        mod traffic;
+        fn main() -> i64 {
+            let light: traffic::Light = traffic::Light::Green;
+            match light {
+                traffic::Light::Red => 0,
+                traffic::Light::Yellow => 1,
+                traffic::Light::Green => 2,
+            }
+        }
+    "#;
+    let traffic = r#"
+        pub enum Light { Red, Yellow, Green }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("traffic", traffic)]),
+        2
+    );
+}
+
+#[test]
+fn file_module_trait_impl_across_files() {
+    // Cross-file trait + impl. Trait declared in helper.rn, struct
+    // declared in shapes.rn with an inline `impl` of the trait,
+    // main calls the trait method.
+    let main = r#"
+        mod helper;
+        mod shapes;
+        fn main() -> i64 {
+            let s: shapes::Square = shapes::Square { side: 7 };
+            helper::area_of(s)
+        }
+    "#;
+    let helper = r#"
+        pub trait Area { fn area(self: Self) -> i64; }
+        pub fn area_of<T: Area>(t: T) -> i64 { t.area() }
+    "#;
+    let shapes = r#"
+        pub struct Square { side: i64 }
+        impl helper::Area for Square {
+            fn area(self: Square) -> i64 { self.side * self.side }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[
+            ("main", main),
+            ("helper", helper),
+            ("shapes", shapes),
+        ]),
+        49
+    );
+}
+
 // ---- use globs ----
 
 #[test]

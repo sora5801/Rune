@@ -23,11 +23,34 @@ fn temp_paths() -> (PathBuf, PathBuf) {
 }
 
 fn build_exe(src: &str, obj: &PathBuf, exe: &PathBuf) -> Result<(), String> {
-    let (tokens, le) = Lexer::new(src).tokenize();
-    if !le.is_empty() {
-        return Err(format!("lex errors: {:?}", le));
+    build_exe_files(&[("main", src)], obj, exe)
+}
+
+/// Session 124: multi-file AOT build. `files[0]` is the main; the
+/// rest are `(module-name, source)` pairs reachable through
+/// `mod name;` declarations. Mirrors `tests/codegen.rs::run_main_
+/// files` but produces a native executable instead of JIT-running.
+fn build_exe_files(
+    files: &[(&str, &str)],
+    obj: &PathBuf,
+    exe: &PathBuf,
+) -> Result<(), String> {
+    let main_src = files[0].1;
+    let mods: Vec<(String, String)> = files[1..]
+        .iter()
+        .map(|(n, s)| (n.to_string(), s.to_string()))
+        .collect();
+    let loader = |name: &str| {
+        mods.iter().find(|(n, _)| n == name).map(|(_, s)| s.clone())
+    };
+    let exp = expand_modules(main_src, "<test>", &loader);
+    if !exp.lex_errors.is_empty() {
+        return Err(format!("lex errors: {:?}", exp.lex_errors));
     }
-    let (module, pe) = Parser::new(tokens).parse_module();
+    if !exp.module_errors.is_empty() {
+        return Err(format!("module errors: {:?}", exp.module_errors));
+    }
+    let (module, pe) = Parser::new(exp.tokens).parse_module();
     if !pe.is_empty() {
         return Err(format!("parse errors: {:?}", pe));
     }
@@ -46,6 +69,15 @@ fn build_exe(src: &str, obj: &PathBuf, exe: &PathBuf) -> Result<(), String> {
     std::fs::write(obj, &bytes).map_err(|e| format!("write obj: {}", e))?;
     aot::link(obj, exe).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn build_and_run_files(files: &[(&str, &str)]) -> i32 {
+    let (obj, exe) = temp_paths();
+    if let Err(e) = build_exe_files(files, &obj, &exe) {
+        panic!("build failed: {}", e);
+    }
+    let status = Command::new(&exe).status().expect("run exe");
+    status.code().expect("exe did not exit normally")
 }
 
 fn build_and_run(src: &str) -> i32 {
@@ -698,6 +730,75 @@ fn aot_env_args_first_is_program_name() {
         }
     "#;
     assert_eq!(build_and_run(src), 1);
+}
+
+#[test]
+fn aot_multi_file_call_across_modules() {
+    // Session 124: AOT pipeline through the module system. A `mod
+    // helper;` in main loads helper.rn; helper's pub fn is callable
+    // from main with the standard `helper::name` path.
+    let main = r#"
+        mod helper;
+        fn main() -> i64 { helper::triple(14) }
+    "#;
+    let helper = "pub fn triple(x: i64) -> i64 { x * 3 }";
+    assert_eq!(build_and_run_files(&[("main", main), ("helper", helper)]), 42);
+}
+
+#[test]
+fn aot_multi_file_use_import() {
+    // `use helper::name` aliases — AOT path same as JIT.
+    let main = r#"
+        mod helper;
+        use helper::square;
+        fn main() -> i64 { square(7) }
+    "#;
+    let helper = "pub fn square(x: i64) -> i64 { x * x }";
+    assert_eq!(build_and_run_files(&[("main", main), ("helper", helper)]), 49);
+}
+
+#[test]
+fn aot_multi_file_struct_across_modules() {
+    // Cross-file struct definition + use. Verifies struct visibility
+    // through `pub` propagates to AOT codegen's symbol mangling
+    // (module-prefixed names).
+    let main = r#"
+        mod shapes;
+        fn main() -> i64 {
+            let r: shapes::Rect = shapes::Rect { w: 6, h: 7 };
+            r.w * r.h
+        }
+    "#;
+    let shapes = r#"
+        pub struct Rect { w: i64, h: i64 }
+    "#;
+    assert_eq!(
+        build_and_run_files(&[("main", main), ("shapes", shapes)]),
+        42
+    );
+}
+
+#[test]
+fn aot_multi_file_nested_directory() {
+    // `mod mid;` in main loads mid.rn; `mod leaf;` inside mid.rn
+    // loads mid/leaf.rn — the directory descent rule.
+    let main = r#"
+        mod mid;
+        fn main() -> i64 { mid::go() }
+    "#;
+    let mid = r#"
+        mod leaf;
+        pub fn go() -> i64 { leaf::val() * 2 }
+    "#;
+    let leaf = "pub fn val() -> i64 { 21 }";
+    assert_eq!(
+        build_and_run_files(&[
+            ("main", main),
+            ("mid", mid),
+            ("mid/leaf", leaf),
+        ]),
+        42
+    );
 }
 
 #[test]

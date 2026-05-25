@@ -1,0 +1,17 @@
+// Reductions over Vec<i64>. Imports `math::square` and `math::add`
+// from the sibling module — demonstrates cross-module function
+// calls under the module system.
+
+use math::square;
+use math::add;
+
+pub fn sum_of_squares(xs: Vec<i64>) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    let n: i64 = xs.len();
+    while i < n {
+        total = add(total, square(xs.get(i)));
+        i = i + 1;
+    }
+    total
+}
