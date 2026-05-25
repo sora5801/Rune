@@ -327,9 +327,9 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Chained binop hint propagation — `1 + 2 + a: i32` works without parens
-2. Floating-point Vec elements — unblock `Vec<f64>` / `Vec<f32>`
-3. Cross-let const-eval — propagate const values through let bindings
+1. Floating-point Vec elements — unblock `Vec<f64>` / `Vec<f32>`
+2. Cross-let const-eval — propagate const values through let bindings
+3. Division-by-zero const-eval diagnostic
 4. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

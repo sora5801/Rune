@@ -1650,6 +1650,63 @@ fn method_receiver_hint_chain_two_literals() {
 }
 
 #[test]
+fn binop_hint_chain_literal_then_var() {
+    // Session 103: `1 + 2 + a: i32` parses as `(1 + 2) + a`.
+    // The outer expected-i32 propagates into the inner binop
+    // so all three operands resolve as i32.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 5;
+            let r: i32 = 1 + 2 + a;
+            r as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 8);
+}
+
+#[test]
+fn binop_hint_chain_var_then_literals() {
+    // Symmetric: `a + 1 + 2` parses as `(a + 1) + 2`. The
+    // outer expected-i32 still propagates through, so the
+    // inner `a + 1` checks with the right hint.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 5;
+            let r: i32 = a + 1 + 2;
+            r as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 8);
+}
+
+#[test]
+fn binop_hint_chain_all_literals() {
+    // All-literal chain with a typed destination. Each literal
+    // adopts i32 via the chain propagation.
+    let src = r#"
+        fn main() -> i64 {
+            let r: i32 = 1 + 2 + 3 + 4;
+            r as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn binop_hint_chain_mixed_ops() {
+    // Mixed arithmetic chain: `(((1 * 2) + 3) - a) as i32`.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 4;
+            let r: i32 = 1 * 2 + 3 - a;
+            r as i64
+        }
+    "#;
+    // 1*2 = 2; 2+3 = 5; 5-4 = 1
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
 fn binop_hint_rhs_literal() {
     // Session 095: `a: i32 + 1` lets the bare `1` adopt i32
     // from the LHS's concrete type. Previously errored as

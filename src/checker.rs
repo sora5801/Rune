@@ -2142,7 +2142,204 @@ impl<'r> Checker<'r> {
                 }
             }
         }
+        // Session 103: binop with a numeric expected type — pre-
+        // hint BOTH sides with the expected type so a chain like
+        // `1 + 2 + a: i32` propagates inward. Without this, the
+        // outer binop sees `(1 + 2)` as i64 first and rejects.
+        // The chain ends naturally: literals adopt the hint;
+        // typed expressions (paths, casts) check against it via
+        // standard assignable; sub-binops recurse via this same
+        // intercept. After both sides are hint-checked we still
+        // run check_binary so the op-specific arms (numeric
+        // requirement, str-concat for +, etc.) fire.
+        if let (
+            Expr::Binary { op, lhs, rhs, span },
+            Some(exp @ (Ty::Int(_) | Ty::Float(_))),
+        ) = (e, expected)
+        {
+            let lt = self.check_expr_with_hint(lhs, Some(exp));
+            let rt = self.check_expr_with_hint(rhs, Some(exp));
+            // Build the binop result type from the hinted sides.
+            // For arithmetic / bitwise / comparison ops, the
+            // logic mirrors check_binary's arms but operates on
+            // already-hinted lt/rt. We delegate to a shared
+            // finisher to avoid duplicating the op-specific
+            // checks.
+            return self.finish_binary(*op, lhs, rhs, lt, rt, *span);
+        }
         self.check_expr(e)
+    }
+
+    /// Session 103: shared "finish a binop given pre-checked
+    /// operand types" path. Extracted from `check_binary` so the
+    /// hint-flow intercept above can reuse the op-specific
+    /// validation without re-running the operand checks. The
+    /// caller is responsible for type-checking `lhs` and `rhs`
+    /// (with whatever hint flow is appropriate) and passing the
+    /// resulting types as `lt` and `rt`.
+    fn finish_binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        lt: Ty,
+        rt: Ty,
+        span: Span,
+    ) -> Ty {
+        if lt.is_error() || rt.is_error() {
+            return Ty::Error;
+        }
+        self.try_pin_infer_typevar(&lt, &rt);
+        self.try_pin_infer_typevar(&rt, &lt);
+        if !lt.compatible(&rt) {
+            self.error(
+                span,
+                format!(
+                    "operands of `{}` have mismatched types: `{}` vs `{}`",
+                    binop_symbol(op),
+                    self.ty_pretty(&lt),
+                    self.ty_pretty(&rt)
+                ),
+            );
+            return Ty::Error;
+        }
+        let t = if matches!(lt, Ty::TypeVar(_)) {
+            rt.clone()
+        } else if matches!(rt, Ty::TypeVar(_)) {
+            lt.clone()
+        } else if lt.is_never() {
+            rt.clone()
+        } else {
+            lt.clone()
+        };
+        // Const-eval overflow check (session 102) for integer
+        // arithmetic / bitwise.
+        if let Ty::Int(result_ty) = &t {
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Shl | BinOp::Shr
+            ) {
+                if let (Some(a), Some(b)) =
+                    (self.const_eval_int(lhs), self.const_eval_int(rhs))
+                {
+                    let result = match op {
+                        BinOp::Add => a.checked_add(b),
+                        BinOp::Sub => a.checked_sub(b),
+                        BinOp::Mul => a.checked_mul(b),
+                        BinOp::Div => a.checked_div(b),
+                        BinOp::Mod => a.checked_rem(b),
+                        BinOp::BitAnd => Some(a & b),
+                        BinOp::BitOr => Some(a | b),
+                        BinOp::BitXor => Some(a ^ b),
+                        BinOp::Shl if b >= 0 && b < 64 => a.checked_shl(b as u32),
+                        BinOp::Shr if b >= 0 && b < 64 => a.checked_shr(b as u32),
+                        _ => None,
+                    };
+                    if let Some(v) = result {
+                        self.check_int_value_in_range(v, *result_ty, false, span);
+                    }
+                }
+            }
+        }
+        self.binop_result_ty(op, &t, span)
+    }
+
+    /// Session 103: the op-specific "given a unified operand type
+    /// `t`, what's the binop's result type?" arms. Extracted so
+    /// `check_binary` and `finish_binary` can both call it.
+    fn binop_result_ty(&mut self, op: BinOp, t: &Ty, span: Span) -> Ty {
+        match op {
+            BinOp::Add => {
+                if matches!(t, Ty::Str) {
+                    return Ty::Str;
+                }
+                if !t.is_numeric() {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `+` requires numeric or string operands, got `{}`",
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                t.clone()
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                if !t.is_numeric() {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `{}` requires numeric operands, got `{}`",
+                            binop_symbol(op),
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                t.clone()
+            }
+            BinOp::Eq | BinOp::Ne => Ty::Bool,
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                let opaque = matches!(t, Ty::Assoc(_, _) | Ty::TypeVar(_));
+                if !opaque && !t.is_numeric() && !matches!(t, Ty::Char) {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `{}` requires ordered operands, got `{}`",
+                            binop_symbol(op),
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                Ty::Bool
+            }
+            BinOp::And | BinOp::Or => {
+                if !matches!(t, Ty::Bool) {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `{}` requires `bool` operands, got `{}`",
+                            binop_symbol(op),
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                Ty::Bool
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                if !t.is_integer() && !matches!(t, Ty::Bool) {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `{}` requires integer or `bool` operands, got `{}`",
+                            binop_symbol(op),
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                t.clone()
+            }
+            BinOp::Shl | BinOp::Shr => {
+                if !t.is_integer() {
+                    self.error(
+                        span,
+                        format!(
+                            "operator `{}` requires integer operands, got `{}`",
+                            binop_symbol(op),
+                            self.ty_pretty(t)
+                        ),
+                    );
+                    return Ty::Error;
+                }
+                t.clone()
+            }
+        }
     }
 
     /// Session 091: return the hinted type for a bare numeric
