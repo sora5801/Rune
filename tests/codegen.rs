@@ -691,6 +691,130 @@ fn iterator_chain_all_unannotated() {
 }
 
 #[test]
+fn match_tuple_pattern_basic() {
+    // Session 082: tuple patterns in match arms.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (3, 4);
+            match pair {
+                (1, x) => x,
+                (3, y) => y * 100,
+                (_, _) => -1,
+            }
+        }
+    "#;
+    // (3, 4) matches second arm → 4 * 100 = 400
+    assert_eq!(run_main(src), 400);
+}
+
+#[test]
+fn match_tuple_pattern_first_arm() {
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (1, 99);
+            match pair {
+                (1, x) => x,
+                (3, y) => y * 100,
+                (_, _) => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 99);
+}
+
+#[test]
+fn match_tuple_pattern_fallback() {
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (5, 5);
+            match pair {
+                (1, x) => x,
+                (3, y) => y * 100,
+                (_, _) => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), -1);
+}
+
+#[test]
+fn match_tuple_pattern_both_literals() {
+    // Both elements are literals — no bindings.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (2, 3);
+            match pair {
+                (1, 1) => 100,
+                (2, 3) => 200,
+                (_, _) => 300,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 200);
+}
+
+#[test]
+fn match_tuple_pattern_with_wildcard_first() {
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (7, 42);
+            match pair {
+                (_, 42) => 1,
+                (_, _) => 0,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 1);
+}
+
+#[test]
+fn match_tuple_pattern_three_elements() {
+    let src = r#"
+        fn main() -> i64 {
+            let t: (i64, i64, i64) = (1, 2, 3);
+            match t {
+                (1, 2, x) => x,
+                (_, _, _) => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 3);
+}
+
+#[test]
+fn match_tuple_pattern_with_guard() {
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (i64, i64) = (5, 10);
+            match pair {
+                (a, b) if a < b => b - a,
+                (a, b) => a - b,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 5);
+}
+
+#[test]
+fn match_tuple_pattern_with_bool_elements() {
+    // Tuple-pattern coverage is element-wise — v0.x doesn't do
+    // cartesian-product tracking, so `(true, x) | (false, _)` is
+    // still treated non-exhaustive on `(bool, i64)`; need a
+    // catch-all `_`. Documented as a deferred limitation.
+    let src = r#"
+        fn main() -> i64 {
+            let pair: (bool, i64) = (true, 7);
+            match pair {
+                (true, x) => x,
+                (false, _) => 0,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(run_main(src), 7);
+}
+
+#[test]
 fn iterator_fold_with_capturing_closure() {
     // Capturing closure → synthesized struct implementing Fn2.
     // Tests that the bound-propagation cascade reads the call

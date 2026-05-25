@@ -1651,12 +1651,16 @@ impl<'a> Lowerer<'a> {
             } else {
                 std::collections::HashMap::new()
             };
+        let scrutinee_ty = scrutinee_h.ty.clone();
         let mut hir_arms: Vec<HirMatchArm> = Vec::with_capacity(arms.len());
         for arm in arms {
             let mut patterns: Vec<HirPattern> = Vec::new();
-            if let Err(msg) =
-                self.collect_arm_patterns(&arm.pat, &mut patterns, &scrutinee_subst)
-            {
+            if let Err(msg) = self.collect_arm_patterns(
+                &arm.pat,
+                &mut patterns,
+                &scrutinee_subst,
+                &scrutinee_ty,
+            ) {
                 return HirExprKind::Unsupported(msg);
             }
             let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
@@ -1674,6 +1678,7 @@ impl<'a> Lowerer<'a> {
         pat: &ast::Pattern,
         out: &mut Vec<HirPattern>,
         subst: &std::collections::HashMap<SymbolId, Ty>,
+        scrutinee_ty: &Ty,
     ) -> Result<(), String> {
         match pat {
             ast::Pattern::Wildcard(_) => out.push(HirPattern::Wildcard),
@@ -1820,16 +1825,47 @@ impl<'a> Lowerer<'a> {
             }
             ast::Pattern::Or { patterns, .. } => {
                 for sub in patterns {
-                    self.collect_arm_patterns(sub, out, subst)?;
+                    self.collect_arm_patterns(sub, out, subst, scrutinee_ty)?;
                 }
             }
-            ast::Pattern::Tuple { .. } => {
-                // Session 074: tuple patterns aren't supported in
-                // match arms (only in `let` destructuring, which
-                // lower_block handles before reaching this path).
-                return Err(
-                    "tuple patterns in match arms aren't supported in v0.x".into(),
-                );
+            ast::Pattern::Tuple { patterns, .. } => {
+                // Session 082: tuple patterns in match arms. The
+                // scrutinee's element types come from the
+                // scrutinee_ty (already substituted at this layer);
+                // each sub-pattern recurses with the corresponding
+                // element type as its scrutinee.
+                let elem_tys: Vec<Ty> = match scrutinee_ty {
+                    Ty::Tuple(elems) => elems.clone(),
+                    _ => {
+                        return Err(format!(
+                            "tuple pattern requires a tuple scrutinee, got `{}`",
+                            scrutinee_ty.display()
+                        ));
+                    }
+                };
+                if elem_tys.len() != patterns.len() {
+                    return Err(format!(
+                        "tuple pattern arity {} doesn't match scrutinee tuple arity {}",
+                        patterns.len(),
+                        elem_tys.len()
+                    ));
+                }
+                let mut elements: Vec<(Ty, HirPattern)> =
+                    Vec::with_capacity(patterns.len());
+                for (sub, raw_ty) in patterns.iter().zip(&elem_tys) {
+                    let elem_ty = apply_subst(raw_ty, subst);
+                    let mut sub_out: Vec<HirPattern> = Vec::with_capacity(1);
+                    self.collect_arm_patterns(sub, &mut sub_out, subst, &elem_ty)?;
+                    if sub_out.len() != 1 {
+                        return Err(
+                            "tuple sub-pattern produced an or-pattern; \
+                             not supported inside tuple patterns in v0.x"
+                                .into(),
+                        );
+                    }
+                    elements.push((elem_ty, sub_out.into_iter().next().unwrap()));
+                }
+                out.push(HirPattern::Tuple { elements });
             }
         }
         Ok(())

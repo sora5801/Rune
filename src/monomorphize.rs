@@ -554,6 +554,12 @@ fn subst_pattern(p: &HirPattern, subst: &HashMap<SymbolId, Ty>) -> HirPattern {
                     .collect(),
             }
         }
+        HirPattern::Tuple { elements } => HirPattern::Tuple {
+            elements: elements
+                .iter()
+                .map(|(ty, sub)| (subst_ty(ty, subst), subst_pattern(sub, subst)))
+                .collect(),
+        },
         _ => p.clone(),
     }
 }
@@ -1391,6 +1397,26 @@ fn collect_array_tys(module: &HirModule) -> Vec<Ty> {
     out
 }
 
+/// Invoke `f` on every `Ty` reachable from a pattern. Tuples
+/// recurse into their sub-patterns; other variants only contribute
+/// their bindings (EnumPayload).
+fn walk_tys_pattern<F: FnMut(&Ty)>(p: &HirPattern, f: &mut F) {
+    match p {
+        HirPattern::EnumPayload { bindings, .. } => {
+            for (ty, _) in bindings {
+                f(ty);
+            }
+        }
+        HirPattern::Tuple { elements } => {
+            for (ty, sub) in elements {
+                f(ty);
+                walk_tys_pattern(sub, f);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Invoke `f` on every `Ty` reachable from a block.
 fn walk_tys_block<F: FnMut(&Ty)>(b: &HirBlock, f: &mut F) {
     f(&b.ty);
@@ -1517,11 +1543,7 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
             walk_tys_expr(scrutinee, f);
             for arm in arms {
                 for p in &arm.patterns {
-                    if let HirPattern::EnumPayload { bindings, .. } = p {
-                        for (ty, _) in bindings {
-                            f(ty);
-                        }
-                    }
+                    walk_tys_pattern(p, f);
                 }
                 if let Some(g) = &arm.guard {
                     walk_tys_expr(g, f);
@@ -1534,6 +1556,25 @@ fn walk_tys_expr<F: FnMut(&Ty)>(e: &HirExpr, f: &mut F) {
                 walk_tys_expr(eb, f);
             }
         }
+    }
+}
+
+fn walk_pattern_collect_syms(p: &HirPattern, max: &mut u32) {
+    match p {
+        HirPattern::Bind(s) => *max = (*max).max(s.0),
+        HirPattern::EnumPayload { bindings, .. } => {
+            for (_, b) in bindings {
+                if let Some(s) = b {
+                    *max = (*max).max(s.0);
+                }
+            }
+        }
+        HirPattern::Tuple { elements } => {
+            for (_, sub) in elements {
+                walk_pattern_collect_syms(sub, max);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1677,17 +1718,7 @@ fn walk_expr_collect_syms(e: &HirExpr, max: &mut u32) {
             walk_expr_collect_syms(scrutinee, max);
             for arm in arms {
                 for p in &arm.patterns {
-                    match p {
-                        HirPattern::Bind(s) => *max = (*max).max(s.0),
-                        HirPattern::EnumPayload { bindings, .. } => {
-                            for (_, b) in bindings {
-                                if let Some(s) = b {
-                                    *max = (*max).max(s.0);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                    walk_pattern_collect_syms(p, max);
                 }
                 if let Some(g) = &arm.guard {
                     walk_expr_collect_syms(g, max);

@@ -1366,13 +1366,22 @@ impl<'r> Checker<'r> {
                     );
                 }
             }
-            Pattern::Tuple { span, .. } => {
-                // Session 074: tuple patterns aren't a match-arm
-                // pattern in v0.x — only let-binding destructuring.
-                // Treat as catch-all for now so match-coverage
-                // doesn't crash; the type-check will already have
-                // rejected non-let usages.
-                *catchall_seen = Some(*span);
+            Pattern::Tuple { patterns, span } => {
+                // Session 082: a tuple pattern acts as a catch-all
+                // iff every sub-pattern is itself a catch-all
+                // (wildcard or ident). Mixed tuples like `(1, x)`
+                // or `(_, Some(_))` cover only a subset and require
+                // an explicit `_` arm to be exhaustive.
+                let all_catchall = patterns.iter().all(|p| {
+                    matches!(p, Pattern::Wildcard(_) | Pattern::Ident { .. })
+                });
+                if all_catchall {
+                    *catchall_seen = Some(*span);
+                }
+                // Sub-patterns themselves don't contribute to the
+                // outer scrutinee's coverage sets (those track
+                // bool/enum/int/str literals, none of which a
+                // tuple pattern can be) — so no recursion needed.
             }
         }
     }

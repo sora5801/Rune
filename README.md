@@ -330,8 +330,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 1. Numeric trait bounds — generalizes `.sum()` / `.min()` / `.max()` /
    `.fold(init, +)` beyond i64
 2. Str-keyed HashMap iteration (`.keys()` / `.entries()` on `HashMap<str, V>`)
-3. Match-arm tuple patterns — `match pair { (1, x) => ..., _ => ... }`
-4. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+3. Method-call-position `Into` inference (let / fn-arg / struct-field hints)
+4. Cartesian-product exhaustiveness for tuple patterns
 5. Self-hosted bootstrap (long-term)
 
 ## Planned syntax

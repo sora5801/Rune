@@ -360,6 +360,12 @@ pub enum HirPattern {
     /// char scrutinees; chars are pre-converted to their codepoint by
     /// the lowerer so codegen only sees i64 bounds.
     IntRange { lo: i64, hi: i64, inclusive: bool },
+    /// Tuple pattern `(p0, p1, ..., pN)`. Each element carries the
+    /// scrutinee element's type (so codegen knows the load width)
+    /// plus a sub-pattern. Codegen loads each element at offset `i
+    /// * 8` and recursively matches the sub-pattern; any mismatch
+    /// branches to the arm's `on_no_match`. Session 082.
+    Tuple { elements: Vec<(Ty, HirPattern)> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

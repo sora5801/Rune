@@ -3661,6 +3661,73 @@ impl<'a, M: Module> FnCodegen<'a, M> {
                 let hi_ok = self.builder.ins().icmp(hi_cc, scrutinee, hi_v);
                 self.builder.ins().brif(hi_ok, on_match, &[], on_no_match, &[]);
             }
+            HirPattern::Tuple { elements } => {
+                // Session 082: tuple pattern. The scrutinee is a
+                // heap pointer to N*8 slots (the same layout
+                // `compile_tuple` produces). For each element:
+                //   1. Load at offset i*8, narrow to the element's
+                //      cranelift_type if needed.
+                //   2. Bind (if the sub-pattern is `_` or an ident)
+                //      or recursively match the sub-pattern,
+                //      threading a fresh "check next" block as
+                //      that sub-pattern's on_match.
+                // The last sub-pattern's on_match is the original
+                // on_match; any element mismatch jumps straight to
+                // on_no_match.
+                //
+                // Bind is handled inline because the top-level
+                // compile_pattern_check Bind arm doesn't allocate
+                // a Variable (the outer match-codegen does that
+                // after pattern-check passes). Inside a tuple
+                // sub-pattern, the loaded element value is local
+                // to this pattern check, so we must materialize
+                // the binding here — mirrors EnumPayload's inline
+                // binding handling.
+                for (i, (elem_ty, sub)) in elements.iter().enumerate() {
+                    let raw = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        scrutinee,
+                        (i * 8) as i32,
+                    );
+                    let ecty = cranelift_type(elem_ty)?;
+                    let val = if ecty == types::I64 {
+                        raw
+                    } else {
+                        self.builder.ins().ireduce(ecty, raw)
+                    };
+                    let sub_match = if i + 1 == elements.len() {
+                        on_match
+                    } else {
+                        self.builder.create_block()
+                    };
+                    match sub {
+                        HirPattern::Wildcard => {
+                            self.builder.ins().jump(sub_match, &[]);
+                        }
+                        HirPattern::Bind(sym) => {
+                            let var = self.alloc_var();
+                            self.builder.declare_var(var, ecty);
+                            self.builder.def_var(var, val);
+                            self.var_map.insert(*sym, var);
+                            self.builder.ins().jump(sub_match, &[]);
+                        }
+                        _ => {
+                            self.compile_pattern_check(
+                                sub,
+                                val,
+                                elem_ty,
+                                sub_match,
+                                on_no_match,
+                            )?;
+                        }
+                    }
+                    if i + 1 != elements.len() {
+                        self.builder.switch_to_block(sub_match);
+                        self.builder.seal_block(sub_match);
+                    }
+                }
+            }
         }
         Ok(())
     }
