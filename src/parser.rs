@@ -1586,6 +1586,9 @@ fn infix_binding_power(tok: &TokenKind) -> Option<InfixOp> {
         TokenKind::PercentEq => InfixOp { kind: InfixKind::AssignOp(BinOp::Mod), bp: (2, 1) },
         TokenKind::ShlEq     => InfixOp { kind: InfixKind::AssignOp(BinOp::Shl), bp: (2, 1) },
         TokenKind::ShrEq     => InfixOp { kind: InfixKind::AssignOp(BinOp::Shr), bp: (2, 1) },
+        TokenKind::AmpEq     => InfixOp { kind: InfixKind::AssignOp(BinOp::BitAnd), bp: (2, 1) },
+        TokenKind::PipeEq    => InfixOp { kind: InfixKind::AssignOp(BinOp::BitOr), bp: (2, 1) },
+        TokenKind::CaretEq   => InfixOp { kind: InfixKind::AssignOp(BinOp::BitXor), bp: (2, 1) },
         // range — left-associative, lower precedence than logical operators
         TokenKind::DotDot    => InfixOp { kind: InfixKind::Range(false),         bp: (3, 4) },
         TokenKind::DotDotEq  => InfixOp { kind: InfixKind::Range(true),          bp: (3, 4) },

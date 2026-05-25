@@ -136,6 +136,44 @@ fn compound_shift_chain() {
 }
 
 #[test]
+fn compound_bit_and_assign() {
+    // Session 115: `&=` — `0b1111 & 0b1010 = 0b1010 = 10`.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i64 = 15; x &= 10; x }"),
+        10
+    );
+}
+
+#[test]
+fn compound_bit_or_assign() {
+    // `|=` — `0b1010 | 0b0101 = 0b1111 = 15`.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i64 = 10; x |= 5; x }"),
+        15
+    );
+}
+
+#[test]
+fn compound_bit_xor_assign() {
+    // `^=` — `0b1111 ^ 0b1010 = 0b0101 = 5`.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i64 = 15; x ^= 10; x }"),
+        5
+    );
+}
+
+#[test]
+fn compound_bit_ops_chained() {
+    // All three in sequence — verify the parser handles
+    // back-to-back compound bit ops alongside shifts.
+    // 0xFF &= 0xF0 → 0xF0; |= 0x0F → 0xFF; ^= 0xAA → 0x55.
+    assert_eq!(
+        run_main("fn main() -> i64 { let mut x: i32 = 0xFFi32; x &= 0xF0i32; x |= 0x0Fi32; x ^= 0xAAi32; x as i64 }"),
+        0x55
+    );
+}
+
+#[test]
 fn shadowing_changes_value() {
     assert_eq!(
         run_main("fn main() -> i64 { let x = 1; let x = x + 10; x + 1 }"),

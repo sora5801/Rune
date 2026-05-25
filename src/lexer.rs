@@ -107,13 +107,21 @@ impl<'src> Lexer<'src> {
                 },
                 '&' => match self.peek() {
                     Some('&') => { self.bump(); TokenKind::AmpAmp }
+                    // Session 115: `&=` bit-AND compound assign.
+                    Some('=') => { self.bump(); TokenKind::AmpEq }
                     _ => TokenKind::Amp,
                 },
                 '|' => match self.peek() {
                     Some('|') => { self.bump(); TokenKind::PipePipe }
+                    // Session 115: `|=` bit-OR compound assign.
+                    Some('=') => { self.bump(); TokenKind::PipeEq }
                     _ => TokenKind::Pipe,
                 },
-                '^' => TokenKind::Caret,
+                '^' => match self.peek() {
+                    // Session 115: `^=` bit-XOR compound assign.
+                    Some('=') => { self.bump(); TokenKind::CaretEq }
+                    _ => TokenKind::Caret,
+                },
                 '~' => TokenKind::Tilde,
                 '.' => match self.peek() {
                     Some('.') => {

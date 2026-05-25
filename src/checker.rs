@@ -3656,6 +3656,22 @@ impl<'r> Checker<'r> {
                     ),
                 );
             }
+            // Session 115: bit-op compounds require integer operands.
+            // Mirrors binop_result_ty's check for the same ops.
+            let needs_integer = matches!(
+                op,
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+            );
+            if needs_integer && !lt.is_integer() {
+                self.error(
+                    span,
+                    format!(
+                        "compound assignment `{}=` requires integer operands, got `{}`",
+                        binop_symbol(op),
+                        self.ty_pretty(&lt)
+                    ),
+                );
+            }
             // Session 112: integer-side const-eval diagnostics
             // for compound assigns. The LHS is mutable so we can't
             // track its value — but the RHS is just an expression

@@ -1413,6 +1413,43 @@ fn shl_eq_in_range_accepted() {
 }
 
 #[test]
+fn bit_ops_compound_assign_accepted() {
+    // Session 115: positive control for all three bit-op compounds.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let mut a: u8 = 0xFFu8;
+            a &= 0xF0u8;
+            a |= 0x0Fu8;
+            a ^= 0xAAu8;
+            a as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn bit_ops_compound_assign_on_float_rejected() {
+    // `&= |= ^=` on floats should error — bitwise ops require
+    // integer operands. The existing `requires numeric operands`
+    // check doesn't fire (& is not in the numeric-required list
+    // because non-compound `&` allows bool). But the operand
+    // types compat check still rejects float-vs-int — and the
+    // checker's binop_result_ty for BitAnd/etc. errors at the
+    // type-resolution step too.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let mut a: f64 = 1.0;
+            a &= 1.0;
+            a as i64
+        }
+        "#,
+        "requires",
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

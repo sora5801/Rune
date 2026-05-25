@@ -327,9 +327,8 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Bit-op compound operators (`&=` `|=` `^=`) — parser extension
-2. Shift-amount-type relaxation (allow `let n: i64 = 4; a <<= n` for any `a:int`)
-3. Self-hosted bootstrap (long-term)
+1. Shift-amount-type relaxation (allow `let n: i64 = 4; a <<= n` for any `a:int`)
+2. Self-hosted bootstrap (long-term)
 
 ## Planned syntax
 
