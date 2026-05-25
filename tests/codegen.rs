@@ -885,17 +885,16 @@ fn match_tuple_pattern_with_guard() {
 
 #[test]
 fn match_tuple_pattern_with_bool_elements() {
-    // Tuple-pattern coverage is element-wise — v0.x doesn't do
-    // cartesian-product tracking, so `(true, x) | (false, _)` is
-    // still treated non-exhaustive on `(bool, i64)`; need a
-    // catch-all `_`. Documented as a deferred limitation.
+    // Session 089 added cartesian-product exhaustiveness, so
+    // `(true, x) | (false, _)` is fully exhaustive on `(bool,
+    // i64)`. Session 094 then flags the catch-all `_` as
+    // unreachable, so this test was updated to remove it.
     let src = r#"
         fn main() -> i64 {
             let pair: (bool, i64) = (true, 7);
             match pair {
                 (true, x) => x,
                 (false, _) => 0,
-                _ => -1,
             }
         }
     "#;

@@ -338,6 +338,83 @@ fn str_index_must_be_integer() {
 }
 
 #[test]
+fn tuple_match_unreachable_after_wildcard_arm() {
+    // Session 094: a wildcard tuple arm covers everything; any
+    // subsequent specific arm is unreachable.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (true, false);
+            match pair {
+                (_, _) => 1,
+                (true, true) => 2,
+            }
+        }
+        "#,
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn tuple_match_unreachable_specific_after_overlapping() {
+    // `(true, _)` covers all (true, *) values; a later `(true,
+    // true)` is shadowed.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (true, false);
+            match pair {
+                (true, _) => 1,
+                (true, true) => 2,
+                (false, _) => 3,
+            }
+        }
+        "#,
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn tuple_match_overlapping_enum_specific_unreachable() {
+    // `(Color::Red, _)` covers all (Red, *); a later `(Color::
+    // Red, true)` is shadowed.
+    check_has_error(
+        r#"
+        enum Color { Red, Green, Blue }
+        fn main() -> i64 {
+            let p: (Color, bool) = (Color::Red, true);
+            match p {
+                (Color::Red, _) => 1,
+                (Color::Red, true) => 2,
+                (Color::Green, _) => 3,
+                (Color::Blue, _) => 4,
+            }
+        }
+        "#,
+        "unreachable match arm",
+    );
+}
+
+#[test]
+fn tuple_match_no_false_unreachable() {
+    // Sanity: when each arm contributes new coverage, none
+    // should be flagged.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let pair: (bool, bool) = (true, false);
+            match pair {
+                (true, true) => 1,
+                (true, false) => 2,
+                (false, true) => 3,
+                (false, false) => 4,
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
 fn diagnostics_use_friendly_struct_name() {
     // Session 093: type errors should reference the struct's
     // source name instead of the internal sym index.
