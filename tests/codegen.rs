@@ -1614,6 +1614,86 @@ fn hashmap_str_keys_release_with_vec_values() {
 }
 
 #[test]
+fn integer_literal_hint_let_binding() {
+    // Session 091: bare `10` adopts the let's i32 annotation
+    // rather than defaulting to i64 (which would error).
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = 10;
+            let b: i32 = 20;
+            (a + b) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 30);
+}
+
+#[test]
+fn integer_literal_hint_fn_arg() {
+    // Hint flows from the called fn's param type.
+    let src = r#"
+        fn add_i32(a: i32, b: i32) -> i32 { a + b }
+        fn main() -> i64 {
+            add_i32(5, 7) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 12);
+}
+
+#[test]
+fn integer_literal_hint_struct_field() {
+    // Hint flows from the struct field's declared type.
+    let src = r#"
+        struct Holder { n: i32 }
+        fn main() -> i64 {
+            let h: Holder = Holder { n: 42 };
+            h.n as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 42);
+}
+
+#[test]
+fn integer_literal_hint_float() {
+    // f32 hint from `let x: f32 = 3.14;` (no suffix).
+    let src = r#"
+        fn main() -> i64 {
+            let pi: f32 = 3.14;
+            let two: f32 = 2.0;
+            (pi * two) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 6);
+}
+
+#[test]
+fn integer_literal_hint_negative() {
+    // Unary `-N` on a bare literal also picks up the hint.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i32 = -10;
+            (a + 20i32) as i64
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
+fn integer_literal_suffix_overrides_hint() {
+    // Suffix wins even when a (compatible) hint is provided.
+    // `let a: i64 = 10i64;` — both say i64, so it works; if we
+    // wrote `let a: i32 = 10i64;` the suffix would error against
+    // the annotation, which is the intended behavior. Test the
+    // sanity case.
+    let src = r#"
+        fn main() -> i64 {
+            let a: i64 = 10i64;
+            a
+        }
+    "#;
+    assert_eq!(run_main(src), 10);
+}
+
+#[test]
 fn tuple_exhaustive_bool_x_int() {
     // Session 089: `(true, x) | (false, _)` over (bool, i64) is
     // exhaustive — true closes via the first arm (any tail), false

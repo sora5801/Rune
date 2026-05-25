@@ -2093,7 +2093,55 @@ impl<'r> Checker<'r> {
                 }
             }
         }
+        // Session 091: bare numeric literals (no suffix) take the
+        // expected numeric type when the hint is compatible. The
+        // suffix-bearing case is already handled in `lit_type`
+        // (session 088) — suffix always wins. This branch covers
+        // `let a: i32 = 10;` and similar contexts where the
+        // literal has no source-level type and the hint pins it.
+        if let (Expr::Lit { lit, span }, Some(exp)) = (e, expected) {
+            if let Some(ty) = self.numeric_lit_hint(lit, exp) {
+                self.expr_types.insert(*span, ty.clone());
+                return ty;
+            }
+        }
+        // Unary `-N` on a numeric literal also benefits — the body
+        // is a literal at heart, just negated. Cover the `-10`-with-
+        // `let a: i32` shape too. The inner literal's span gets
+        // the same type (so codegen reads the right cranelift_type
+        // when it lowers HirLit::Int rather than i64-default'ing).
+        if let (Expr::Unary { op: crate::ast::UnOp::Neg, expr, span }, Some(exp)) =
+            (e, expected)
+        {
+            if let Expr::Lit { lit, span: lit_span } = expr.as_ref() {
+                if let Some(ty) = self.numeric_lit_hint(lit, exp) {
+                    self.expr_types.insert(*lit_span, ty.clone());
+                    self.expr_types.insert(*span, ty.clone());
+                    return ty;
+                }
+            }
+        }
         self.check_expr(e)
+    }
+
+    /// Session 091: return the hinted type for a bare numeric
+    /// literal. `None` if the literal already carries a suffix
+    /// (the suffix wins), the literal is non-numeric, or the hint
+    /// doesn't name a compatible numeric primitive.
+    fn numeric_lit_hint(&self, lit: &Lit, expected: &Ty) -> Option<Ty> {
+        match (lit, expected) {
+            // Suffix present → respect it; don't override.
+            (Lit::Int(_, Some(_)), _) | (Lit::Float(_, Some(_)), _) => None,
+            (Lit::Int(_, None), Ty::Int(ty)) => Some(Ty::Int(*ty)),
+            // Integer literal hinted as float — allow when the
+            // value's already 0; users idiomatically write `3.14`
+            // for floats but `0` for "any numeric zero." Anything
+            // else stays i64 (won't match) and surfaces as the
+            // usual incompatible-type error.
+            (Lit::Int(0, None), Ty::Float(ty)) => Some(Ty::Float(*ty)),
+            (Lit::Float(_, None), Ty::Float(ty)) => Some(Ty::Float(*ty)),
+            _ => None,
+        }
     }
 
     /// Session 086: when `.into()` is called at a hinted position
@@ -3105,7 +3153,22 @@ impl<'r> Checker<'r> {
             }
         }
         let callee_ty = self.check_expr(callee);
-        let arg_tys: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
+        // Session 091: when the callee is a known Ty::Fn, pass each
+        // param type as a hint while checking the corresponding
+        // arg so bare numeric literals adopt the param's typed
+        // form (`f(10)` with `f: fn(i32) -> i32` lets 10 become i32
+        // rather than i64). For closure / dyn / Error callees we
+        // fall through to bare check_expr.
+        let arg_tys: Vec<Ty> = match &callee_ty {
+            Ty::Fn { params, .. } => args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    self.check_expr_with_hint(a, params.get(i))
+                })
+                .collect(),
+            _ => args.iter().map(|a| self.check_expr(a)).collect(),
+        };
         match callee_ty {
             Ty::Fn { params, ret } => {
                 if params.len() != arg_tys.len() {
@@ -3749,7 +3812,15 @@ impl<'r> Checker<'r> {
                 }
                 continue;
             }
-            let value_ty = self.check_expr(&init.value);
+            // Session 091: pass the declared field type as a hint so
+            // bare numeric literals (`Holder { n: 42 }` with `n:
+            // i32`) take the field's typed form rather than the
+            // i64 default. `numeric_lit_hint` returns None for
+            // TypeVar hints, so generic-field cases still let the
+            // bottom-up i64 default flow into subst (preserving
+            // T-from-literal inference for generic structs).
+            let decl_hint = layout.field(&init.name.name).map(|f| f.ty.clone());
+            let value_ty = self.check_expr_with_hint(&init.value, decl_hint.as_ref());
             let Some(decl_field) = layout.field(&init.name.name) else {
                 self.error(
                     init.name.span,

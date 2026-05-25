@@ -327,8 +327,7 @@ emits `Unsupported(msg)` at lowering, with a clear error if reached.
 
 ## Roadmap
 
-1. Integer literal hint flow — `let x: i32 = 10;` picks i32 from
-   the annotation instead of defaulting to i64
+1. Binary-op hint flow — `a: i32; a + 1` lets `1` adopt i32 from the LHS
 2. Suffix overflow checks — reject `1000u8`
 3. Per-arm unreachability inside tuple matches
 4. Self-hosted bootstrap (long-term)
