@@ -192,6 +192,69 @@ impl Ty {
         }
     }
 
+    /// Session 101: strict structural equality without the
+    /// TypeVar-as-wildcard and Assoc-as-opaque special cases that
+    /// `compatible` carries. Used by sites that compare
+    /// already-resolved concrete types — duplicate-target Into
+    /// detection (session 090), `.into()` target disambiguation
+    /// (session 086) — where the lenient semantic was
+    /// over-accepting hypothetical generic impls.
+    ///
+    /// For non-generic v0.x Into impls (the only kind currently
+    /// shipped) `compatible` and `compatible_strict` agree on every
+    /// existing test. The strict variant tightens future-proofing
+    /// without changing today's behavior.
+    pub fn compatible_strict(&self, other: &Ty) -> bool {
+        if self.is_error() || other.is_error() || self.is_never() || other.is_never() {
+            return true;
+        }
+        // No TypeVar-as-wildcard, no Assoc-as-opaque: these get the
+        // structural treatment below.
+        match (self, other) {
+            (Ty::TypeVar(a), Ty::TypeVar(b)) => a == b,
+            (Ty::Struct(s1, a1), Ty::Struct(s2, a2))
+            | (Ty::Enum(s1, a1), Ty::Enum(s2, a2))
+                if s1 == s2 =>
+            {
+                // Same sym + recursively strict args. Empty args on
+                // one side is the "placeholder" from variant
+                // construction (`None`) — accept against any
+                // sym-matched concrete args.
+                a1.is_empty()
+                    || a2.is_empty()
+                    || (a1.len() == a2.len()
+                        && a1
+                            .iter()
+                            .zip(a2.iter())
+                            .all(|(x, y)| x.compatible_strict(y)))
+            }
+            (Ty::Vec(e1), Ty::Vec(e2)) => e1.compatible_strict(e2),
+            (Ty::HashMap(k1, v1), Ty::HashMap(k2, v2)) => {
+                k1.compatible_strict(k2) && v1.compatible_strict(v2)
+            }
+            (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(b.iter())
+                .all(|(x, y)| x.compatible_strict(y)),
+            (Ty::Fn { params: p1, ret: r1 }, Ty::Fn { params: p2, ret: r2 }) => {
+                p1.len() == p2.len()
+                    && p1
+                        .iter()
+                        .zip(p2.iter())
+                        .all(|(a, b)| a.compatible_strict(b))
+                    && r1.compatible_strict(r2)
+            }
+            (Ty::Weak(a), Ty::Weak(b)) => a.compatible_strict(b),
+            (Ty::Array(a, n1), Ty::Array(b, n2)) => {
+                n1 == n2 && a.compatible_strict(b)
+            }
+            (Ty::Assoc(a, n1), Ty::Assoc(b, n2)) => {
+                n1 == n2 && a.compatible_strict(b)
+            }
+            _ => self == other,
+        }
+    }
+
     /// Unify two branch types into one (used for `if`/`else`, `match` arms).
     /// Generic types match by sym alone, exactly mirroring `compatible`:
     /// `Some(v): Enum(option, [i64])` and `None: Enum(option, [])` (the

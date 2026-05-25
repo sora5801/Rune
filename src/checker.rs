@@ -2236,7 +2236,13 @@ impl<'r> Checker<'r> {
                 let fn_span = self.res.symbol(fn_sym).span;
                 let mut dup = false;
                 for (prev_ty, _prev_span) in &seen {
-                    if target_ty.compatible(prev_ty) {
+                    // Session 101: strict equality so two
+                    // structurally-different generic Into targets
+                    // (`Into<Box<T>>` vs `Into<Box<U>>`) don't
+                    // collapse under TypeVar-as-wildcard. For
+                    // today's non-generic Into impls,
+                    // compatible_strict and compatible agree.
+                    if target_ty.compatible_strict(prev_ty) {
                         dup = true;
                         break;
                     }
@@ -2274,7 +2280,13 @@ impl<'r> Checker<'r> {
         let candidates = self.res.into_impls.get(&source_sym).cloned()?;
         for (target_ast, fn_sym) in candidates {
             let resolved = self.resolve_type(&target_ast);
-            if resolved.compatible(expected) {
+            // Session 101: strict equality — `.into()` shouldn't
+            // pick `Into<Box<T>>` for an `expected: Box<i64>`
+            // unless the impl is specifically for Box<i64>. With
+            // non-generic impls today the strict check accepts
+            // all the same shapes as compatible(); the difference
+            // shows up only if generic Into targets land.
+            if resolved.compatible_strict(expected) {
                 self.into_conversions.insert(span, fn_sym);
                 return Some(resolved);
             }
@@ -5146,7 +5158,9 @@ impl<'r> Checker<'r> {
                     let mut chosen_fn: Option<SymbolId> = None;
                     for (target_ast, fn_sym) in candidates {
                         let resolved = self.resolve_type(&target_ast);
-                        if resolved.compatible(&target) {
+                        // Session 101: strict equality at the `?`
+                        // site, mirroring the bare-`.into()` path.
+                        if resolved.compatible_strict(&target) {
                             chosen_fn = Some(fn_sym);
                             break;
                         }
