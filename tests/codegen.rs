@@ -6283,6 +6283,200 @@ fn generic_vec_struct_loop_reclaims() {
     assert_eq!(run_main(src), 100000);
 }
 
+// ---- session 128: first Rune-in-Rune lexer ----
+
+/// Shared lexer source — `examples/bootstrap/lexer.rn` inlined here
+/// so each test can be a single-file `run_main_files` call. The
+/// codegen tests cover the same code paths as the AOT example.
+const BOOTSTRAP_LEXER_RN: &str = r#"
+pub enum Token {
+    Ident(str),
+    Int(i64),
+    LParen, RParen, LBrace, RBrace,
+    Plus, Minus, Star, Slash,
+    Eq, Semi, Comma,
+    Eof,
+    Error(str),
+}
+
+fn is_whitespace(b: u8) -> bool {
+    b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8
+}
+fn is_digit(b: u8) -> bool { b >= 48u8 && b <= 57u8 }
+fn is_alpha(b: u8) -> bool {
+    (b >= 65u8 && b <= 90u8) || (b >= 97u8 && b <= 122u8) || b == 95u8
+}
+fn is_alnum(b: u8) -> bool { is_alpha(b) || is_digit(b) }
+
+pub fn tokenize(src: str) -> Vec<Token> {
+    let tokens: Vec<Token> = vec_new();
+    let mut i: i64 = 0;
+    let n: i64 = src.len();
+    while i < n {
+        let b: u8 = src.byte_at(i);
+        if is_whitespace(b) { i = i + 1; continue; }
+        if is_digit(b) {
+            let mut j: i64 = i;
+            while j < n {
+                if is_digit(src.byte_at(j)) { j = j + 1; } else { break; }
+            }
+            tokens.push(Token::Int(i64::from_str(src[i..j])));
+            i = j;
+            continue;
+        }
+        if is_alpha(b) {
+            let mut j: i64 = i;
+            while j < n {
+                if is_alnum(src.byte_at(j)) { j = j + 1; } else { break; }
+            }
+            tokens.push(Token::Ident(src[i..j]));
+            i = j;
+            continue;
+        }
+        let t: Token = match b {
+            40u8 => Token::LParen, 41u8 => Token::RParen,
+            123u8 => Token::LBrace, 125u8 => Token::RBrace,
+            43u8 => Token::Plus, 45u8 => Token::Minus,
+            42u8 => Token::Star, 47u8 => Token::Slash,
+            61u8 => Token::Eq, 59u8 => Token::Semi, 44u8 => Token::Comma,
+            _ => Token::Error(src[i..i+1]),
+        };
+        tokens.push(t);
+        i = i + 1;
+    }
+    tokens.push(Token::Eof);
+    tokens
+}
+"#;
+
+#[test]
+fn rune_lexer_simple_assignment() {
+    // "let x = 1 + 2;" tokenizes as 8 tokens (5 content + 2 ops + Eof).
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("let x = 1 + 2;");
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        8
+    );
+}
+
+#[test]
+fn rune_lexer_empty_string_yields_only_eof() {
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("");
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_skips_whitespace_runs() {
+    // Lots of inter-token whitespace yields the same token count
+    // as the compact form.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let dense: Vec<lexer::Token> = lexer::tokenize("a+b");
+            let sparse: Vec<lexer::Token> = lexer::tokenize("  a  +  b  ");
+            if dense.len() == sparse.len() { dense.len() } else { 0 }
+        }
+    "#;
+    // a, +, b, Eof = 4
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        4
+    );
+}
+
+#[test]
+fn rune_lexer_int_literal_value() {
+    // Verify the Int token carries the parsed numeric value by
+    // matching on the first token.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("12345");
+            match toks.get(0) {
+                lexer::Token::Int(v) => v,
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        12345
+    );
+}
+
+#[test]
+fn rune_lexer_ident_payload_matches() {
+    // Ident token carries the lexeme. Recover it and check via ==.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("foobar");
+            match toks.get(0) {
+                lexer::Token::Ident(name) => {
+                    if name == "foobar" { 1 } else { 0 }
+                }
+                _ => -1,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
+#[test]
+fn rune_lexer_punctuation_each_char() {
+    // Each single-char operator produces exactly one token.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            // 11 distinct single-char tokens + Eof = 12
+            let toks: Vec<lexer::Token> = lexer::tokenize("(){}+-*/=;,");
+            toks.len()
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        12
+    );
+}
+
+#[test]
+fn rune_lexer_unknown_byte_becomes_error_token() {
+    // A non-ASCII byte that isn't whitespace/digit/alpha/operator
+    // becomes Token::Error.
+    let main = r#"
+        mod lexer;
+        fn main() -> i64 {
+            let toks: Vec<lexer::Token> = lexer::tokenize("@");
+            match toks.get(0) {
+                lexer::Token::Error(_) => 1,
+                _ => 0,
+            }
+        }
+    "#;
+    assert_eq!(
+        run_main_files(&[("main", main), ("lexer", BOOTSTRAP_LEXER_RN)]),
+        1
+    );
+}
+
 // ---- session 127: let-else via match (no syntax sugar needed) ----
 
 #[test]

@@ -1,0 +1,153 @@
+// Session 128 — first lexer module of the Rune-in-Rune bootstrap.
+// Tokenizes a subset of Rune source: identifiers, integers, the
+// most common single-char operators, and parens / braces / semi /
+// comma. Whitespace is skipped. Returns `Vec<Token>` ending in
+// `Token::Eof`.
+//
+// What's NOT here yet (future sessions):
+//   - Multi-char operators (==, !=, <=, &&, ::, ->, =>, ..)
+//   - String / char literals
+//   - Float literals
+//   - Keyword recognition (Ident covers everything that looks like an
+//     identifier; the parser-side will dispatch on byte content)
+//   - Comments
+//   - Spans (each token carries no source position yet)
+//
+// The point of this session is to ship a real, runnable Rune program
+// that tokenizes a meaningful subset, demonstrating that Phase 2 of
+// the self-hosted bootstrap is feasible.
+
+pub enum Token {
+    Ident(str),
+    Int(i64),
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Eq,
+    Semi,
+    Comma,
+    Eof,
+    Error(str),   // for unknown bytes
+}
+
+// ---- character classifiers ----
+
+fn is_whitespace(b: u8) -> bool {
+    b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8
+}
+
+fn is_digit(b: u8) -> bool {
+    b >= 48u8 && b <= 57u8     // '0'..='9'
+}
+
+fn is_alpha(b: u8) -> bool {
+    (b >= 65u8 && b <= 90u8)   // 'A'..='Z'
+        || (b >= 97u8 && b <= 122u8)  // 'a'..='z'
+        || b == 95u8                  // '_'
+}
+
+fn is_alnum(b: u8) -> bool {
+    is_alpha(b) || is_digit(b)
+}
+
+// ---- main tokenizer ----
+
+pub fn tokenize(src: str) -> Vec<Token> {
+    let tokens: Vec<Token> = vec_new();
+    let mut i: i64 = 0;
+    let n: i64 = src.len();
+    while i < n {
+        let b: u8 = src.byte_at(i);
+
+        // Whitespace — just advance.
+        if is_whitespace(b) {
+            i = i + 1;
+            continue;
+        }
+
+        // Integer literal.
+        if is_digit(b) {
+            let mut j: i64 = i;
+            while j < n {
+                let bb: u8 = src.byte_at(j);
+                if is_digit(bb) {
+                    j = j + 1;
+                } else {
+                    break;
+                }
+            }
+            let lexeme: str = src[i..j];
+            tokens.push(Token::Int(i64::from_str(lexeme)));
+            i = j;
+            continue;
+        }
+
+        // Identifier (and would-be keyword) — start with alpha or _,
+        // continue with alnum.
+        if is_alpha(b) {
+            let mut j: i64 = i;
+            while j < n {
+                let bb: u8 = src.byte_at(j);
+                if is_alnum(bb) {
+                    j = j + 1;
+                } else {
+                    break;
+                }
+            }
+            let lexeme: str = src[i..j];
+            tokens.push(Token::Ident(lexeme));
+            i = j;
+            continue;
+        }
+
+        // Single-char operators / punctuation.
+        let t: Token = match b {
+            40u8  => Token::LParen,  // '('
+            41u8  => Token::RParen,  // ')'
+            123u8 => Token::LBrace,  // '{'
+            125u8 => Token::RBrace,  // '}'
+            43u8  => Token::Plus,    // '+'
+            45u8  => Token::Minus,   // '-'
+            42u8  => Token::Star,    // '*'
+            47u8  => Token::Slash,   // '/'
+            61u8  => Token::Eq,      // '='
+            59u8  => Token::Semi,    // ';'
+            44u8  => Token::Comma,   // ','
+            _     => Token::Error(src[i..i+1]),
+        };
+        tokens.push(t);
+        i = i + 1;
+    }
+    tokens.push(Token::Eof);
+    tokens
+}
+
+// ---- helper for tests: a string description of a token's kind ----
+//
+// Codegen tests over the bootstrap lexer compare against these
+// labels rather than reaching into the enum variant — keeps the
+// tests robust to variant additions.
+pub fn kind_of(t: Token) -> str {
+    match t {
+        Token::Ident(_) => "Ident",
+        Token::Int(_) => "Int",
+        Token::LParen => "LParen",
+        Token::RParen => "RParen",
+        Token::LBrace => "LBrace",
+        Token::RBrace => "RBrace",
+        Token::Plus => "Plus",
+        Token::Minus => "Minus",
+        Token::Star => "Star",
+        Token::Slash => "Slash",
+        Token::Eq => "Eq",
+        Token::Semi => "Semi",
+        Token::Comma => "Comma",
+        Token::Eof => "Eof",
+        Token::Error(_) => "Error",
+    }
+}

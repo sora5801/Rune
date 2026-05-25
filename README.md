@@ -342,9 +342,16 @@ Phase 1 highlights (sessions 118-127): file I/O, string methods +
 recursive types (no `Box<T>` needed), pattern guards confirmed
 shipped, `let-else` expressible via match.
 
-**Phase 2 — Rune-in-Rune interpreter** (next ~30 sessions per
-session 117). Write the lexer, parser, resolver, type-checker,
-and tree-walking evaluator in Rune itself.
+**Phase 2 — Rune-in-Rune interpreter** (in progress).
+
+- **Session 128**: First lexer module — tokenizes Rune source
+  into `Vec<Token>` via byte-walk. See `examples/bootstrap/`.
+- **Next**: multi-char operators + keyword recognition, then
+  string/char/float literals, then comments + source spans,
+  then the parser.
+
+Per session 117's plan: ~30 more sessions to a working Rune-
+in-Rune tree-walking interpreter.
 
 Phase 2+ — see [`docs/sessions/117-bootstrap-roadmap.md`](docs/sessions/117-bootstrap-roadmap.md)
 for the full path to self-hosting.

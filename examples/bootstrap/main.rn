@@ -1,0 +1,17 @@
+// Demo entry point for the Phase 2 bootstrap lexer (session 128).
+// Tokenizes a hard-coded snippet, returns the token count so the
+// caller can confirm the lexer ran end-to-end. A real bootstrap
+// `main.rn` would read from argv[1] / read_file and pretty-print
+// the token stream.
+//
+// Run: cargo run -- run examples/bootstrap/main.rn
+
+mod lexer;
+
+fn main() -> i64 {
+    let src: str = "let x = 1 + 2;";
+    // Expected tokens (8): Ident("let"), Ident("x"), Eq, Int(1),
+    // Plus, Int(2), Semi, Eof. The trailing Eof always lands.
+    let toks: Vec<lexer::Token> = lexer::tokenize(src);
+    toks.len()
+}
