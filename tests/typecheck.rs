@@ -751,6 +751,106 @@ fn div_by_nonzero_accepted() {
 }
 
 #[test]
+fn f32_literal_overflow_suffix_rejected() {
+    // Session 108: `3.4e40f32` exceeds f32::MAX (~3.4e38);
+    // would silently round to f32::INFINITY without the check.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 3.4e40f32;
+            x as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
+fn f32_literal_overflow_hinted_rejected() {
+    // The unsuffixed hinted-literal path is the more common
+    // shape: `let x: f32 = 3.4e40;` lexes as f64, hint pins
+    // to f32, range check catches the magnitude.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 3.4e40;
+            x as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
+fn f32_literal_negative_overflow_rejected() {
+    // Unary-neg-on-lit path: `-3.4e40` hinted to f32.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = -3.4e40;
+            x as i64
+        }
+        "#,
+        "is out of range for `f32`",
+    );
+}
+
+#[test]
+fn f64_literal_overflow_rejected() {
+    // `1e400` exceeds f64::MAX; lexer parses to f64::INFINITY.
+    // The check catches `v.is_finite() == false`.
+    check_has_error(
+        r#"
+        fn main() -> i64 {
+            let x: f64 = 1e400;
+            x as i64
+        }
+        "#,
+        "is out of range for `f64`",
+    );
+}
+
+#[test]
+fn f32_near_max_accepted() {
+    // Values within f32's normal range compile cleanly.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 3.0e38f32;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn f32_subnormal_accepted() {
+    // Tiny positive values round to f32 subnormals or zero —
+    // not an overflow. The check only rejects round-to-infinity.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f32 = 1.0e-40f32;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
+fn f64_normal_accepted() {
+    // f64 spans up to ~1.8e308 — `1e100` is well within range.
+    check_ok(
+        r#"
+        fn main() -> i64 {
+            let x: f64 = 1.0e100;
+            x as i64
+        }
+        "#,
+    );
+}
+
+#[test]
 fn hinted_literal_overflow_u8_rejected() {
     // Session 099: a bare literal hinted to u8 by a let-binding
     // annotation gets range-checked against u8's [0, 255].

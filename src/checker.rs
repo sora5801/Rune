@@ -2146,6 +2146,11 @@ impl<'r> Checker<'r> {
                 if let (Lit::Int(v, None), Ty::Int(it)) = (lit, &ty) {
                     self.check_int_value_in_range(*v, *it, false, *span);
                 }
+                // Session 108: float counterpart — `let x: f32 =
+                // 3.4e40;` errors before the f64-to-f32 lossy cast.
+                if let (Lit::Float(v, None), Ty::Float(ft)) = (lit, &ty) {
+                    self.check_float_value_in_range(*v, *ft, false, *span);
+                }
                 self.expr_types.insert(*span, ty.clone());
                 return ty;
             }
@@ -2165,6 +2170,11 @@ impl<'r> Checker<'r> {
                     // suffix-with-negation path.
                     if let (Lit::Int(v, None), Ty::Int(it)) = (lit, &ty) {
                         self.check_int_value_in_range(*v, *it, true, *lit_span);
+                    }
+                    // Session 108: negated float counterpart —
+                    // `let x: f32 = -3.4e40;` errors the same way.
+                    if let (Lit::Float(v, None), Ty::Float(ft)) = (lit, &ty) {
+                        self.check_float_value_in_range(*v, *ft, true, *lit_span);
                     }
                     self.expr_types.insert(*lit_span, ty.clone());
                     self.expr_types.insert(*span, ty.clone());
@@ -2886,12 +2896,66 @@ impl<'r> Checker<'r> {
     fn check_numeric_lit_in_range(&mut self, lit: &Lit, span: Span, negated: bool) {
         // Suffix-bearing literals only — bare literals get their
         // type from hint flow, which uses `check_int_value_in_range`
-        // directly via the hint paths (session 099).
-        let (v, ty) = match lit {
-            Lit::Int(v, Some(ty)) => (*v, *ty),
-            _ => return,
+        // / `check_float_value_in_range` directly via the hint paths
+        // (session 099 for ints; session 108 for floats).
+        match lit {
+            Lit::Int(v, Some(ty)) => {
+                self.check_int_value_in_range(*v, *ty, negated, span);
+            }
+            Lit::Float(v, Some(ty)) => {
+                self.check_float_value_in_range(*v, *ty, negated, span);
+            }
+            _ => {}
+        }
+    }
+
+    /// Session 108: range-check a float value against its target
+    /// `FloatTy`. `negated` is plumbed for parity with the integer
+    /// checker but is largely cosmetic for floats — IEEE-754 is
+    /// sign-magnitude, and the value already carries its sign in
+    /// the bits. We use it only for the diagnostic's leading `-`.
+    fn check_float_value_in_range(
+        &mut self,
+        v: f64,
+        ty: crate::ty::FloatTy,
+        negated: bool,
+        span: Span,
+    ) {
+        use crate::ty::FloatTy::*;
+        // The lexer parses any over-range f64 literal to
+        // f64::INFINITY (or NEG_INFINITY) via Rust's parse_f64.
+        // Catch that here so `let x: f64 = 1e400;` errors rather
+        // than silently producing inf.
+        let in_range = match ty {
+            F32 => {
+                // |v| > f32::MAX → won't round-trip; rounds to inf.
+                // NaN can't be a literal in source (no `nan` syntax),
+                // so we don't expect it here.
+                v.is_finite() && (v.abs() <= f32::MAX as f64)
+            }
+            F64 => v.is_finite(),
         };
-        self.check_int_value_in_range(v, ty, negated, span);
+        if !in_range {
+            let sign = if negated { "-" } else { "" };
+            // Render with the user's source form when possible:
+            // f64::INFINITY → "inf"; otherwise the f64 value.
+            let display = if v.is_infinite() {
+                "inf".to_string()
+            } else if v.is_nan() {
+                "NaN".to_string()
+            } else {
+                format!("{v}")
+            };
+            self.error(
+                span,
+                format!(
+                    "literal `{}{}` is out of range for `{}`",
+                    sign,
+                    display,
+                    ty.name(),
+                ),
+            );
+        }
     }
 
     /// Session 093: format a `Ty` for error messages, consulting
