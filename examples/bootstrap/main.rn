@@ -1,19 +1,18 @@
-// Demo entry point for the Phase 2 bootstrap lexer (session 132
-// = lexer feature-complete: comments + source spans on every
-// token). Tokenizes a snippet that includes a line comment, a
-// block comment, and the usual mix of literals / keywords.
+// Demo entry point exercising both the bootstrap lexer (sessions
+// 128-132) and the bootstrap parser (session 133). Parses an
+// arithmetic expression, evaluates the resulting AST, returns
+// the value.
 //
 // Run: cargo run -- run examples/bootstrap/main.rn
 
 mod lexer;
+mod parser;
 
 fn main() -> i64 {
-    // Note the embedded line comment and block comment — both
-    // should be skipped by the lexer.
-    let src: str = "// the var\nlet x: f64 = 3.14; /* tail */ let n = 42i32;";
-    // Tokens (comments skipped): Let Ident("x") Colon Ident("f64")
-    //   Eq Float(3.14, "") Semi Let Ident("n") Eq Int(42, "i32")
-    //   Semi Eof = 13
+    // (1 + 2 * 3) - (10 / 5) = 7 - 2 = 5
+    let src: str = "(1 + 2 * 3) - (10 / 5)";
     let toks: Vec<lexer::Spanned> = lexer::tokenize(src);
-    toks.len()
+    let p: parser::Parser = parser::new_parser(toks);
+    let ast: parser::Expr = parser::parse_expr(p);
+    parser::eval(ast)
 }

@@ -6283,6 +6283,200 @@ fn generic_vec_struct_loop_reclaims() {
     assert_eq!(run_main(src), 100000);
 }
 
+// ---- session 133: bootstrap parser ----
+
+/// Inlined parser.rn (session 133). Like BOOTSTRAP_LEXER_RN, this
+/// is the same code as `examples/bootstrap/parser.rn` so each
+/// test is a self-contained multi-file invocation.
+const BOOTSTRAP_PARSER_RN: &str = r#"
+pub enum BinOp { Add, Sub, Mul, Div, Mod }
+
+pub enum Expr {
+    Num(i64),
+    Ident(str),
+    Neg(Expr),
+    Binary { op: BinOp, lhs: Expr, rhs: Expr },
+}
+
+pub struct Parser {
+    tokens: Vec<lexer::Spanned>,
+    pos: i64,
+}
+
+pub fn new_parser(tokens: Vec<lexer::Spanned>) -> Parser {
+    Parser { tokens: tokens, pos: 0 }
+}
+
+fn peek(p: Parser) -> lexer::Token { p.tokens.get(p.pos).kind }
+fn advance(p: Parser) -> lexer::Spanned {
+    let t: lexer::Spanned = p.tokens.get(p.pos);
+    p.pos = p.pos + 1;
+    t
+}
+
+fn binop_bp(t: lexer::Token) -> i64 {
+    match t {
+        lexer::Token::Plus => 10,
+        lexer::Token::Minus => 10,
+        lexer::Token::Star => 20,
+        lexer::Token::Slash => 20,
+        lexer::Token::Percent => 20,
+        _ => 0,
+    }
+}
+fn binop_of(t: lexer::Token) -> BinOp {
+    match t {
+        lexer::Token::Plus => BinOp::Add,
+        lexer::Token::Minus => BinOp::Sub,
+        lexer::Token::Star => BinOp::Mul,
+        lexer::Token::Slash => BinOp::Div,
+        lexer::Token::Percent => BinOp::Mod,
+        _ => BinOp::Add,
+    }
+}
+
+pub fn parse_expr(p: Parser) -> Expr { parse_bp(p, 0) }
+
+fn parse_bp(p: Parser, min_bp: i64) -> Expr {
+    let lhs: Expr = parse_unary(p);
+    parse_binops(p, lhs, min_bp)
+}
+fn parse_binops(p: Parser, lhs: Expr, min_bp: i64) -> Expr {
+    let bp: i64 = binop_bp(peek(p));
+    if bp == 0 || bp <= min_bp { return lhs; }
+    let op_tok: lexer::Spanned = advance(p);
+    let op: BinOp = binop_of(op_tok.kind);
+    let rhs: Expr = parse_bp(p, bp);
+    let combined: Expr = Expr::Binary { op: op, lhs: lhs, rhs: rhs };
+    parse_binops(p, combined, min_bp)
+}
+fn parse_unary(p: Parser) -> Expr {
+    let t: lexer::Token = peek(p);
+    match t {
+        lexer::Token::Minus => {
+            advance(p);
+            let inner: Expr = parse_bp(p, 30);
+            Expr::Neg(inner)
+        }
+        _ => parse_atom(p),
+    }
+}
+fn parse_atom(p: Parser) -> Expr {
+    let s: lexer::Spanned = advance(p);
+    match s.kind {
+        lexer::Token::Int(v, _) => Expr::Num(v),
+        lexer::Token::Ident(name) => Expr::Ident(name),
+        lexer::Token::LParen => {
+            let inner: Expr = parse_expr(p);
+            let close: lexer::Token = peek(p);
+            match close {
+                lexer::Token::RParen => { advance(p); inner }
+                _ => inner,
+            }
+        }
+        _ => Expr::Num(-1),
+    }
+}
+
+pub fn eval(e: Expr) -> i64 {
+    match e {
+        Expr::Num(v) => v,
+        Expr::Ident(_) => 0,
+        Expr::Neg(inner) => 0 - eval(inner),
+        Expr::Binary { op, lhs, rhs } => {
+            let l: i64 = eval(lhs);
+            let r: i64 = eval(rhs);
+            match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                BinOp::Div => l / r,
+                BinOp::Mod => l % r,
+            }
+        }
+    }
+}
+"#;
+
+/// Helper: lex `src`, parse the resulting tokens, evaluate the
+/// AST, return the i64. Each test is a parse → eval round-trip
+/// that verifies the AST shape via its computed value.
+fn run_bootstrap_eval(src: &str) -> i64 {
+    let main = format!(
+        r#"
+        mod lexer;
+        mod parser;
+        fn main() -> i64 {{
+            let toks: Vec<lexer::Spanned> = lexer::tokenize("{src}");
+            let p: parser::Parser = parser::new_parser(toks);
+            let ast: parser::Expr = parser::parse_expr(p);
+            parser::eval(ast)
+        }}
+        "#
+    );
+    run_main_files(&[
+        ("main", &main),
+        ("lexer", BOOTSTRAP_LEXER_RN),
+        ("parser", BOOTSTRAP_PARSER_RN),
+    ])
+}
+
+#[test]
+fn rune_parser_atom_int() {
+    assert_eq!(run_bootstrap_eval("42"), 42);
+}
+
+#[test]
+fn rune_parser_atom_paren() {
+    assert_eq!(run_bootstrap_eval("(7)"), 7);
+}
+
+#[test]
+fn rune_parser_unary_neg() {
+    assert_eq!(run_bootstrap_eval("-5"), -5);
+}
+
+#[test]
+fn rune_parser_addition() {
+    assert_eq!(run_bootstrap_eval("1 + 2"), 3);
+}
+
+#[test]
+fn rune_parser_precedence_mul_over_add() {
+    // 1 + 2 * 3 = 1 + (2 * 3) = 7  (NOT (1+2)*3 = 9)
+    assert_eq!(run_bootstrap_eval("1 + 2 * 3"), 7);
+}
+
+#[test]
+fn rune_parser_left_associative_add() {
+    // 10 - 3 - 2 = (10 - 3) - 2 = 5  (NOT 10 - (3 - 2) = 9)
+    assert_eq!(run_bootstrap_eval("10 - 3 - 2"), 5);
+}
+
+#[test]
+fn rune_parser_parens_override_precedence() {
+    // (1 + 2) * 3 = 9
+    assert_eq!(run_bootstrap_eval("(1 + 2) * 3"), 9);
+}
+
+#[test]
+fn rune_parser_mixed_complex() {
+    // (1 + 2 * 3) - (10 / 5) = 7 - 2 = 5
+    assert_eq!(run_bootstrap_eval("(1 + 2 * 3) - (10 / 5)"), 5);
+}
+
+#[test]
+fn rune_parser_mod_op() {
+    // 17 % 5 = 2
+    assert_eq!(run_bootstrap_eval("17 % 5"), 2);
+}
+
+#[test]
+fn rune_parser_negation_of_paren() {
+    // -(2 + 3) = -5
+    assert_eq!(run_bootstrap_eval("-(2 + 3)"), -5);
+}
+
 // ---- session 128: first Rune-in-Rune lexer ----
 
 /// Shared lexer source — `examples/bootstrap/lexer.rn` inlined here

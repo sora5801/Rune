@@ -357,7 +357,11 @@ shipped, `let-else` expressible via match.
 - **Session 132**: Comments (`//` line, `/* */` block with
   nesting) + source spans on every token. **Lexer feature-
   complete** (~370 LOC of Rune in one file).
-- **Next**: Pratt-style parser construction.
+- **Session 133**: Parser begins — Pratt-style precedence for
+  arithmetic expressions (atom + unary + `+ - * / %`). Demo:
+  `(1 + 2 * 3) - (10 / 5)` parses + evaluates to 5.
+- **Next**: comparison / logical / call / field-access ops,
+  then control flow, then items.
 
 See `examples/bootstrap/lexer.rn`. Per session 117's plan:
 ~25 more sessions to a working Rune-in-Rune tree-walking
